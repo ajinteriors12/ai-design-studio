@@ -6078,6 +6078,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [adj, setAdj] = useState(null);        // #7 beam adjustments
       const [model, setModel] = useState(null);    // #3 RoomModel summary
       const [jobs, setJobs] = useState([]);
+      const [viewJob, setViewJob] = useState(null);   // #4: inline artifact viewer (render PNG / walkthrough GIF)
       const wallCount = (runs || []).length;
       const refreshJobs = React.useCallback(() => {
         if (!designId) return;
@@ -6134,14 +6135,23 @@ const frontendHTML = `<!DOCTYPE html>
                 <ul className="ml-2 space-y-0.5 max-h-32 overflow-auto">
                   {jobs.slice(0, 12).map((jb) => (
                     <li key={jb.id} className="flex items-center gap-2">
-                      <span className="text-slate-500">{jb.kind}</span>
+                      <span className="text-slate-500">{jb.kind === "walkthrough" ? "🎞 walkthrough" : "🖼 render"}</span>
                       <span className={"font-semibold " + st(jb.status)}>{jb.status}{jb.status === "running" ? " " + Math.round((jb.progress || 0) * 100) + "%" : ""}</span>
+                      {jb.status === "done" && <button onClick={() => setViewJob(viewJob === jb.id ? null : jb.id)} className="text-violet-600 hover:underline">{viewJob === jb.id ? "✕ hide" : "👁 view"}</button>}
                       {jb.status === "done" && <a href={"/api/render/jobs/" + jb.id + "/file"} download className="text-violet-600 underline">⬇ download</a>}
                       {jb.status === "error" && <span className="text-rose-500 truncate">{jb.error}</span>}
                     </li>
                   ))}
                 </ul>
               )}
+              {viewJob && (() => { const jb = jobs.find((x) => x.id === viewJob); if (!jb || jb.status !== "done") return null; return (
+                <div className="mt-2 rounded-lg border border-slate-300 bg-white p-2">
+                  <div className="flex items-center justify-between mb-1"><span className="font-semibold text-slate-600">{jb.kind === "walkthrough" ? "Walkthrough (animated GIF)" : "Photoreal render"} — {jb.id.slice(0, 8)}</span>
+                    <button onClick={() => setViewJob(null)} className="text-slate-400 hover:text-slate-600">✕ close</button></div>
+                  <img src={"/api/render/jobs/" + jb.id + "/file"} alt={jb.kind + " result"} className="w-full rounded border border-slate-200 bg-slate-50" style={{ maxHeight: 420, objectFit: "contain" }} />
+                  <div className="mt-1 text-right"><a href={"/api/render/jobs/" + jb.id + "/file"} download className="text-violet-600 underline">⬇ download {jb.kind === "walkthrough" ? "GIF" : "PNG"}</a></div>
+                </div>
+              ); })()}
             </div>
           </div>
         </details>
