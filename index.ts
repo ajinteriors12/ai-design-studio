@@ -6079,7 +6079,24 @@ const frontendHTML = `<!DOCTYPE html>
       const [model, setModel] = useState(null);    // #3 RoomModel summary
       const [jobs, setJobs] = useState([]);
       const [viewJob, setViewJob] = useState(null);   // #4: inline artifact viewer (render PNG / walkthrough GIF)
+      const [versions, setVersions] = useState([]);   // design version history (snapshot / restore)
+      const [vlabel, setVlabel] = useState("");
       const wallCount = (runs || []).length;
+      const refreshVersions = React.useCallback(() => {
+        if (!designId) return;
+        fetch("/api/designs/" + designId + "/versions").then((r) => r.json()).then((j) => setVersions(j.data || [])).catch(() => {});
+      }, [designId]);
+      React.useEffect(() => { refreshVersions(); }, [refreshVersions]);
+      const snapshot = async () => {
+        if (!designId) return; setBusy("snap");
+        try { await fetch("/api/designs/" + designId + "/version", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label: vlabel }) }); setVlabel(""); refreshVersions(); } catch (e) {}
+        setBusy("");
+      };
+      const restore = async (vid) => {
+        if (!designId) return; setBusy("restore-" + vid);
+        try { await fetch("/api/designs/" + designId + "/restore/" + vid, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }); refreshVersions(); } catch (e) {}
+        setBusy("");
+      };
       const refreshJobs = React.useCallback(() => {
         if (!designId) return;
         fetch("/api/render/jobs?design=" + designId).then((r) => r.json()).then((j) => setJobs(j.data || [])).catch(() => {});
@@ -6152,6 +6169,24 @@ const frontendHTML = `<!DOCTYPE html>
                   <div className="mt-1 text-right"><a href={"/api/render/jobs/" + jb.id + "/file"} download className="text-violet-600 underline">⬇ download {jb.kind === "walkthrough" ? "GIF" : "PNG"}</a></div>
                 </div>
               ); })()}
+            </div>
+            {/* version history — snapshot + restore (auto-snapshots before a restore) */}
+            <div>
+              <div className="flex flex-wrap items-center gap-2 mb-1"><span className="font-semibold text-slate-600">Version history ({versions.length}):</span>
+                <input value={vlabel} onChange={(e) => setVlabel(e.target.value)} placeholder="label (optional)" className="px-1.5 py-0.5 border border-slate-300 rounded w-40" />
+                <button disabled={busy === "snap"} onClick={snapshot} className="px-2 py-1 rounded font-semibold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-60">{busy === "snap" ? "Saving…" : "📸 Snapshot"}</button>
+              </div>
+              {versions.length === 0 ? <div className="text-slate-400 ml-2">No snapshots yet — save one before big edits so you can roll back.</div> : (
+                <ul className="ml-2 space-y-0.5 max-h-36 overflow-auto">
+                  {versions.map((v) => (
+                    <li key={v.id} className="flex items-center gap-2">
+                      <span className="text-slate-600 truncate" style={{ maxWidth: 220 }}>{v.label}</span>
+                      <span className="text-slate-400">{v.summary.runs}r · {v.summary.cabinets}cab · {v.summary.mfgPass}/{v.summary.mfgTotal}✓</span>
+                      <button disabled={busy === "restore-" + v.id} onClick={() => restore(v.id)} className="text-cyan-700 hover:underline disabled:opacity-60">{busy === "restore-" + v.id ? "restoring…" : "↩ restore"}</button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         </details>
@@ -7443,6 +7478,9 @@ sqlite.exec(`
     status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0,
     spec TEXT NOT NULL DEFAULT '{}', result TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS design_versions (
+    id TEXT PRIMARY KEY, design_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+    layout TEXT NOT NULL, created_at INTEGER NOT NULL);
 `);
 
 // ── #2 Realtime bus: Server-Sent Events fan-out keyed by designId (cross-client) ──
@@ -7876,6 +7914,41 @@ app.get("/api/render/jobs/:jid/file", (c) => {
   c.header("Content-Type", ext === "gif" ? "image/gif" : "image/png");
   c.header("Content-Disposition", `attachment; filename="${row.kind}-${c.req.param("jid").slice(0, 8)}.${ext}"`);
   return c.body(buf);
+});
+
+// ── Design version history — snapshot / list / restore (production "version history") ──
+function versionSummary(layout: any) {
+  const runs = layout.runs || [];
+  const cabs = runs.reduce((s: number, r: any) => s + (r.base || []).length + (r.wallCabs || []).length, 0);
+  const mfg = layout.mfgChecks || [];
+  return { runs: runs.length, cabinets: cabs, panels: (layout.cutList || []).length, mfgPass: mfg.filter((m: any) => m.ok).length, mfgTotal: mfg.length, handle: layout.handle, finish: layout.applianceBrand };
+}
+app.post("/api/designs/:id/version", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const vid = randomUUID();
+  const label = String(b.label || "").slice(0, 80) || ("Snapshot " + new Date(Date.now()).toISOString().slice(0, 19).replace("T", " "));
+  sqlite.prepare(`INSERT INTO design_versions(id,design_id,label,layout,created_at) VALUES(?,?,?,?,?)`).run(vid, id, label, JSON.stringify(d.layout), Date.now());
+  auditEdit(id, d.row.designType, "adjustment", `version snapshot — ${label}`);
+  broadcast(id, "version", { action: "snapshot", id: vid, label });
+  return c.json({ data: { ok: true, id: vid, label, summary: versionSummary(d.layout) } });
+});
+app.get("/api/designs/:id/versions", (c) => {
+  const rows = sqlite.prepare(`SELECT id,label,layout,created_at FROM design_versions WHERE design_id=? ORDER BY created_at DESC LIMIT 50`).all(c.req.param("id")) as any[];
+  return c.json({ data: rows.map((r) => ({ id: r.id, label: r.label, createdAt: r.created_at, summary: versionSummary(JSON.parse(r.layout)) })) });
+});
+app.post("/api/designs/:id/restore/:vid", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const row = sqlite.prepare(`SELECT label,layout FROM design_versions WHERE id=? AND design_id=?`).get(c.req.param("vid"), id) as any;
+  if (!row) return c.json({ error: "version not found" }, 404);
+  // auto-snapshot the current state before overwriting, so a restore is itself undoable.
+  sqlite.prepare(`INSERT INTO design_versions(id,design_id,label,layout,created_at) VALUES(?,?,?,?,?)`).run(randomUUID(), id, "Auto-save before restore", JSON.stringify(d.layout), Date.now());
+  const restored = JSON.parse(row.layout);
+  rederiveLayout(restored); saveLayout(id, restored);
+  auditEdit(id, d.row.designType, "adjustment", `restored version — ${row.label}`);
+  broadcast(id, "layout", { runs: restored.runs, by: null });
+  broadcast(id, "version", { action: "restore", label: row.label });
+  return c.json({ data: { ok: true, label: row.label, runs: restored.runs, mfgChecks: restored.mfgChecks } });
 });
 
 // =============================================================================
