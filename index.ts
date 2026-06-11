@@ -2258,6 +2258,21 @@ function renderRunElevation(run: RunLayout): string {
     }
     if (acc.length) parts.push(`<g pointer-events="none">${acc.join("")}</g>`);
   }
+  // §4.10 beam / structural obstruction band — a dashed soffit drawn across the elevation at the
+  // beam's vertical position, with the trimmed-unit count, when an obstruction was applied (#7).
+  {
+    const ob = (run as any)._obstruction;
+    if (ob && ob.sill != null) {
+      const drop = Number(ob.drop) || 300, sill = Number(ob.sill);
+      const yT = yOf(sill + drop), yB = yOf(sill), x0 = xOf(0), x1 = xOf(wall), bh = Math.max(4, yB - yT);
+      const trimmed = base.concat(wallCabs as any).filter((c: any) => c && c._beamCut).length;
+      parts.push(`<g pointer-events="none">`);
+      parts.push(`<rect x="${x0}" y="${yT}" width="${x1 - x0}" height="${bh}" fill="#f59e0b" fill-opacity="0.16" stroke="#b45309" stroke-width="1.1" stroke-dasharray="7 4"/>`);
+      for (let hx = x0 + 6; hx < x1 - 4; hx += 11) parts.push(`<line x1="${hx}" y1="${yT + 1}" x2="${hx + 5}" y2="${yB - 1}" stroke="#b45309" stroke-width="0.5" stroke-opacity="0.5"/>`);
+      parts.push(`<text x="${xOf(wall / 2)}" y="${yT - 3}" fill="#b45309" font-size="8" text-anchor="middle">${(ob.kind || "BEAM").toUpperCase()} ↓${Math.round(drop)} mm${trimmed ? " · " + trimmed + " unit" + (trimmed > 1 ? "s" : "") + " trimmed" : ""}</text>`);
+      parts.push(`</g>`);
+    }
+  }
   // Run title + overall width
   parts.push(`<text x="${xOf(wall / 2)}" y="${padT - 12}" fill="#1e3a5f" font-size="11" text-anchor="middle">${run.name} — Elevation — ${Math.round(wall)} mm</text>`);
   // hatch pattern for fillers
@@ -7545,6 +7560,8 @@ function applyObstruction(layout: any, ob: any) {
       const topMm = ceiling;                    // wall cabinets / tall units reach the wall-cabinet ceiling line
       if (topMm > beamBot) { cc._beamCut = Math.round(topMm - beamBot); adj.push(`${cc.label || cc.kind} in ${r.name} trimmed ${cc._beamCut} mm under the ${ob.kind || "beam"}`); }
     }
+    // stamp the band on the run so renderRunElevation draws the dashed soffit (#7 visible in the drawing)
+    (r as any)._obstruction = { kind: ob.kind || "beam", sill: beamBot, drop };
   }
   layout.obstructions = [...(layout.obstructions || []), { kind: ob.kind || "beam", wall: ob.wall ?? null, sill: beamBot, top: beamBot + drop, along: ob.along ?? null, width: ob.width ?? null }];
   return adj;
