@@ -39,7 +39,7 @@ try {
   if (hasMat) {
     await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => /Save finish \(PBR\)/.test(x.textContent || "")); if (b) b.click(); });
     let toast = "";
-    for (let i = 0; i < 12; i++) { await sleep(300); toast = await page.evaluate(() => { const m = document.body.innerText.match(/✓ [a-z-]+ · rough[^\n]*/i); return m ? m[0] : ""; }); if (toast) break; }
+    for (let i = 0; i < 12; i++) { await sleep(300); toast = await page.evaluate(() => { const m = document.body.innerText.match(/✓ applied [a-z-]+ · rough[^\n]*/i); return m ? m[0] : ""; }); if (toast) break; }
     ok("#5 PBR material saved (toast shows preset+params)", /rough/.test(toast), toast.slice(0, 60));
   }
   ok("no console errors after 3D interaction", errors.length === 0, errors.slice(0, 2).join(" | "));

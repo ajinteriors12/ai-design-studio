@@ -4730,6 +4730,23 @@ const frontendHTML = `<!DOCTYPE html>
       const visRef = React.useRef(visible !== false);
       const pendingRef = React.useRef(false), depsRef = React.useRef(null), bgTimerRef = React.useRef(null);
       const [buildVer, setBuildVer] = useState(0);
+      // §3.2 #5: a stored/synced PBR material set (server material library) overrides the front finish in the live scene.
+      const [serverPBR, setServerPBR] = useState(null);
+      const loadServerMaterial = React.useCallback(() => {
+        if (!designId) return;
+        fetch("/api/designs/" + designId + "/3d/materials").then((r) => r.json()).then((j) => {
+          const mats = (j && j.data) || [];
+          const front = mats.filter((m) => m.target === "kind:shutter" || m.target === "project").slice(-1)[0];
+          if (front && front.pbr) setServerPBR(front.pbr);
+        }).catch(() => {});
+      }, [designId]);
+      React.useEffect(() => { loadServerMaterial(); }, [loadServerMaterial]);
+      // cross-tab: the Generator SSE bus re-broadcasts material changes as a window event → re-skin here.
+      React.useEffect(() => {
+        const onMat = (e) => { const d = e.detail || {}; if (d.designId && d.designId !== designId) return; if (d.pbr && (d.target === "kind:shutter" || d.target === "project")) setServerPBR(d.pbr); else loadServerMaterial(); };
+        window.addEventListener("ads-material", onMat);
+        return () => window.removeEventListener("ads-material", onMat);
+      }, [designId, loadServerMaterial]);
       React.useEffect(() => {
         visRef.current = visible !== false;
         if (visible !== false) {
@@ -4740,7 +4757,7 @@ const frontendHTML = `<!DOCTYPE html>
       // dep WATCHER (runs every render): the build effect is keyed ONLY to buildVer, so while the 3D tab is
       // hidden a prop change does NOT tear down the live scene — it just queues a rebuild for show-time.
       React.useEffect(() => {
-        const want = [runs, type, FIN.key, lightKey, tile, renderMode, structures, handle];   // 18.pdf §4: handle-system change → regenerate handle geometry (old handles dropped with the rebuild)
+        const want = [runs, type, FIN.key, lightKey, tile, renderMode, structures, handle, serverPBR];   // 18.pdf §4: handle-system change → regenerate handle geometry; §3.2 #5: serverPBR re-skins fronts
         const cur = depsRef.current;
         if (!cur) { depsRef.current = want; return; }   // first render — the mount build covers it
         if (!want.some((v, ix) => v !== cur[ix])) return;
@@ -5018,7 +5035,8 @@ const frontendHTML = `<!DOCTYPE html>
         try {
           const j = await fetch("/api/designs/" + designId + "/3d/material", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target: "kind:shutter", finish: FIN.name, type: finType }) }).then((r) => r.json());
           const p = j && j.data && j.data.pbr;
-          setMatMsg(p ? ("✓ " + (p.preset || "PBR") + " · rough " + p.roughness + " · metal " + p.metalness) : "saved");
+          if (p) setServerPBR(p);   // §3.2 #5: re-skin the live 3D fronts from the stored PBR set immediately
+          setMatMsg(p ? ("✓ applied " + (p.preset || "PBR") + " · rough " + p.roughness + " · metal " + p.metalness) : "saved");
           setTimeout(() => setMatMsg(""), 4000);
         } catch (e) { setMatMsg("save failed"); setTimeout(() => setMatMsg(""), 4000); }
       };
@@ -5099,12 +5117,21 @@ const frontendHTML = `<!DOCTYPE html>
         })();
         // realistic mode: MeshPhysicalMaterial with CLEARCOAT — acrylic/PU read as true lacquered fronts;
         // laminate/veneer get a faint sheen. CAD mode keeps the plain standard material.
-        const matBody = (fin && fin.color != null)
+        // §3.2 #5: when a server/synced PBR material exists, it overrides the local finish params for the fronts.
+        const finM = serverPBR ? Object.assign({}, fin, {
+          color: serverPBR.albedo || fin.color,
+          roughness: serverPBR.roughness != null ? serverPBR.roughness : fin.roughness,
+          metalness: serverPBR.metalness != null ? serverPBR.metalness : fin.metalness,
+          smooth: serverPBR.clearcoat != null ? serverPBR.clearcoat >= 0.5 : fin.smooth,
+          _cc: serverPBR.clearcoat, _ccr: serverPBR.clearcoatRoughness, _env: serverPBR.envMapIntensity,
+          name: serverPBR.finish || fin.name,
+        }) : fin;
+        const matBody = (finM && finM.color != null)
           ? (REAL
-            ? new THREE.MeshPhysicalMaterial({ color: fin.color, map: bodyMap || undefined, roughness: fin.roughness, metalness: fin.metalness, envMapIntensity: (fin.env || 0.35) * 1.2, clearcoat: fin.smooth ? 1.0 : 0.3, clearcoatRoughness: fin.smooth ? 0.06 : 0.4 })
-            : new THREE.MeshStandardMaterial({ color: fin.color, map: bodyMap || undefined, roughness: fin.roughness, metalness: fin.metalness, envMapIntensity: fin.env || 0.35 }))
+            ? new THREE.MeshPhysicalMaterial({ color: finM.color, map: bodyMap || undefined, roughness: finM.roughness, metalness: finM.metalness, envMapIntensity: ((finM._env != null ? finM._env : finM.env) || 0.35) * 1.2, clearcoat: finM._cc != null ? finM._cc : (finM.smooth ? 1.0 : 0.3), clearcoatRoughness: finM._ccr != null ? finM._ccr : (finM.smooth ? 0.06 : 0.4) })
+            : new THREE.MeshStandardMaterial({ color: finM.color, map: bodyMap || undefined, roughness: finM.roughness, metalness: finM.metalness, envMapIntensity: (finM._env != null ? finM._env : finM.env) || 0.35 }))
           : null;
-        if (matBody) matBody.name = "Cabinet_" + fin.name.replace(/[^A-Za-z0-9]+/g, "_");
+        if (matBody) matBody.name = "Cabinet_" + String(finM.name || "finish").replace(/[^A-Za-z0-9]+/g, "_");
         const matGlass = new THREE.MeshStandardMaterial({ color: 0xaac6d2, transparent: true, opacity: 0.36, roughness: 0.08, metalness: 0.1, envMapIntensity: 1.0 }); matGlass.name = "Glass";
         const matCounter = new THREE.MeshStandardMaterial({ map: graniteTex, color: 0xffffff, roughness: 0.16, metalness: 0.2, envMapIntensity: 1.0 }); matCounter.name = "Countertop";   // polished black granite — glossy/reflective like the references
         const addBox = (pl, centerLen, wAlong, depth, h, yc, color, off, glass, body, meta, matName) => {
@@ -6363,6 +6390,10 @@ const frontendHTML = `<!DOCTYPE html>
             });
           } catch (x) { }
         }));
+        // §3.2 #5: relay material changes to the 3D scene (this tab + others) so fronts re-skin live.
+        es.addEventListener("material", (e) => {
+          try { const d = JSON.parse(e.data); window.dispatchEvent(new CustomEvent("ads-material", { detail: { designId: result.id, target: d.target, pbr: d.pbr } })); } catch (x) { }
+        });
         es.onerror = () => { };
         return () => { try { es.close(); } catch (x) { } setLive({ on: false, clients: 0 }); };
       }, [result && result.id]);
