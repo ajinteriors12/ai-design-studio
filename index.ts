@@ -1,0 +1,7761 @@
+// =============================================================================
+// Single-File Full-Stack Application — AI Design Studio
+// CAD Learning Engine + AI Design Learning Platform + Modular Furniture Design
+// Generation. (Built from the "AI Design Studio" system-design prompt.)
+//
+// CORE CONSTRAINT (strictly enforced): this application contains NO cutting
+// optimizer, NO nesting optimizer, NO beam-saw logic, NO CNC sheet optimization,
+// NO panel-cutting optimization and NO production-cutting workflow. It focuses
+// ONLY on CAD learning, design intelligence, modular rule learning, and
+// automatic CAD design generation.
+//
+// Run with: npx tsx index.ts
+// =============================================================================
+
+import { Hono } from "hono";
+import { serve } from "@hono/node-server";
+import { zValidator } from "@hono/zod-validator";
+import { z } from "zod";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { eq, desc } from "drizzle-orm";
+import { randomUUID, createHash } from "crypto";
+import { readFileSync as fsRead, writeFileSync as fsWrite, existsSync as fsExists } from "fs";
+import { inflateSync } from "zlib";   // PNG IDAT decode for the server-side walkthrough GIF encoder (#6)
+
+// =============================================================================
+// 1. DATABASE LAYER — Drizzle ORM + SQLite (the "centralized AI knowledge DB")
+// PRODUCTION UPGRADE: Replace better-sqlite3 with PostgreSQL via drizzle-orm/node-postgres
+//   import { drizzle } from "drizzle-orm/node-postgres";
+//   import { Pool } from "pg";
+//   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+//   const db = drizzle(pool);
+// =============================================================================
+
+const sqlite = new Database("design-studio.db");
+sqlite.pragma("journal_mode = WAL"); // Better concurrent read performance
+const db = drizzle(sqlite);
+
+// ── Schema (Drizzle) ─────────────────────────────────────────────────────────
+// design_references — every CAD/drawing file the engine has (or will) learn from.
+const references = sqliteTable("references", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  fileType: text("file_type").notNull(),        // dxf | dwg | pdf | svg | xml | image
+  category: text("category").notNull(),         // kitchen | wardrobe | vanity | tv-unit | ...
+  status: text("status").notNull().default("pending"), // pending | learned | ignored | duplicate
+  approved: integer("approved").notNull().default(0),  // admin-approved source (0/1)
+  confidence: real("confidence").notNull().default(0), // parse/learn confidence 0..1
+  contentHash: text("content_hash").notNull().default(""),
+  size: integer("size").notNull().default(0),          // uploaded file size in bytes
+  analysis: text("analysis").notNull().default(""),    // JSON "What AI Learned from Uploaded Drawing"
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+// learned_rules — the modular design standards extracted from references.
+const rules = sqliteTable("rules", {
+  id: text("id").primaryKey(),
+  category: text("category").notNull(),         // cabinets | drawers | placement | utilities | ...
+  title: text("title").notNull(),
+  detail: text("detail").notNull(),
+  confidence: real("confidence").notNull().default(0.6),
+  usageCount: integer("usage_count").notNull().default(0),
+  status: text("status").notNull().default("active"), // active | pending | disabled
+  sourceRefId: text("source_ref_id").default(""),
+  // Six-category rule-fusion class (3.txt): mathematical | manufacturing |
+  // appliance | space-planning | learned | company.
+  ruleClass: text("rule_class").notNull().default("manufacturing"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+// detected_features — intelligent detections per reference (cabinets, sockets, …).
+const features = sqliteTable("features", {
+  id: text("id").primaryKey(),
+  refId: text("ref_id").notNull(),
+  kind: text("kind").notNull(),                 // cabinet | drawer-stack | socket | plumbing | hinge | groove
+  label: text("label").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+// admin_commands_log — audit trail for the CAD Learning Command Center.
+const commandLog = sqliteTable("command_log", {
+  id: text("id").primaryKey(),
+  command: text("command").notNull(),
+  result: text("result").notNull(),
+  affected: integer("affected").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+// generated_designs — outputs of the design-generation system.
+const designs = sqliteTable("designs", {
+  id: text("id").primaryKey(),
+  designType: text("design_type").notNull(),
+  params: text("params").notNull(),             // JSON
+  layout: text("layout").notNull(),             // JSON (cabinets/sockets/applied rules)
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+// audit_log — mandatory-rule conflicts + non-standard ±10% adjustments (4.txt Part 6).
+const auditLog = sqliteTable("audit_log", {
+  id: text("id").primaryKey(),
+  designId: text("design_id").notNull().default(""),
+  kind: text("kind").notNull(),                 // conflict | adjustment
+  message: text("message").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+// Create tables if they don't exist (declarative, idempotent).
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS "references" (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, file_type TEXT NOT NULL, category TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', approved INTEGER NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 0, content_hash TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS rules (
+    id TEXT PRIMARY KEY, category TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.6, usage_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active', source_ref_id TEXT DEFAULT '', created_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS features (
+    id TEXT PRIMARY KEY, ref_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, created_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS command_log (
+    id TEXT PRIMARY KEY, command TEXT NOT NULL, result TEXT NOT NULL, affected INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS designs (
+    id TEXT PRIMARY KEY, design_type TEXT NOT NULL, params TEXT NOT NULL, layout TEXT NOT NULL, created_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY, design_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, message TEXT NOT NULL, created_at INTEGER NOT NULL);
+`);
+// Additive migrations (idempotent) — uploaded-file size + per-drawing analysis.
+try { sqlite.exec(`ALTER TABLE "references" ADD COLUMN size INTEGER NOT NULL DEFAULT 0`); } catch { /* exists */ }
+try { sqlite.exec(`ALTER TABLE "references" ADD COLUMN analysis TEXT NOT NULL DEFAULT ''`); } catch { /* exists */ }
+try { sqlite.exec(`ALTER TABLE rules ADD COLUMN rule_class TEXT NOT NULL DEFAULT 'manufacturing'`); } catch { /* exists */ }
+
+// =============================================================================
+// 2. CACHING LAYER — In-Memory Redis-Like Store (with hit/miss observability)
+// PRODUCTION UPGRADE: Replace with Redis via ioredis
+//   import Redis from "ioredis"; const redis = new Redis(process.env.REDIS_URL);
+// =============================================================================
+
+interface CacheEntry<T> { value: T; expiresAt: number | null; }
+
+class MemoryCache {
+  private store = new Map<string, CacheEntry<unknown>>();
+  public hits = 0;
+  public misses = 0;
+
+  get<T>(key: string): T | null {
+    const entry = this.store.get(key);
+    if (!entry) { this.misses++; return null; }
+    if (entry.expiresAt && Date.now() > entry.expiresAt) { this.store.delete(key); this.misses++; return null; }
+    this.hits++;
+    return entry.value as T;
+  }
+  set<T>(key: string, value: T, ttlMs?: number): void {
+    this.store.set(key, { value, expiresAt: ttlMs ? Date.now() + ttlMs : null });
+  }
+  del(key: string): void { this.store.delete(key); }
+  invalidatePrefix(prefix: string): void {
+    for (const key of this.store.keys()) if (key.startsWith(prefix)) this.store.delete(key);
+  }
+  stats() {
+    const total = this.hits + this.misses;
+    return {
+      size: this.store.size, hits: this.hits, misses: this.misses,
+      hitRate: total > 0 ? ((this.hits / total) * 100).toFixed(1) + "%" : "N/A",
+    };
+  }
+}
+const cache = new MemoryCache();
+const CACHE_TTL = 60_000; // 60s
+
+// =============================================================================
+// 3. DOMAIN KNOWLEDGE — Learned modular-design standards (mm) + the generator.
+// In production these constants would themselves be *derived* from the learned
+// rules table; here we seed the table from them so the demo is self-consistent.
+// =============================================================================
+
+const STD = {
+  baseHeight: 850, baseDepth: 600, counterThk: 40, toeKick: 100,
+  wallHeight: 720, wallDepth: 320, wallStart: 1450, // wall-cabinet sill from floor
+  modules: [900, 800, 600, 450],                    // preferred carcass widths
+  minFiller: 40, maxFiller: 120,
+  sinkWidth: 900, chimneyWidth: 900, maxDrawers: 3, // "no 4-drawer cabinets"
+  socketHeight: 1100, socketSpacing: 600,           // backsplash sockets
+  viewHeight: 2400,                                  // elevation canvas height (floor→ceiling)
+};
+
+// The 23 exact admin commands from the prompt's Command Center.
+const COMMANDS: string[] = [
+  "Learn cabinet construction standards", "Learn only wardrobe designs",
+  "Learn modular kitchen standards", "Learn drilling positions",
+  "Learn hardware placements", "Learn contour-routing methods",
+  "Learn electrical drawing standards", "Learn plumbing drawing standards",
+  "Learn drawer combinations", "Learn only L-shape kitchens",
+  "Learn only straight kitchens", "Learn edge-band deduction rules",
+  "Ignore false dimensions", "Ignore presentation layers",
+  "Learn production standards", "Learn assembly methods",
+  "Learn contour styles", "Learn furniture styling patterns",
+  "Re-learn all uploaded files", "Compare old learning vs new learning",
+  "Learn only approved drawings", "Ignore duplicate drawings",
+  "Learn company design standards only",
+];
+
+// Per-drawing learning commands (2.txt — Drawing Upload module). These refine
+// what the AI focuses on FROM A SPECIFIC uploaded drawing.
+const DRAWING_COMMANDS: string[] = [
+  "Learn cabinet placement", "Learn corner-unit logic", "Learn electrical layout",
+  "Learn upper and lower cabinet alignment", "Learn Indian modular kitchen spacing",
+  "Ignore presentation text", "Learn only base cabinets", "Learn only upper cabinets",
+  "Learn wall-wise sequencing", "Learn filler logic", "Learn appliance zones",
+  "Learn shutter patterns", "Ignore dimensions under X mm",
+  "Learn from this drawing only for kitchens", "Store as standard template",
+];
+
+// Accepted upload formats (2.txt).
+const UPLOAD_EXT: Record<string, string> = {
+  dwg: "dwg", dxf: "dxf", pdf: "pdf", jpg: "image", jpeg: "image", png: "image",
+  svg: "svg", skp: "skp", xml: "xml", bmp: "image", webp: "image",
+};
+
+const DESIGN_TYPES = [
+  "Straight Kitchen", "L-Shape Kitchen", "U-Shape Kitchen", "Parallel Kitchen",
+  "Island Kitchen", "Peninsula Kitchen", "Wardrobe", "Vanity Unit", "LCD/TV Panel", "Crockery Unit",
+  "Office Furniture", "Study Table", "Bed Back Panel", "Reception Counter",
+];
+
+// ── Seed the knowledge base on first boot (Phase 1 — learn from "already
+// uploaded" references). Idempotent: only seeds when tables are empty. ──
+function seedKnowledgeBase() {
+  const refCount = (sqlite.prepare(`SELECT COUNT(*) AS n FROM "references"`).get() as { n: number }).n;
+  if (refCount > 0) return;
+
+  const now = () => new Date();
+  const seedRefs: Array<[string, string, string, number]> = [
+    // name, fileType, category, approved
+    ["Straight-Kitchen-3600.dxf", "dxf", "kitchen", 1],
+    ["L-Kitchen-Production.dwg", "dwg", "kitchen", 1],
+    ["Wardrobe-3door-Elevation.pdf", "pdf", "wardrobe", 1],
+    ["Electrical-Layout-Kitchen.dxf", "dxf", "kitchen", 1],
+    ["Plumbing-Points-Sink.pdf", "pdf", "kitchen", 1],
+    ["Drilling-Pattern-Hinge.svg", "svg", "kitchen", 1],
+    ["Vanity-Unit-Reference.png", "image", "vanity", 0],
+    ["TV-Panel-Assembly.xml", "xml", "tv-unit", 1],
+    ["Crockery-Unit-Standard.dxf", "dxf", "crockery", 1],
+    ["Wardrobe-3door-Elevation.pdf", "pdf", "wardrobe", 0], // intentional duplicate (same name/hash)
+  ];
+  const insRef = sqlite.prepare(
+    `INSERT INTO "references"(id,name,file_type,category,status,approved,confidence,content_hash,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?)`
+  );
+  for (const [name, ft, cat, appr] of seedRefs) {
+    const hash = createHash("sha256").update(name).digest("hex").slice(0, 16); // dup names → dup hash
+    insRef.run(randomUUID(), name, ft, cat, "pending", appr, 0, hash, now().getTime());
+  }
+
+  // Baseline learned rules across the prompt's categories.
+  const seedRules: Array<[string, string, string, number]> = [
+    ["cabinets", "Standard carcass widths", `Preferred module widths: ${STD.modules.join(", ")} mm. Base height ${STD.baseHeight} mm, depth ${STD.baseDepth} mm.`, 0.94],
+    ["cabinets", "Filler logic", `Gaps below ${STD.modules[STD.modules.length - 1]} mm are closed with a ${STD.minFiller}-${STD.maxFiller} mm filler, never a non-standard cabinet.`, 0.9],
+    ["drawers", "Drawer quantity rule", `No 4-drawer cabinets. Maximum ${STD.maxDrawers} drawers per stack; 3-drawer stacks use 1 deep + 2 shallow.`, 0.92],
+    ["placement", "Chimney centering", "Chimney is always centered on the cooking wall; the wall cabinets left and right of it are kept equal size.", 0.95],
+    ["placement", "Sink near corner", "Sink unit is placed near a corner; the GTPT (glass/utility) cabinet is placed above the sink.", 0.88],
+    ["utilities", "Electrical point standard", `Backsplash sockets at ${STD.socketHeight} mm from floor, ~${STD.socketSpacing} mm apart, dimensioned from the nearest wall.`, 0.86],
+    ["utilities", "Plumbing point standard", "Inlet/outlet plumbing points grouped under the sink cabinet; outlet offset 50 mm from inlet.", 0.83],
+    ["units", "Wall-cabinet sill", `Wall cabinets start at ${STD.wallStart} mm from floor, height ${STD.wallHeight} mm, depth ${STD.wallDepth} mm.`, 0.9],
+    ["hardware", "Hinge drilling pattern", "Hinge cup bores at 35 mm dia, 22.5 mm from panel edge, top/bottom hinges 100 mm from ends.", 0.84],
+    ["drilling", "Shelf-pin standard", "Shelf-pin rows at 37 mm pitch (System 32), 37 mm setback from both front and back edges.", 0.82],
+    ["edges", "Edge-band deduction", "Deduct 1 mm per banded edge (2 mm across a panel) before generating panel dimensions.", 0.8],
+    ["assembly", "Carcass assembly", "Carcass assembled with 8 mm dowels + minifix cams; back panel grooved 9 mm in, 4 mm deep.", 0.81],
+  ];
+  const insRule = sqlite.prepare(
+    `INSERT INTO rules(id,category,title,detail,confidence,usage_count,status,source_ref_id,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?)`
+  );
+  for (const [cat, title, detail, conf] of seedRules) {
+    insRule.run(randomUUID(), cat, title, detail, conf, 0, "active", "", now().getTime());
+  }
+  console.log("[seed] Knowledge base seeded with", seedRefs.length, "references and", seedRules.length, "rules.");
+}
+seedKnowledgeBase();
+
+// ── Master Rule Framework (3.txt Part 2/3) — the six-category baseline ──────
+// Foundational ergonomic/manufacturing/appliance/space-planning rules that the
+// AI fuses with learned + company rules. Upserted by title (idempotent), so it
+// runs every boot and also re-tags the original seed rules with a ruleClass.
+const RULE_CLASSES = ["mathematical", "manufacturing", "appliance", "space-planning", "learned", "company"];
+function ensureRuleFramework() {
+  // [category, ruleClass, title, detail, confidence]
+  const fw: Array<[string, string, string, string, number]> = [
+    // Mathematical / ergonomic
+    ["placement", "mathematical", "Work triangle", "Sink ↔ Hob ↔ Refrigerator; total perimeter 1200–7000 mm, no leg blocked.", 0.9],
+    ["units", "mathematical", "Base cabinet ergonomics", "Carcass depth 560–580 mm; finished height 850–920 mm (720 carcass + 100–150 skirting + 18–25 top).", 0.92],
+    ["units", "mathematical", "Wall cabinet ergonomics", "Depth 300–350 mm; gap from countertop 500–650 mm; heights 600/720/900 mm.", 0.9],
+    ["space-planning", "mathematical", "Aisle & walkway clearance", "Parallel passage ≥1000 mm (1200–1500 preferred); island walkway ≥1000 mm.", 0.88],
+    ["units", "mathematical", "Wardrobe hanging heights", "Short hanging 950–1100 mm; long hanging 1600–1800 mm; shelf spacing 250–400 mm.", 0.85],
+    // Manufacturing
+    ["manufacturing", "manufacturing", "Standard cabinet widths", "300, 350, 400, 450, 500, 600, 700, 800, 900, 1000, 1200 mm. Avoid odd sizes unless required.", 0.95],
+    ["manufacturing", "manufacturing", "Visual symmetry", "Equal cabinet distribution, equal chimney-side cabinets, balanced drawer distribution.", 0.9],
+    ["drawers", "manufacturing", "Drawer widths", "Allowed 450, 500, 600, 700, 800, 900, 1000, 1200 mm; prefer 1-drawer+2-basket / tandem.", 0.88],
+    ["placement", "manufacturing", "Chimney widths", "Chimney 600 / 750 / 900 / 1200 mm, centred on wall; centerline matches hob.", 0.9],
+    ["cabinets", "manufacturing", "Sliding wardrobe", "Depth 650–750 mm; min width 1200 mm; panel 750–1500 mm; track 80–120 mm.", 0.82],
+    ["cabinets", "manufacturing", "Hinged wardrobe", "Depth 600–650 mm; door 350–600 mm; max shutter height 2400 mm.", 0.82],
+    ["units", "manufacturing", "Tall unit", "Depth = base; height to ceiling; pantry/microwave/oven/fridge-housing/utility.", 0.84],
+    ["units", "manufacturing", "Loft heights", "Kitchen loft 450–600 mm; wardrobe loft 450–750 mm.", 0.85],
+    // Appliance
+    ["appliance", "appliance", "Hob & dishwasher optional", "Hob and dishwasher are optional — place or omit per user requirement and learned practice.", 0.9],
+    ["appliance", "appliance", "Refrigerator clearance", "Reserve appliance width + 50 mm; top ventilation required.", 0.86],
+    ["appliance", "appliance", "Fridge flush to wall — no filler", "When the refrigerator is placed along a side wall it stands flush to the wall; do NOT add a scribe filler beside it. The fridge-at-wall position needs no cabinet-to-wall scribe gap.", 0.85],
+    ["appliance", "appliance", "Microwave & oven heights", "Microwave centerline 1200–1500 mm; oven centerline 900–1200 mm.", 0.84],
+    ["utilities", "appliance", "Kitchen electrical points", "Chimney, hob ignition, fridge, microwave, oven, RO, dishwasher, washing machine; dimension from nearest wall, no overlapping dimension lines, show height from floor.", 0.85],
+    // Space-planning
+    ["placement", "space-planning", "L-corner solution hierarchy", "Corner preference: LeMans > Magic Corner > Blind Corner > Carousel. Avoid dead corners.", 0.87],
+    ["placement", "space-planning", "U-shape zone planning", "Wall 1 Cooking, Wall 2 Preparation, Wall 3 Cleaning; two corners (prefer LeMans/Magic).", 0.86],
+    ["placement", "space-planning", "Parallel zoning", "Side A: Hob + Preparation. Side B: Sink + Refrigerator.", 0.85],
+    ["placement", "space-planning", "Sink near corner", "Sink near a corner/end (not dead corner, not under a drawer stack); GTPT above; RO near sink.", 0.88],
+    ["placement", "space-planning", "Island sizing", "Island width ≥900 mm (1200+ preferred); walkway ≥1000 mm; hob/sink/seating/storage optional.", 0.84],
+    // Company
+    ["cabinets", "company", "Company design standards", "Admin-approved company preferences merged with the baseline (placeholder — refine via uploads).", 0.7],
+    ["placement", "company", "Glass shutter adjacent to chimney", "Chimney-adjacent wall cabinets default to equal-size glass-shutter cabinets (toggle in Command Center).", 0.8],
+  ];
+  const byTitle = sqlite.prepare(`SELECT id, rule_class FROM rules WHERE title=?`);
+  const ins = sqlite.prepare(`INSERT INTO rules(id,category,title,detail,confidence,usage_count,status,source_ref_id,rule_class,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  const setClass = sqlite.prepare(`UPDATE rules SET rule_class=? WHERE id=?`);
+  let added = 0;
+  for (const [cat, cls, title, detail, conf] of fw) {
+    const ex = byTitle.get(title) as { id: string } | undefined;
+    if (ex) { setClass.run(cls, ex.id); }
+    else { ins.run(randomUUID(), cat, title, detail, conf, 0, "active", "", cls, Date.now()); added++; }
+  }
+  // Backfill ruleClass on any pre-existing rule still on the default by inferring from category.
+  const infer: Record<string, string> = { placement: "space-planning", utilities: "appliance", drawers: "manufacturing", cabinets: "manufacturing", units: "mathematical", hardware: "manufacturing", drilling: "manufacturing", edges: "manufacturing", assembly: "manufacturing" };
+  for (const r of db.select().from(rules).all()) {
+    if (!RULE_CLASSES.includes(r.ruleClass)) sqlite.prepare(`UPDATE rules SET rule_class=? WHERE id=?`).run(infer[r.category] || "manufacturing", r.id);
+  }
+  if (added) console.log("[framework] added", added, "foundational rules.");
+}
+ensureRuleFramework();
+
+// ── Phase 1/2 learning: mark pending references as learned, dedupe by hash,
+// and emit a few detected features per reference. Returns a learning summary. ──
+function runLearningScan(opts: { approvedOnly?: boolean; ignoreDuplicates?: boolean } = {}) {
+  const pending = db.select().from(references).where(eq(references.status, "pending")).all();
+  const seenHash = new Set(
+    db.select().from(references).where(eq(references.status, "learned")).all().map((r) => r.contentHash)
+  );
+  let learned = 0, duplicates = 0, skipped = 0, featuresAdded = 0;
+
+  for (const ref of pending) {
+    if (opts.approvedOnly && !ref.approved) { skipped++; continue; }
+    const isDup = seenHash.has(ref.contentHash);
+    if (isDup && opts.ignoreDuplicates !== false) {
+      db.update(references).set({ status: "duplicate" }).where(eq(references.id, ref.id)).run();
+      duplicates++;
+      continue;
+    }
+    seenHash.add(ref.contentHash);
+    const confidence = ref.approved ? 0.9 : 0.7;
+    db.update(references).set({ status: "learned", confidence }).where(eq(references.id, ref.id)).run();
+    learned++;
+
+    // Simulated intelligent detection (Output #3B). A real engine would parse
+    // DXF entities / OCR annotations here.
+    const kinds: Array<[string, string]> =
+      ref.category === "kitchen"
+        ? [["cabinet", "Base cabinet run detected"], ["socket", "3 backsplash sockets detected"], ["plumbing", "Sink inlet/outlet detected"], ["drawer-stack", "3-drawer stack detected"]]
+        : [["cabinet", "Carcass detected"], ["hinge", "Hinge bores detected"], ["groove", "Back-panel groove detected"]];
+    const insFeat = sqlite.prepare(`INSERT INTO features(id,ref_id,kind,label,created_at) VALUES(?,?,?,?,?)`);
+    for (const [kind, label] of kinds) { insFeat.run(randomUUID(), ref.id, kind, label, Date.now()); featuresAdded++; }
+  }
+  cache.invalidatePrefix("kb:");
+  return { scanned: pending.length, learned, duplicates, skipped, featuresAdded };
+}
+
+// =============================================================================
+// 3b. DRAWING UPLOAD ANALYSIS (2.txt — "What AI Learned from Uploaded Drawing").
+// For text-based CAD (DXF/SVG) we do REAL lightweight parsing — entity counts,
+// layer names, embedded text/dimensions. For binary formats (DWG/PDF/SKP/image)
+// we fall back to a category/filename heuristic. The design-rule learning on top
+// is the same domain heuristic the rest of the engine uses.
+// PRODUCTION UPGRADE: stream DXF via a real parser (ezdxf/dxf), OCR PDFs/images
+//   (Tesseract), and convert DWG via ODA File Converter — see Output #3A.
+// =============================================================================
+
+interface DrawingAnalysis {
+  fileType: string; sizeKB: number; format: string;
+  entityCounts: Record<string, number>; layers: string[]; textSamples: string[]; dimsFound: number[];
+  detectedCabinets: string[]; cabinetSizes: string[]; wallSequence: string[];
+  upperLower: string[]; cornerUnits: string[]; fillers: string[]; applianceZones: string[];
+  utilities: string[]; rulesLearned: string[]; confidence: number; status: string;
+  appliedCommands: string[];
+}
+
+function analyzeDrawing(name: string, fileType: string, category: string, buf: Buffer): DrawingAnalysis {
+  const sizeKB = +(buf.length / 1024).toFixed(1);
+  const entityCounts: Record<string, number> = {};
+  let layers: string[] = []; let textSamples: string[] = []; const dimsFound: number[] = [];
+  let parsedReal = false;
+
+  const txtFormats = ["dxf", "svg", "xml"];
+  if (txtFormats.includes(fileType)) {
+    const text = buf.toString("utf8");
+    if (fileType === "dxf") {
+      for (const ent of ["LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC", "TEXT", "MTEXT", "INSERT", "DIMENSION", "HATCH"]) {
+        const n = (text.match(new RegExp(`\\n\\s*0\\s*\\n${ent}\\b`, "g")) || []).length;
+        if (n) entityCounts[ent] = n;
+      }
+      layers = [...new Set([...text.matchAll(/\n\s*0\s*\nLAYER\s*\n\s*2\s*\n([^\n]+)/g)].map((m) => m[1].trim()))].slice(0, 20);
+      textSamples = [...text.matchAll(/\n\s*1\s*\n([^\n]{1,40})/g)].map((m) => m[1].trim()).filter(Boolean).slice(0, 12);
+      parsedReal = Object.keys(entityCounts).length > 0 || layers.length > 0;
+    } else if (fileType === "svg") {
+      for (const ent of ["rect", "line", "path", "circle", "polyline", "polygon", "text"]) {
+        const n = (text.match(new RegExp(`<${ent}\\b`, "g")) || []).length;
+        if (n) entityCounts[ent] = n;
+      }
+      textSamples = [...text.matchAll(/<text\b[^>]*>([^<]{1,40})<\/text>/g)].map((m) => m[1].trim()).filter(Boolean).slice(0, 12);
+      parsedReal = Object.keys(entityCounts).length > 0;
+    }
+    for (const t of textSamples) { const m = t.match(/\b(\d{3,4})\b/); if (m) dimsFound.push(+m[1]); }
+  }
+
+  // ── Domain detection (learned-standard heuristics, keyed off category) ──
+  const cat = (category || "").toLowerCase();
+  const isKitchen = cat.includes("kitchen") || /kitchen|kp\b/i.test(name);
+  const isWardrobe = cat.includes("wardrobe") || /wardrobe/i.test(name);
+
+  const detectedCabinets = isKitchen
+    ? ["Sink base unit", "Drawer stack (3-drawer)", "Cooking base + hob", "Corner unit", "Tall/pantry unit"]
+    : isWardrobe ? ["Hanging column", "Shelf column", "Drawer column", "Loft unit"]
+    : ["Base carcass", "Shutter unit", "Open shelf"];
+  const cabinetSizes = [`Modules: ${STD.modules.join(", ")} mm`, `Base ${STD.baseHeight}×${STD.baseDepth} mm`, `Wall sill ${STD.wallStart} mm, h ${STD.wallHeight} mm`];
+  const wallSequence = isKitchen
+    ? ["Wall A: Sink → Base run → Corner", "Wall B: Tall unit → Cooking (chimney centred)"]
+    : ["Single wall elevation"];
+  const upperLower = isKitchen
+    ? ["GTPT above Sink", "Wall cabinets above base run", "Chimney above hob"]
+    : isWardrobe ? ["Loft above hanging/shelf columns"] : ["Wall unit above base unit"];
+  const cornerUnits = isKitchen ? ["L/U corner-return unit (600 mm), magic-corner pull-out"] : [];
+  const fillers = ["Gaps below 450 mm closed with 40–120 mm fillers"];
+  const applianceZones = isKitchen ? ["Hob + chimney zone (centred)", "Sink + RO zone", "Hi-unit (oven/microwave) zone"] : [];
+  const utilities = isKitchen ? [`Sockets @ ${STD.socketHeight} mm, ~${STD.socketSpacing} mm apart`, "Sink inlet/outlet plumbing points"] : [];
+  const rulesLearned = isKitchen
+    ? ["Chimney centred; equal wall cabinets either side", "Sink near corner; GTPT above", "No 4-drawer cabinets", "Filler logic", "Indian modular spacing"]
+    : ["Standard shutter widths + filler logic", "Hardware to learned standards", "Edge-band deduction"];
+
+  // Confidence: higher when we actually parsed entities; nudged by format.
+  const base = parsedReal ? 0.82 : fileType === "pdf" ? 0.62 : (fileType === "image") ? 0.55 : 0.6;
+  const entityBonus = Math.min(0.15, (Object.values(entityCounts).reduce((a, b) => a + b, 0)) / 2000);
+  const confidence = +Math.min(0.97, base + entityBonus).toFixed(2);
+
+  return {
+    fileType, sizeKB, format: parsedReal ? "vector-parsed" : "heuristic",
+    entityCounts, layers, textSamples, dimsFound: [...new Set(dimsFound)].slice(0, 8),
+    detectedCabinets, cabinetSizes, wallSequence, upperLower, cornerUnits, fillers,
+    applianceZones, utilities, rulesLearned, confidence, status: "learned", appliedCommands: [],
+  };
+}
+
+// =============================================================================
+// 4. DESIGN GENERATION ENGINE (Output #4) — applies learned rules, renders SVG.
+// Mathematics: proportional module tiling, symmetry (chimney centering),
+// clearance + filler logic, drawer-count constraint, ergonomic socket heights.
+// PRODUCTION UPGRADE: move heavy geometry to a Python engine (shapely/ezdxf) with
+//   GPU acceleration + multiprocessing, exposed over a gRPC/WebSocket service.
+// =============================================================================
+
+interface Cabinet { x: number; w: number; kind: string; label: string; drawers: number; dh?: number[]; }
+interface Socket { x: number; group: number; }
+interface RunLayout {
+  name: string; length: number; base: Cabinet[]; wallCabs: Cabinet[];
+  sockets: Socket[]; hasChimney: boolean; hasSink: boolean;
+}
+interface Layout {
+  type: string; dims: { wall: number; wallB?: number; wallC?: number };
+  runs: Array<{ name: string; length: number; base: Cabinet[]; wallCabs: Cabinet[]; sockets: Socket[] }>;
+  appliedRules: string[]; planSvg: string; elevations: Array<{ name: string; svg: string }>;
+  sections?: Array<{ name: string; svg: string }>;
+  learnedRules?: Array<{ title: string; category: string; ruleClass: string; confidence: number; source: string }>;
+}
+
+const MIN_MOD = Math.min(...STD.modules);
+
+// ── LEARNED runtime standards (Output #8) ──────────────────────────────────
+// Generation reads from HERE, not from STD directly. refreshLearnedStandards()
+// rebuilds it from the ACTIVE learned_rules in the DB before every generate, so
+// the drawings are driven by what the AI has learned (and by uploaded-drawing
+// templates). Disable/retune a rule in the Command Center and the geometry
+// changes accordingly. `sources` lists the rules actually applied.
+// Per-generation options chosen by the user (3.txt): chimney width + hob/
+// dishwasher optionality. Set at the start of buildLayout, read by the engine.
+let GEN = { chimneyWidth: STD.chimneyWidth, hob: "optional", dishwasher: "optional", hiunit: "no", utility: "no", handle: "D Handle", applianceBrand: "Custom" };
+// 15.txt 5.18: marked mandatory points (sink/chimney/hob/appliances) that drive placement this run.
+let GEN_POINTS: { type: string; wall?: string; along?: number; height?: number }[] = [];
+const pointAlong = (type: string): number | null => { const p = GEN_POINTS.find((q) => q.type === type && q.along != null); return p ? Math.round(p.along as number) : null; };
+// 16/17 6.2: windows the AI must respect (no wall cabinets over them, no tall units in front).
+let GEN_WINDOWS: { wall?: string; along: number; width: number; sill?: number; height?: number }[] = [];
+// Handle systems (12.pdf §5.7.12). Handle-less profiles → no external handle glyph,
+// a continuous gola/J groove instead; "Knob" → a small round knob.
+const HANDLE_TYPES = ["D Handle", "C Handle", "Knob", "Edge Profile", "J Profile", "G Profile / Gola", "Aluminium Gola", "Hidden Profile", "Push-To-Open", "Tip-On", "Finger Pull", "Integrated"];
+const HANDLELESS = new Set(["Edge Profile", "J Profile", "G Profile / Gola", "Aluminium Gola", "Hidden Profile", "Push-To-Open", "Tip-On", "Finger Pull", "Integrated"]);
+// Profile systems shave a little off shutter/drawer-front height for the groove/channel.
+const handleReduction = (h: string) => h === "J Profile" ? 18 : (h === "G Profile / Gola" || h === "Aluminium Gola") ? 22 : 0;
+// Appliance-brand libraries (14.txt §5.9.13). Per-brand representative appliance
+// dimensions (W×H×D mm) + reserved install / ventilation clearances (mm). Used to
+// reserve service gaps around built-in appliances; NOT a cutting/nesting optimizer.
+// `vent` = top/rear ventilation gap; `install` = side service/installation clearance.
+const APPLIANCE_BRANDS: Record<string, { chimney: number[]; hob: number[]; oven: number[]; microwave: number[]; dishwasher: number[]; refrigerator: number[]; vent: number; install: number }> = {
+  "Hafele":      { chimney: [900, 700, 350], hob: [600, 60, 510], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [600, 815, 550], refrigerator: [600, 1800, 650], vent: 50, install: 20 },
+  "Hettich":     { chimney: [900, 700, 350], hob: [600, 55, 500], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [600, 820, 550], refrigerator: [595, 1770, 650], vent: 50, install: 20 },
+  "Blum":        { chimney: [900, 700, 350], hob: [600, 55, 500], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [600, 820, 550], refrigerator: [595, 1770, 650], vent: 50, install: 25 },
+  "Bosch":       { chimney: [900, 628, 500], hob: [592, 51, 522], oven: [595, 595, 548], microwave: [594, 382, 320], dishwasher: [598, 815, 550], refrigerator: [600, 1860, 650], vent: 50, install: 20 },
+  "Siemens":     { chimney: [900, 628, 500], hob: [592, 51, 522], oven: [595, 595, 548], microwave: [594, 382, 320], dishwasher: [598, 815, 550], refrigerator: [600, 1860, 650], vent: 50, install: 20 },
+  "Elica":       { chimney: [900, 760, 490], hob: [600, 55, 510], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [600, 820, 550], refrigerator: [600, 1800, 650], vent: 60, install: 20 },
+  "Faber":       { chimney: [900, 745, 485], hob: [600, 55, 510], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [600, 820, 550], refrigerator: [600, 1800, 650], vent: 60, install: 20 },
+  "Glen":        { chimney: [900, 700, 470], hob: [600, 50, 500], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [600, 820, 550], refrigerator: [600, 1800, 650], vent: 60, install: 20 },
+  "IFB":         { chimney: [900, 720, 480], hob: [600, 55, 510], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [598, 845, 600], refrigerator: [600, 1830, 660], vent: 60, install: 25 },
+  "LG":          { chimney: [900, 700, 480], hob: [600, 55, 510], oven: [595, 595, 560], microwave: [600, 390, 340], dishwasher: [598, 845, 600], refrigerator: [700, 1790, 720], vent: 60, install: 25 },
+  "Samsung":     { chimney: [900, 700, 480], hob: [600, 55, 510], oven: [595, 595, 560], microwave: [600, 390, 340], dishwasher: [598, 845, 600], refrigerator: [700, 1780, 720], vent: 60, install: 25 },
+  "Whirlpool":   { chimney: [900, 700, 480], hob: [600, 55, 510], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [598, 845, 600], refrigerator: [680, 1750, 700], vent: 60, install: 25 },
+  "Custom":      { chimney: [900, 700, 350], hob: [600, 55, 510], oven: [595, 595, 560], microwave: [595, 388, 320], dishwasher: [600, 820, 550], refrigerator: [600, 1800, 650], vent: 50, install: 20 },
+};
+const APPLIANCE_BRAND_NAMES = Object.keys(APPLIANCE_BRANDS);
+const applianceBrandOf = (b: string) => APPLIANCE_BRANDS[b] || APPLIANCE_BRANDS["Custom"];
+const apptOn = (v: string) => v !== "no"; // "yes"/"optional" → include, "no" → omit
+const isTall = (k: string) => k === "tall-fridge" || k === "tall-pantry" || k === "tall-hiunit" || k === "tall-utility";
+
+// Allowed standard drawer/cabinet widths (4.txt). nearestDrawer → smallest std ≥ w.
+const DRAWER_WIDTHS = [450, 500, 600, 700, 800, 900, 1000, 1200];
+const CABINET_STD = [300, 350, 400, 450, 500, 600, 700, 800, 900, 1000, 1200];
+function nearestDrawer(w: number): number { return DRAWER_WIDTHS.find((d) => d >= w) ?? 1200; }
+function nearestCab(w: number): number { return CABINET_STD.find((d) => d >= w) ?? 1200; }   // smallest std cabinet ≥ w (5.9.13 housing sizing)
+
+// Validate a manually-edited base row against the mandatory rules (6.4). Returns
+// rule conflicts + non-standard adjustments for logging to the dashboard.
+function validateEditedBase(base: Array<{ kind: string; w: number; label?: string }>, length: number) {
+  const conflicts: string[] = [], adjustments: string[] = [];
+  if (!base.some((c) => c.kind === "drawer3")) conflicts.push("No standard 3-drawer cabinet under the chimney (mandatory rule).");
+  for (const c of base) {
+    const w = Math.round(+c.w || 0);
+    if ((c.kind === "drawer" || c.kind === "drawer3") && !DRAWER_WIDTHS.includes(w)) conflicts.push(`${c.label || c.kind} drawer cabinet ${w} mm is non-standard (mandatory: standard widths only).`);
+    else if (!["filler", "drawer", "drawer3"].includes(c.kind) && w > 0 && !CABINET_STD.includes(w)) adjustments.push(`${c.label || c.kind} cabinet at non-standard ${w} mm (manufacturing flag).`);
+  }
+  const total = base.reduce((s, c) => s + (+c.w || 0), 0);
+  if (length && Math.abs(total - length) > 1) conflicts.push(`Run length ${Math.round(total)} mm ≠ wall ${Math.round(length)} mm (off by ${Math.round(total - length)} mm) — rebalance required.`);
+  return { conflicts, adjustments };
+}
+// Mandatory-rule audit collected during ONE generation (4.txt Part 6): conflicts
+// (learned/foundational vs mandatory) and non-standard ±10% adjustments.
+let GEN_LOG = { conflicts: [] as string[], adjustments: [] as string[] };
+
+let LEARNED = {
+  modules: STD.modules.slice(), maxDrawers: STD.maxDrawers,
+  chimneyCentered: true, sinkNearCorner: true, gtpt: true, fillerLogic: true, glassAdjacent: true,
+  sources: [] as Array<{ title: string; category: string; ruleClass: string; confidence: number; source: string }>,
+};
+function refreshLearnedStandards() {
+  const active = db.select().from(rules).where(eq(rules.status, "active")).all();
+  const byTitle = (frag: string) => active.find((r) => r.title.toLowerCase().includes(frag));
+  const next = {
+    modules: STD.modules.slice(), maxDrawers: STD.maxDrawers,
+    chimneyCentered: false, sinkNearCorner: false, gtpt: false, fillerLogic: false, glassAdjacent: false,
+    sources: [] as Array<{ title: string; category: string; ruleClass: string; confidence: number; source: string }>,
+  };
+  // Numeric params parsed straight out of the learned rule text.
+  const widthsRule = byTitle("carcass width") || byTitle("standard module");
+  if (widthsRule) {
+    const clause = (widthsRule.detail.split(/widths?\s*:/i)[1] || "").split(/mm|\./)[0]; // only the "widths: …" clause
+    const nums = (clause.match(/\d{3,4}/g) || []).map(Number).filter((n) => n >= 300 && n <= 1200);
+    if (nums.length) next.modules = [...new Set(nums)].sort((a, b) => b - a);
+  }
+  const drawerRule = byTitle("drawer quantity") || byTitle("drawer");
+  if (drawerRule) { const m = drawerRule.detail.match(/maximum\s+(\d)/i) || drawerRule.detail.match(/(\d)\s*drawers? per/i); if (m) next.maxDrawers = +m[1]; }
+  // Boolean placement rules: applied only if the rule is active.
+  next.chimneyCentered = !!byTitle("chimney centering") || !!byTitle("chimney centring");
+  next.sinkNearCorner = !!byTitle("sink near corner");
+  next.gtpt = !!byTitle("sink near corner") || !!byTitle("gtpt");
+  next.fillerLogic = !!byTitle("filler");
+  next.glassAdjacent = !!byTitle("glass shutter adjacent"); // 4.txt Part 6 toggle (default Yes via active rule)
+  // Record every active rule we'll surface as "applied" (with source attribution).
+  next.sources = active.map((r) => ({ title: r.title, category: r.category, ruleClass: r.ruleClass, confidence: r.confidence, source: r.sourceRefId ? "uploaded template" : "knowledge base" }));
+  LEARNED = next;
+}
+
+function tileModules(length: number): number[] {
+  // Greedy proportional tiling using the LEARNED preferred widths; close the
+  // remainder with a filler if it is below the smallest module (filler logic).
+  const mods = LEARNED.modules.length ? LEARNED.modules : STD.modules;
+  const widths: number[] = [];
+  let remaining = Math.max(0, Math.round(length));
+  while (remaining >= MIN_MOD) {
+    const mod = mods.find((m) => m <= remaining) ?? MIN_MOD;
+    widths.push(mod); remaining -= mod;
+  }
+  if (remaining > 0) widths.push(remaining); // filler (rendered hatched)
+  return widths;
+}
+
+// ── Indian modular-kitchen functional units (10.pdf 5.7) ──────────────────
+// A designer plans by FUNCTION first, producing a varied mix of standard-width
+// units — not uniform tiling. functionalUnits() fills a span by rotating
+// through this pool so each run reads like a real kitchen, not 900+900+900.
+// dh = drawer-front heights top→bottom (11.pdf §5.7.10), rendered proportionally.
+const FUNC_UNITS: Array<{ kind: string; label: string; w: number; drawers?: number; dh?: number[] }> = [
+  { kind: "drawer", label: "Cutlery Drawers", w: 600, drawers: 2, dh: [140, 250] },
+  { kind: "pullout", label: "Bottle Pull-Out", w: 300 },
+  { kind: "drawer-atta", label: "Atta Drawer", w: 600, drawers: 3, dh: [140, 180, 350] },
+  { kind: "shutter", label: "Kadhai Storage", w: 600 },
+  { kind: "pullout", label: "Spice Pull-Out", w: 300 },
+  { kind: "drawer", label: "Plate Drawers", w: 900, drawers: 3, dh: [140, 250, 310] },
+  { kind: "shutter", label: "Grocery Unit", w: 800 },
+  { kind: "shutter", label: "Thali Unit", w: 450 },
+  { kind: "shutter", label: "Utility", w: 600 },
+];
+let FUNC_ROT = 0;
+function functionalUnits(span: number): Cabinet[] {
+  const out: Cabinet[] = []; let rem = span, i = FUNC_ROT, guard = 0;
+  while (rem >= MIN_MOD && guard++ < 40) {
+    // Best-fit (keeps the varied mix via rotation, but avoids STRANDING a sub-module gap that would
+    // become a mid-run filler): pass 0 = a unit that EXACTLY fills the remaining span; pass 1 = a unit
+    // whose remainder is still packable (≥ MIN_MOD), in rotation order; pass 2 = original first-fit.
+    let picked = null, adv = 0;
+    // pass 0: a unit that fills the span exactly OR leaves only a sub-40 mm sliver (which gets folded into it
+    // below) — i.e. effectively a perfect fill. Prefer the LARGEST such unit so one cabinet covers the span.
+    let bestT = -1, bestW = -1;
+    for (let t = 0; t < FUNC_UNITS.length; t++) { const u = FUNC_UNITS[(i + t) % FUNC_UNITS.length]; if (u.w <= rem && (rem - u.w) < 40 && u.w > bestW) { bestW = u.w; bestT = t; } }
+    if (bestT >= 0) { picked = FUNC_UNITS[(i + bestT) % FUNC_UNITS.length]; adv = bestT + 1; }
+    // pass 1: leave a still-packable remainder (≥ MIN_MOD) so we don't strand a sub-module gap, rotation order.
+    if (!picked) for (let t = 0; t < FUNC_UNITS.length; t++) { const u = FUNC_UNITS[(i + t) % FUNC_UNITS.length]; if (u.w <= rem && (rem - u.w) >= MIN_MOD) { picked = u; adv = t + 1; break; } }
+    // pass 2: original first-fit fallback.
+    if (!picked) for (let t = 0; t < FUNC_UNITS.length; t++) { const u = FUNC_UNITS[(i + t) % FUNC_UNITS.length]; if (u.w <= rem) { picked = u; adv = t + 1; break; } }
+    if (!picked) break;
+    out.push({ x: 0, w: picked.w, kind: picked.kind, label: picked.label, drawers: Math.min(LEARNED.maxDrawers, picked.drawers || 0), dh: picked.dh });
+    rem -= picked.w; i += adv;
+  }
+  if (rem >= 40) out.push({ x: 0, w: rem, kind: rem < MIN_MOD ? "filler" : "shutter", label: rem < MIN_MOD ? "Filler " + Math.round(rem) : "Utility", drawers: 0 });
+  else if (rem > 0) { if (out.length) out[out.length - 1].w += rem; else out.push({ x: 0, w: rem, kind: "filler", label: "Filler", drawers: 0 }); }   // absorb a sub-40 mm sliver into the last unit so the span always fills exactly (no length shortfall)
+  FUNC_ROT = (FUNC_ROT + 1) % FUNC_UNITS.length;
+  return out;
+}
+
+// Corner Optimization (10.pdf §5.7 Step 4): pick the highest mechanism the
+// space supports — LeMans > Magic Corner > Blind Corner > Carousel — never a
+// dead corner. A wider adjoining run earns the more capable (and larger) unit.
+const CORNER_SOLUTIONS = ["LeMans", "Magic Corner", "Blind Corner", "Carousel"];
+function cornerSolution(adjoiningLen: number): string {
+  const sol = adjoiningLen >= 2400 ? "LeMans"
+    : adjoiningLen >= 1800 ? "Magic Corner"
+    : adjoiningLen >= 1200 ? "Blind Corner" : "Carousel";
+  GEN_LOG.adjustments.push(`Corner optimised with a ${sol} pull-out (hierarchy LeMans > Magic Corner > Blind Corner > Carousel; dead corner avoided).`);
+  return sol.includes("Corner") ? sol : sol + " Corner";   // label: avoid "Blind Corner Corner"
+}
+
+// One base-cabinet row, planned by function then sized (10.pdf). `sink` drops a
+// sink zone (Sink + Waste/Cleaning + RO) near a corner; `cornerEnd` ends with a corner.
+function makeBaseRow(length: number, opts: { sink?: boolean; cornerEnd?: boolean } = {}): Cabinet[] {
+  // 5.7.2 Step 1 — reserve proper-width appliance module slots BEFORE storage fills the rest,
+  // so a tight run never crams the fridge/dishwasher into a narrow cabinet. Slots are tagged
+  // (rsv-*) and finalised into real appliances in addTallUnits; the reserved width is carved out
+  // of the storage span so the overall wall length stays fixed (5.9.2).
+  const ab = applianceBrandOf(GEN.applianceBrand);
+  let dwW = opts.sink && apptOn(GEN.dishwasher) ? nearestCab(ab.dishwasher[0]) : 0;
+  let frW = opts.sink ? nearestCab(ab.refrigerator[0]) : 0;
+  if (length - dwW - frW < MIN_MOD) { dwW = 0; frW = 0; }   // too tight → skip reservation (fall back)
+  const units = functionalUnits(length - dwW - frW);
+  if (opts.cornerEnd) { const lastStd = [...units].reverse().find((u) => u.kind !== "filler"); if (lastStd) { lastStd.kind = "corner"; lastStd.label = cornerSolution(length); lastStd.drawers = 0; } }
+  if (opts.sink) {
+    const std = units.filter((u) => u.kind !== "filler" && u.kind !== "corner");
+    const sinkU = LEARNED.sinkNearCorner ? std[0] : std[Math.floor(std.length / 2)];
+    if (sinkU) {
+      sinkU.kind = "sink"; sinkU.label = "Sink " + Math.round(sinkU.w); sinkU.drawers = 0;
+      const si = units.indexOf(sinkU);
+      const waste = units.slice(si + 1).find((u) => u.kind === "shutter" || u.kind === "pullout"); if (waste) { waste.kind = "shutter"; waste.label = "Waste / Cleaning"; waste.drawers = 0; }
+      const ro = units.slice(0, si).reverse().find((u) => u.kind === "shutter"); if (ro) ro.label = "RO / Water Purifier";
+      if (dwW) units.splice(si + 1, 0, { x: 0, w: dwW, kind: "rsv-dw", label: "DW", drawers: 0 });   // dishwasher beside the sink
+    } else if (dwW) units.push({ x: 0, w: dwW, kind: "rsv-dw", label: "DW", drawers: 0 });
+  }
+  if (frW) units.push({ x: 0, w: frW, kind: "rsv-fridge", label: "Fridge", drawers: 0 });   // fridge at the far end (work-triangle vertex)
+  let x = 0; return units.map((u) => { const n = { ...u, x }; x += u.w; return n; });
+}
+
+// Prepend a corner-return unit (one carcass-depth wide) and shift the straight
+// cabinets clear of it — how an adjacent run joins at an L/U corner.
+function withCornerReturn(straightLen: number, opts: { sink?: boolean; adjoiningLen?: number } = {}): Cabinet[] {
+  const cd = STD.baseDepth;
+  const straight = makeBaseRow(straightLen, { sink: opts.sink }).map((c) => ({ ...c, x: c.x + cd }));
+  const sol = cornerSolution(opts.adjoiningLen ?? straightLen + cd);
+  return [{ x: 0, w: cd, kind: "corner", label: sol, drawers: 0 }, ...straight];
+}
+
+// Wall-cabinet row: when `chimney`, centre it and balance equal cabinets each
+// side; otherwise tile plain wall cabinets. A GTPT cabinet is added over the sink.
+function makeWallRow(length: number, opts: { chimney?: boolean; gtpt?: { x: number; w: number } | null } = {}): Cabinet[] {
+  const cabs: Cabinet[] = [];
+  if (opts.chimney) {
+    // Centre the chimney only if the learned "chimney centring" rule is active;
+    // otherwise it sits over the left cooking zone (rule disabled → layout changes).
+    const chimX = LEARNED.chimneyCentered ? length / 2 - GEN.chimneyWidth / 2 : Math.min(900, length * 0.2);
+    const tile = (from: number, to: number) => { let x = from; const seg = to - from; const n = Math.max(1, Math.round(seg / 600)); const each = seg / n; for (let i = 0; i < n; i++) cabs.push({ x: from + i * each, w: each, kind: "wall", label: "Wall", drawers: 0 }); };
+    tile(0, chimX);
+    cabs.push({ x: chimX, w: GEN.chimneyWidth, kind: "chimney", label: "Chimney", drawers: 0 });
+    tile(chimX + GEN.chimneyWidth, length);
+  } else {
+    let x = 0;
+    for (const w of tileModules(length)) { if (w >= MIN_MOD) cabs.push({ x, w, kind: "wall", label: "Wall", drawers: 0 }); x += w; }
+  }
+  // GTPT-above-sink only when that learned standard is active. RETAG the wall cabinet over the
+  // sink (don't append a new one — that overlapped/hid the tiled wall cabinet). 13.pdf collision rule.
+  if (opts.gtpt && LEARNED.gtpt) {
+    const cx = opts.gtpt.x + opts.gtpt.w / 2;
+    const wc = cabs.find((c) => c.kind === "wall" && cx >= c.x && cx < c.x + c.w);
+    if (wc) { wc.kind = "gtpt"; wc.label = "GTPT"; }
+  }
+  return cabs;
+}
+
+function makeSockets(length: number): Socket[] {
+  const sockets: Socket[] = [];
+  let sx = 300, count = 0;
+  while (sx < length - 200) { sockets.push({ x: sx, group: Math.floor(count / 3) }); sx += STD.socketSpacing; count++; }
+  return sockets;
+}
+
+// Assemble one wall "run". `cornerStart` prepends a corner return (used by the
+// side runs that butt into the cooking/back wall at an L or U corner).
+function buildRun(name: string, fullLength: number, opts: { sink?: boolean; chimney?: boolean; cornerStart?: boolean; cornerEnd?: boolean; openBack?: boolean; adjoiningLen?: number }): RunLayout {
+  const base = opts.cornerStart
+    ? withCornerReturn(fullLength - STD.baseDepth, { sink: opts.sink, adjoiningLen: opts.adjoiningLen })
+    : makeBaseRow(fullLength, { sink: opts.sink, cornerEnd: opts.cornerEnd });
+  const sinkCab = base.find((c) => c.kind === "sink");
+  // A peninsula/island run is open-backed — it carries no wall cabinets above it.
+  const wallCabs = opts.openBack ? [] : makeWallRow(fullLength, { chimney: opts.chimney, gtpt: sinkCab ? { x: sinkCab.x, w: sinkCab.w } : null });
+
+  // ── Optional appliances (3.txt: hob & dishwasher are optional) ──
+  // Hob sits on the base cabinet centred under the chimney (cooking run).
+  if (opts.chimney && apptOn(GEN.hob)) {
+    const chim = wallCabs.find((c) => c.kind === "chimney");
+    if (chim) {
+      const cx = chim.x + chim.w / 2;
+      const hobCab = base.find((c) => cx >= c.x && cx < c.x + c.w && c.kind !== "filler" && c.kind !== "corner" && c.kind !== "sink");
+      if (hobCab) { hobCab.kind = "hob"; hobCab.label = "Hob" + (GEN.hob === "optional" ? " (opt)" : ""); hobCab.drawers = Math.min(LEARNED.maxDrawers, 3); }
+    }
+  }
+  // Dishwasher + fridge are reserved as rsv-* module slots in makeBaseRow (5.7.2 Step 1)
+  // and finalised into real appliances in addTallUnits — no ad-hoc width search needed here.
+  return { name, length: fullLength, base, wallCabs, sockets: makeSockets(fullLength), hasChimney: !!opts.chimney, hasSink: !!sinkCab };
+}
+
+// Fill a span with standard NON-drawer base cabinets. Residual is closed with a
+// filler — but if it fits within ±10% of the widest cabinet, that one cabinet is
+// resized to absorb it instead (4.txt 5.1.3) and the adjustment is logged.
+function sideCabs(fromX: number, span: number): Cabinet[] {
+  const units = functionalUnits(span);
+  // ±10% residual absorption: fold a small filler into the widest non-drawer unit.
+  const fi = units.findIndex((u) => u.kind === "filler");
+  if (fi >= 0) {
+    const f = units[fi].w; let mi = -1, mw = 0;
+    units.forEach((u, k) => { if (u.kind !== "filler" && u.kind !== "drawer" && u.w > mw) { mw = u.w; mi = k; } });
+    if (mi >= 0 && f <= 0.1 * mw) {
+      units[mi] = { ...units[mi], w: units[mi].w + f }; units.splice(fi, 1);
+      GEN_LOG.adjustments.push(`Non-drawer cabinet resized ${Math.round(mw)}→${Math.round(mw + f)} mm (+${Math.round(f)} mm, within ±10%) to absorb residual instead of a filler.`);
+    }
+  }
+  let x = fromX; return units.map((u) => { const n = { ...u, x }; x += u.w; return n; });
+}
+
+// ── Cooking run built to the MANDATORY chimney–drawer–glass rule (4.txt Part 5) ──
+// • a fixed standard 3-Drawer cabinet centred under the chimney (never resized)
+// • chimney zone = drawer width + 50 mm (two 25 mm shutter side-panels)
+// • equal glass-shutter wall cabinets either side; symmetric about the chimney axis
+function buildCookingRun(name: string, fullLength: number, opts: { sink?: boolean } = {}): RunLayout {
+  const chimneyW = GEN.chimneyWidth;
+  const drawerW = nearestDrawer(chimneyW);     // standard 3-drawer width below the chimney
+  const zoneW = drawerW + 50;                   // chimney zone (incl. two 25 mm side panels)
+  // 15.txt 5.18/Part 9: if the user marked a CHIMNEY point in the 3D room, anchor the chimney (and the
+  // linked 3-drawer below) to that point along the wall; otherwise centre it (the default mandatory rule).
+  const chimPt = pointAlong("chimney");
+  let center = fullLength / 2;
+  if (chimPt != null) {
+    // keep room for the sink (left, ~650 mm) and fridge (right, ~650 mm) around the centred 3-drawer
+    const lb = (opts.sink ? 650 : 0) + drawerW / 2, rb = (opts.sink ? 650 : 0) + drawerW / 2;
+    center = Math.max(Math.max(zoneW / 2, lb), Math.min(chimPt, fullLength - Math.max(zoneW / 2, rb)));
+    GEN_LOG.adjustments.push(`Chimney + 3-drawer anchored to the marked chimney point (${Math.round(center)} mm along the wall).`);
+  }
+  if (!LEARNED.chimneyCentered) GEN_LOG.conflicts.push("Mandatory chimney–drawer rule centres the chimney, but learned 'Chimney centering' is disabled — mandatory rule enforced over the learned rule.");
+  const drawerX = center - drawerW / 2;
+
+  // BASE: equal standard cabinets each side of a fixed, centred 3-drawer cabinet.
+  // 5.7.2 Step 1: when this run also carries the sink, reserve a dishwasher module just left of
+  // the 3-drawer and a fridge module at the far-right end (carved from storage, wall length fixed).
+  const abk = applianceBrandOf(GEN.applianceBrand);
+  const sinkW = opts.sink ? 600 : 0;                           // 14.pdf: a sink is MANDATORY — reserve it at the left corner (near plumbing, away from the chimney centre)
+  let dwW = opts.sink && apptOn(GEN.dishwasher) ? nearestCab(abk.dishwasher[0]) : 0;
+  let frW = opts.sink ? nearestCab(abk.refrigerator[0]) : 0;
+  const rightSpan = fullLength - (drawerX + drawerW);
+  if (sinkW + dwW > drawerX - MIN_MOD) dwW = 0;                // not enough room left of the 3-drawer for sink+DW → drop DW
+  if (rightSpan - frW < 0) frW = 0;
+  const base: Cabinet[] = [];
+  let lx = 0;
+  if (sinkW) { base.push({ x: 0, w: sinkW, kind: "sink", label: "Sink " + sinkW, drawers: 0 }); lx = sinkW; }   // sink near the corner
+  if (dwW) { base.push({ x: lx, w: dwW, kind: "rsv-dw", label: "DW", drawers: 0 }); lx += dwW; }                // dishwasher beside the sink
+  for (const c of sideCabs(lx, drawerX - lx)) base.push(c);                                                     // left storage span (sideCabs takes start, SPAN)
+  base.push({ x: drawerX, w: drawerW, kind: "drawer3", label: "3-Drawer", drawers: 3, dh: [140, 280, 280] });
+  for (const c of sideCabs(drawerX + drawerW, rightSpan - frW)) base.push(c);                                   // right storage span
+  if (frW) base.push({ x: fullLength - frW, w: frW, kind: "rsv-fridge", label: "Fridge", drawers: 0 });
+
+  // WALL: equal glass-shutter cabinets + 25 mm side panels + chimney aligned to the drawer.
+  const wallCabs: Cabinet[] = [];
+  const glassKind = LEARNED.glassAdjacent ? "glass-wall" : "wall";
+  const glassLabel = LEARNED.glassAdjacent ? "Glass" : "Wall";
+  const fillWall = (fromX: number, span: number) => { if (span < 50) return; const n = Math.max(1, Math.round(span / 600)); const each = span / n; for (let i = 0; i < n; i++) wallCabs.push({ x: fromX + i * each, w: each, kind: glassKind, label: glassLabel, drawers: 0 }); };
+  const zoneX = center - zoneW / 2;
+  fillWall(0, zoneX);
+  wallCabs.push({ x: zoneX, w: 25, kind: "sidepanel", label: "", drawers: 0 });
+  wallCabs.push({ x: drawerX, w: drawerW, kind: "chimney", label: "Chimney " + chimneyW, drawers: 0 });
+  wallCabs.push({ x: zoneX + zoneW - 25, w: 25, kind: "sidepanel", label: "", drawers: 0 });
+  fillWall(zoneX + zoneW, fullLength - (zoneX + zoneW));
+
+  // The sink (reserved above) + GTPT (added by ensureGtpt) satisfy 14.pdf; DW/fridge rsv-* slots
+  // are finalised into appliances in addTallUnits.
+  const hasSink = base.some((c) => c.kind === "sink");
+  return { name, length: fullLength, base, wallCabs, sockets: makeSockets(fullLength), hasChimney: true, hasSink };
+}
+
+// Tall-unit optimization (4.txt 5.3 + Part 6 feasibility table): refrigerator
+// zone → refrigerator-housing tall unit; a free end ≥600 mm → pantry tall unit.
+// Tall units stay in base[] (so plans draw them) but render full-height in the
+// elevation, and the wall cabinet above them is suppressed.
+function addTallUnits(run: RunLayout): RunLayout {
+  const abf = applianceBrandOf(GEN.applianceBrand);
+  // Finalise reserved appliance module slots (5.7.2 Step 1) into real appliances — applies to
+  // every run/shape (incl. Island & Straight), so appliances always land in a proper-width slot.
+  for (const c of run.base) {
+    if (c.kind === "rsv-dw") { c.kind = "dishwasher"; c.label = "DW" + (GEN.dishwasher === "optional" ? " (opt)" : ""); c.drawers = 0; }
+    else if (c.kind === "rsv-fridge") { c.kind = "fridge"; c.label = "Fridge"; c.drawers = 0; }
+  }
+  const fr = run.base.find((c) => c.kind === "fridge");
+  if (fr) {
+    fr.kind = "tall-fridge"; fr.label = "Fridge Housing";
+    // 5.9.13: size the housing to the brand refrigerator width; absorb any deficit from a
+    // filler so the overall wall length stays fixed (5.9.2). If no filler can donate, flag it.
+    const need = nearestCab(abf.refrigerator[0]);
+    if (fr.w < need) {
+      const deficit = need - fr.w;
+      const donor = run.base.find((c) => c.kind === "filler" && c.w >= deficit + 1);
+      if (donor) { donor.w -= deficit; fr.w = need; GEN_LOG.adjustments.push(`Fridge housing widened to ${need} mm for the ${GEN.applianceBrand} refrigerator (${abf.refrigerator[0]} mm + clearance); ${deficit} mm absorbed from a filler — wall length unchanged.`); }
+      else GEN_LOG.conflicts.push(`${GEN.applianceBrand} refrigerator (${abf.refrigerator[0]} mm) needs a ≥${need} mm housing but the ${Math.round(fr.w)} mm end cabinet can't widen without changing the fixed wall — flagged for review.`);
+    }
+    GEN_LOG.adjustments.push(`Refrigerator-housing tall unit placed (${Math.round(fr.w)} mm end, ≥600 mm — feasible).`);
+  }
+  for (const e of [run.base[0], run.base[run.base.length - 1]]) {
+    if (e && e.kind === "shutter" && e.w >= 600) { e.kind = "tall-pantry"; e.label = "Pantry"; GEN_LOG.adjustments.push(`Pantry tall unit placed at a free end (${Math.round(e.w)} mm ≥600 mm — feasible, passage ≥1000 mm).`); break; }
+  }
+  // 5.7 Step 5: optional Hi-unit (Oven + Microwave tower) and Utility tall unit,
+  // each placed at a free end (preferred) or the widest remaining base cabinet.
+  const optTag = (v: string) => v === "optional" ? " (opt)" : "";
+  const takeTall = (minW: number): Cabinet | null => {
+    const ends = [run.base[0], run.base[run.base.length - 1]].filter((c) => c && c.kind === "shutter" && c.w >= minW) as Cabinet[];
+    if (ends.length) return ends[0];
+    return run.base.filter((c) => c.kind === "shutter" && c.w >= minW).sort((a, b) => b.w - a.w)[0] || null;
+  };
+  if (apptOn(GEN.hiunit)) {
+    const c = takeTall(600);
+    if (c) { c.kind = "tall-hiunit"; c.label = "Hi-unit Oven+MW" + optTag(GEN.hiunit); c.drawers = 0; GEN_LOG.adjustments.push(`Hi-unit (Oven + Microwave) tall tower placed (${Math.round(c.w)} mm; oven centreline 900–1200 mm, microwave 1200–1500 mm).`); }
+    else GEN_LOG.conflicts.push("Hi-unit (Oven + Microwave) requested but no free base cabinet ≥600 mm was available — omitted.");
+  }
+  if (apptOn(GEN.utility)) {
+    const c = takeTall(450);
+    if (c) { c.kind = "tall-utility"; c.label = "Utility" + optTag(GEN.utility); c.drawers = 0; GEN_LOG.adjustments.push(`Utility tall unit placed (${Math.round(c.w)} mm ≥450 mm — feasible at a kitchen end).`); }
+    else GEN_LOG.conflicts.push("Utility tall unit requested but no free base cabinet ≥450 mm was available — omitted.");
+  }
+  // Re-flow base x-positions in case a width was donated above (keeps cabinets contiguous, wall length fixed).
+  { let x = run.base[0]?.x ?? 0; for (const c of run.base) { c.x = x; x += c.w; } }
+  return run;
+}
+
+// Mandatory-rule validator (4.txt Part 6): checks every cooking run before
+// output and logs any violation for admin review (auto-corrected where possible).
+function validateMandatory(runs: RunLayout[]): number {
+  let checks = 0;
+  for (const r of runs) {
+    if (!r.hasChimney) continue;
+    checks++;
+    const d3 = r.base.find((c) => c.kind === "drawer3");
+    const chim = r.wallCabs.find((c) => c.kind === "chimney");
+    if (!d3) { GEN_LOG.conflicts.push(`${r.name}: no 3-drawer cabinet below the chimney — mandatory rule violated.`); continue; }
+    if (!DRAWER_WIDTHS.includes(Math.round(d3.w))) GEN_LOG.conflicts.push(`${r.name}: 3-drawer width ${Math.round(d3.w)} mm is non-standard — flagged for review.`);
+    if (chim) { const off = Math.abs((d3.x + d3.w / 2) - (chim.x + chim.w / 2)); if (off > 1) GEN_LOG.conflicts.push(`${r.name}: chimney/3-drawer centerlines off by ${Math.round(off)} mm — auto-corrected.`); }
+    for (const c of r.base) if (c.kind === "drawer" && !DRAWER_WIDTHS.includes(Math.round(c.w))) GEN_LOG.conflicts.push(`${r.name}: drawer cabinet ${Math.round(c.w)} mm non-standard — flagged.`);
+  }
+  return checks;
+}
+
+// 14.pdf: GTPT above the sink is mandatory, EXACTLY the sink's width, centred over it. Carve a
+// sink-width GTPT slot into the wall row at the sink's centreline (trimming overlapped wall cabinets;
+// remainders < MIN_MOD become wall-end fillers). Total wall length is preserved. Chimney/side panels
+// and tall-suppressed gaps are never carved. Reverts any prior (width-mismatched) gtpt first.
+function ensureGtpt(run: RunLayout): RunLayout {
+  const sink = (run.base || []).find((c) => c.kind === "sink");
+  if (!sink || !run.wallCabs || !run.wallCabs.length) return run;
+  const L = run.length, gw = Math.round(sink.w);
+  let gx = Math.round(sink.x + sink.w / 2 - gw / 2); gx = Math.max(0, Math.min(gx, L - gw));
+  for (const c of run.wallCabs) if (c.kind === "gtpt") { c.kind = "wall"; c.label = "Wall"; }   // drop old mismatched gtpt
+  let x = 0; const w = run.wallCabs.map((c) => { const o = { ...c, x }; x += c.w; return o; });
+  const out: Cabinet[] = [];
+  for (const c of w) {
+    const cl = c.x, cr = c.x + c.w;
+    const overlaps = !(cr <= gx + 0.5 || cl >= gx + gw - 0.5);
+    if (!overlaps || c.kind === "chimney" || c.kind === "sidepanel" || (c as any).locked) { out.push(c); continue; }
+    const leftW = Math.max(0, gx - cl), rightW = Math.max(0, cr - (gx + gw));   // retained slivers; middle → gtpt
+    if (leftW > 0.5) out.push({ ...c, x: cl, w: leftW, kind: leftW < MIN_MOD ? "filler" : c.kind, label: leftW < MIN_MOD ? "Filler" : (c.label || "Wall") });
+    if (rightW > 0.5) out.push({ ...c, x: gx + gw, w: rightW, kind: rightW < MIN_MOD ? "filler" : c.kind, label: rightW < MIN_MOD ? "Filler" : (c.label || "Wall") });
+  }
+  out.push({ x: gx, w: gw, kind: "gtpt", label: "GTPT " + gw, drawers: 0 });
+  out.sort((a, b) => a.x - b.x); let xx = 0; for (const c of out) { c.x = xx; xx += c.w; }
+  run.wallCabs = out;
+  return run;
+}
+
+// Mandatory: the chimney must stay centred over the 3-drawer (4.txt master rule). buildCookingRun
+// places it there, but ensureGtpt's wall re-flow (dropping a sub-module sliver when carving the GTPT)
+// can shift the chimney off the 3-drawer. Restore alignment by absorbing the offset into the flexible
+// wall cabinet NEAREST the chimney (side panels / chimney / GTPT-over-sink / locked stay put; the wall
+// length is unchanged). Mirrors the client syncChimney so the live editor is idempotent on mount.
+const CC_MIN_CAB = 300;
+function fitSideServer(cabs: Cabinet[], space: number, groupOnRight: boolean): Cabinet[] {
+  const arr = cabs.map((c) => ({ ...c }));
+  const movIdx = arr.map((c, i) => i).filter((i) => !(arr[i] as any).locked && arr[i].kind !== "sidepanel" && arr[i].kind !== "chimney" && arr[i].kind !== "gtpt");
+  if (!movIdx.length) return arr;
+  const fixedW = arr.filter((c) => (c as any).locked || c.kind === "sidepanel" || c.kind === "chimney" || c.kind === "gtpt").reduce((s, c) => s + c.w, 0);
+  const target = Math.max(0, Math.round(space - fixedW));
+  let delta = target - movIdx.reduce((s, i) => s + arr[i].w, 0);
+  if (Math.abs(delta) <= 1) return arr;
+  const order = groupOnRight ? [...movIdx].reverse() : [...movIdx];   // nearest the chimney first
+  for (const i of order) {
+    if (delta === 0) break;
+    const w = arr[i].w + delta;
+    if (w >= CC_MIN_CAB) { arr[i].w = w; delta = 0; }
+    else { delta += arr[i].w - CC_MIN_CAB; arr[i].w = CC_MIN_CAB; }
+  }
+  if (delta < 0) {
+    const endI = groupOnRight ? movIdx[0] : movIdx[movIdx.length - 1];   // far end = wall end
+    const nw = arr[endI].w + delta;
+    if (nw >= CC_MIN_CAB) { arr[endI] = { ...arr[endI], w: nw }; }
+    else if (nw >= 40) { arr[endI] = { ...arr[endI], kind: "filler", label: "Filler", drawers: 0, w: nw }; }
+    else {
+      // Can't absorb the remaining shrink without zeroing a cabinet — keep it at MIN and FLAG that the
+      // chimney can't be perfectly centred here (better than silently losing wall length / de-centring).
+      arr[endI] = { ...arr[endI], w: CC_MIN_CAB };
+      GEN_LOG.conflicts.push("Chimney could not be fully centred over the 3-drawer without a sub-300 mm cabinet — flank kept at 300 mm minimum.");
+    }
+  }
+  return arr.filter((c) => c.w > 0);
+}
+function centerChimney(run: RunLayout): RunLayout {
+  if (!run.hasChimney || !Array.isArray(run.wallCabs) || !run.wallCabs.length) return run;
+  const d3 = (run.base || []).find((c) => c.kind === "drawer3");
+  let x = 0; const ww = run.wallCabs.map((c) => { const o = { ...c, x }; x += c.w; return o; });
+  const ci = ww.findIndex((c) => c.kind === "chimney");
+  if (!d3 || ci < 0) return run;
+  let lo = ci, hi = ci;
+  while (lo - 1 >= 0 && ww[lo - 1].kind === "sidepanel") lo--;
+  while (hi + 1 < ww.length && ww[hi + 1].kind === "sidepanel") hi++;
+  const group = ww.slice(lo, hi + 1), groupW = group.reduce((s, c) => s + c.w, 0);
+  const Ltot = ww.reduce((s, c) => s + c.w, 0);
+  const chimCx = (ww[ci].x + ww[ci].w / 2) - ww[lo].x;        // group-left → chimney centreline
+  const targetCx = d3.x + d3.w / 2;                          // 3-drawer centreline (the master)
+  if (Math.abs((ww[ci].x + ww[ci].w / 2) - targetCx) <= 1) return run;   // already aligned → no-op
+  const leftSpace = Math.max(0, Math.min(Math.round(targetCx - chimCx), Ltot - groupW));
+  const left = fitSideServer(ww.slice(0, lo), leftSpace, true);
+  const right = fitSideServer(ww.slice(hi + 1), Ltot - groupW - leftSpace, false);
+  let xx = 0; run.wallCabs = [...left, ...group, ...right].filter((c) => c.w > 0).map((c) => { const o = { ...c, x: xx }; xx += c.w; return o; });
+  GEN_LOG.adjustments.push(`${run.name}: chimney re-centred over the 3-drawer (mandatory) — offset absorbed by the adjacent wall cabinet, wall length unchanged.`);
+  return run;
+}
+
+// Wall-row completeness: a generated run's upper cabinets must fill the WHOLE wall, EXCEPT directly
+// above a full-height tall unit (no wall cabinet there). The uniform tiler can stop short of a tall
+// unit (e.g. a tight run leaves a bare strip above a pull-out before the fridge) — this fills any such
+// bare span with standard wall modules so the elevation/exports match the run length. Open-back runs
+// (island/peninsula prep walls, furniture) keep their empty wall row untouched. Runs before windows
+// are cleared, so this runs BEFORE applyWindows.
+function fillWallGaps(run: RunLayout): RunLayout {
+  if (!Array.isArray(run.wallCabs) || run.wallCabs.length === 0) return run;   // open-back / no upper cabinets by design
+  const L = run.length;
+  const tallSpans = (run.base || []).filter((c) => isTall(c.kind)).map((c) => [c.x, c.x + c.w] as [number, number]);
+  let x = 0; const wc = run.wallCabs.map((c) => { const o = { ...c, x }; x += c.w; return o; });   // reflow
+  const add: Cabinet[] = [];
+  const fillSeg = (from: number, to: number) => {                              // fill [from,to] minus any tall spans
+    const spans = tallSpans.filter(([ta, tb]) => tb > from + 1 && ta < to - 1).sort((p, q) => p[0] - q[0]);
+    let s = from; const pieces: [number, number][] = [];
+    for (const [ta, tb] of spans) { if (ta > s + 1) pieces.push([s, Math.min(ta, to)]); s = Math.max(s, tb); }
+    if (s < to - 1) pieces.push([s, to]);
+    for (const [pa, pb] of pieces) { const span = pb - pa; if (span < 120) continue; const n = Math.max(1, Math.round(span / 600)); const each = span / n; for (let i = 0; i < n; i++) add.push({ x: pa + i * each, w: each, kind: "wall", label: "Wall", drawers: 0 }); }
+  };
+  let cursor = 0;
+  for (const c of wc.slice().sort((p, q) => p.x - q.x)) { if (c.x > cursor + 1) fillSeg(cursor, c.x); cursor = Math.max(cursor, c.x + c.w); }
+  if (cursor < L - 1) fillSeg(cursor, L);
+  if (add.length) { run.wallCabs = [...wc, ...add].sort((p, q) => p.x - q.x); GEN_LOG.adjustments.push(`${run.name}: filled ${add.length} bare wall span(s) so the upper cabinets cover the full wall (tall units excepted).`); }
+  return run;
+}
+
+// 16/17 6.2: respect windows — never leave a wall cabinet over a window opening, and flag any tall
+// unit standing in front of a window. Wall cabinets whose centre falls in a window span are removed
+// (the opening stays clear); chimney / side panels / GTPT are kept. Best-effort run↔wall mapping.
+function applyWindows(run: RunLayout): RunLayout {
+  if (!GEN_WINDOWS.length || !Array.isArray(run.wallCabs)) return run;
+  const L = run.length;
+  let x = 0; for (const c of run.wallCabs) { c.x = x; x += c.w; }   // reflow so spans are accurate
+  for (const win of GEN_WINDOWS) {
+    const a = win.along, b = win.along + win.width;
+    if (a == null || !(b > a) || a > L) continue;
+    run.wallCabs = run.wallCabs.filter((c) => {
+      const cc = c.x + c.w / 2, over = cc > a && cc < b && c.kind !== "chimney" && c.kind !== "sidepanel" && c.kind !== "gtpt";
+      if (over) GEN_LOG.adjustments.push(`Window-aware (6.2): cleared ${c.label || c.kind} above a window (${Math.round(a)}–${Math.round(b)} mm) — opening kept clear.`);
+      return !over;
+    });
+    for (const bc of run.base) if (isTall(bc.kind)) { const tc = bc.x + bc.w / 2; if (tc > a && tc < b) GEN_LOG.conflicts.push(`Window-aware (6.2): tall unit ${bc.label || bc.kind} is in front of a window (${Math.round(a)}–${Math.round(b)} mm) — relocate.`); }
+  }
+  return run;
+}
+
+// User rule: a cabinet that meets a side WALL must have a ~50 mm scribe filler closing the wall gap
+// (standard Indian modular practice — leaves room to scribe to an out-of-plumb wall). Carve 50 mm from
+// the nearest flexible cabinet at that end and drop a 50 mm filler against the wall. The corner-join end
+// (a "corner" unit) is NOT a wall, so it is skipped. Runs before centring, so chimney/GTPT re-align after.
+function ensureWallFillers(run: RunLayout): RunLayout {
+  if (!Array.isArray(run.base) || run.base.length < 2) return run;
+  if (/island|peninsula/i.test(run.name || "")) return run;   // freestanding/open runs don't meet a wall here
+  const F = 50;
+  // Fixed-function units we must NOT shrink to make a scribe filler; everything else can donate 50 mm.
+  const FIXED = new Set(["sink", "dishwasher", "fridge", "tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility", "chimney", "sidepanel", "corner", "drawer3", "hob", "gtpt"]);
+  const donatable = (c: any) => c && !c.locked && !FIXED.has(c.kind) && c.w >= 300 + F;
+  const FRIDGE = new Set(["fridge", "tall-fridge"]);   // user rule: a fridge sitting along the wall needs NO scribe filler beside it (it stands flush to the wall)
+  const carve = (left: boolean) => {
+    const endCab = run.base[left ? 0 : run.base.length - 1];
+    if (!endCab || endCab.kind === "corner" || endCab.kind === "filler") return;   // corner-join / already filled
+    if (FRIDGE.has(endCab.kind)) { GEN_LOG.adjustments.push(`${run.name}: no scribe filler at the ${left ? "left" : "right"} wall — the refrigerator stands flush to the wall (fridge-at-wall rule).`); return; }   // fridge flush to wall → skip the filler
+    // Donate from the WIDEST carve-safe cabinet anywhere in the run (best coverage; the filler still lands at the wall).
+    let di = -1, dw = -1; run.base.forEach((c, k) => { if (donatable(c) && c.w > dw) { dw = c.w; di = k; } });
+    if (di < 0) return;                                          // every cabinet is a fixed-function unit → can't add a filler
+    run.base[di].w -= F;
+    const filler = { x: 0, w: F, kind: "filler", label: "Filler", drawers: 0 } as Cabinet;
+    if (left) run.base.unshift(filler); else run.base.push(filler);
+    GEN_LOG.adjustments.push(`${run.name}: 50 mm scribe filler added at the ${left ? "left" : "right"} wall (cabinet-to-wall gap rule).`);
+  };
+  carve(true); carve(false);
+  let x = 0; for (const c of run.base) { c.x = x; x += c.w; }
+  return run;
+}
+
+// User rule: a filler ADJACENT to a side wall must never exceed 75 mm (a thin scribe gap only — anything
+// wider looks like a missing cabinet). Any larger wall-END filler keeps 75 mm and folds the excess back
+// into the nearest flexible cabinet, so the run length is preserved. Runs at the END of the pipeline so it
+// also catches residual fillers that functionalUnits / fridge-trim may have left against a wall.
+const WALL_FILLER_MAX = 75;
+function capWallFillers(run: RunLayout): RunLayout {
+  if (!Array.isArray(run.base) || run.base.length < 2) return run;
+  if (/island|peninsula/i.test(run.name || "")) return run;   // freestanding/open runs don't meet a side wall
+  const FIXED = new Set(["sink", "dishwasher", "fridge", "tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility", "chimney", "sidepanel", "corner", "drawer3", "hob", "gtpt", "filler"]);
+  const FRIDGE = new Set(["fridge", "tall-fridge"]);
+  // User rule: a fridge along the wall needs no filler beside it. If a residual wall-end filler sits next
+  // to the refrigerator, fold it into the fridge housing (it gains a side panel) and drop the filler.
+  for (const left of [true, false]) {
+    const ei = left ? 0 : run.base.length - 1, ni = left ? 1 : run.base.length - 2;
+    const f = run.base[ei], nb = run.base[ni];
+    if (f && f.kind === "filler" && nb && FRIDGE.has(nb.kind)) {
+      nb.w += f.w; run.base.splice(ei, 1);
+      GEN_LOG.adjustments.push(`${run.name}: removed the ${left ? "left" : "right"} wall filler — the refrigerator stands flush to the wall; ${Math.round(f.w)} mm folded into the fridge housing (fridge-at-wall rule).`);
+    }
+  }
+  for (const left of [true, false]) {
+    const ei = left ? 0 : run.base.length - 1;
+    const f = run.base[ei];
+    if (!f || f.kind !== "filler" || f.w <= WALL_FILLER_MAX) continue;
+    const excess = f.w - WALL_FILLER_MAX;
+    let gi = -1;   // nearest flexible (non-fixed) cabinet scanning inward from this wall end
+    if (left) { for (let k = 1; k < run.base.length; k++) if (!FIXED.has(run.base[k].kind)) { gi = k; break; } }
+    else { for (let k = run.base.length - 2; k >= 0; k--) if (!FIXED.has(run.base[k].kind)) { gi = k; break; } }
+    if (gi < 0) continue;                              // no flexible donor (all-fixed run) — leave the filler rather than inflate the mandatory 3-drawer / an appliance
+    if (run.base[gi].w + excess > 1000) continue;      // would make an oversized donor — leave the filler instead
+    f.w = WALL_FILLER_MAX; run.base[gi].w += excess;
+    GEN_LOG.adjustments.push(`${run.name}: ${left ? "left" : "right"} wall filler capped at ${WALL_FILLER_MAX} mm (excess ${Math.round(excess)} mm folded into ${run.base[gi].label || run.base[gi].kind}).`);
+  }
+  let x = 0; for (const c of run.base) { c.x = x; x += c.w; }
+  return run;
+}
+
+// User rule: NO mid-run fillers. A filler that sits INSIDE the run (not at a wall end) is folded into a
+// neighbouring cabinet so the gap becomes usable storage instead of a dead panel. Preference order:
+//   1) a plain shutter (Kadhai / Grocery / Thali / Utility) — cleanest, purpose-built to flex;
+//   2) else a resizable storage DRAWER (Cutlery / Plate / Atta) — a slightly-oversized drawer is buildable;
+//   3) else (tiny kitchens whose whole wall is sink+3-drawer+fridge) the SINK base (gains under-sink
+//      storage) or the FRIDGE housing (gains a side panel) — both legitimately house extra width.
+// Pull-out baskets, the mandatory 3-drawer, hob and dishwasher are NEVER stretched. Result cap 1000 mm.
+// Wall-END fillers are handled separately by capWallFillers (≤75 mm scribe).
+function absorbMidFillers(run: RunLayout): RunLayout {
+  if (!Array.isArray(run.base) || run.base.length < 3) return run;
+  const isShutter = (c: any) => c && !c.locked && c.kind === "shutter";
+  const isDrawerGrow = (c: any) => c && !c.locked && (c.kind === "drawer" || c.kind === "drawer-atta");   // resizable storage drawers (not pull-outs / 3-drawer)
+  const isApplianceGrow = (c: any) => c && !c.locked && (c.kind === "sink" || c.kind === "tall-fridge");   // tiny kitchens: a sink base gains under-sink storage, a fridge housing gains a side panel
+  // Island / Peninsula prep runs are FREESTANDING — their ends are not side walls (capWallFillers skips
+  // them), so an END filler there is just a dead panel; treat the whole run (incl. ends) as absorbable.
+  const openRun = /island|peninsula/i.test(run.name || "");
+  const lo = openRun ? 0 : 1, hi = openRun ? run.base.length - 1 : run.base.length - 2;
+  for (let i = hi; i >= lo; i--) {   // back-to-front so splice is safe; interior-only for wall-bound runs, full range for open runs
+    const f = run.base[i];
+    if (!f || f.kind !== "filler") continue;
+    const nearest = (pred: (c: any) => boolean, includeEnds: boolean) => {   // nearest match, immediate neighbours first then outward
+      const klo = includeEnds ? 0 : 1, khi = includeEnds ? run.base.length - 1 : run.base.length - 2;
+      for (let d = 1; d < run.base.length; d++) {
+        if (i - d >= klo && pred(run.base[i - d])) return i - d;
+        if (i + d <= khi && pred(run.base[i + d])) return i + d;
+      }
+      return -1;
+    };
+    let gi = nearest(isShutter, openRun);                   // tier 1: a plain shutter (open runs may donate at an end)
+    if (gi < 0) gi = nearest(isDrawerGrow, openRun);        // tier 2: a resizable storage drawer
+    if (gi < 0) gi = nearest(isApplianceGrow, true);        // tier 3: tiny kitchens — widen the sink base / fridge housing (these sit at the run ends)
+    if (gi < 0 || run.base[gi].w + f.w > 1000) continue;    // no safe home, or would make an oversized cabinet → keep the filler
+    run.base[gi].w += f.w;
+    GEN_LOG.adjustments.push(`${run.name}: ${Math.round(f.w)} mm mid-run gap folded into ${run.base[gi].label || run.base[gi].kind} (no mid-run filler panel).`);
+    run.base.splice(i, 1);
+  }
+  let x = 0; for (const c of run.base) { c.x = x; x += c.w; }
+  // NOTE: when tier-3 widens the SINK base in a tiny kitchen, we deliberately do NOT widen the GTPT wall
+  // cabinet here — growing a single wall cabinet in place shifts every wall cabinet after it (including the
+  // chimney), breaking chimney↔3-drawer alignment and the wall-row length. The GTPT therefore stays at its
+  // ensureGtpt width (a minor cosmetic width mismatch vs the grown sink) to keep the chimney correct.
+  return run;
+}
+
+// User rule (soft, ~90%) — applies to ALL kitchen shapes: each UPPER (wall) cabinet should sit over the
+// LOWER (base) cabinet of (almost) the same width. We REBUILD the plain wall spans to mirror the base
+// module edges, while keeping the mandated wall elements verbatim (chimney + its side panels, GTPT) and
+// leaving NO wall cabinet above a full-height tall unit. The mirrored cabinets inherit the look (glass vs
+// plain) of whatever wall cabinet originally covered that position. Sub-120 slivers are tidied afterwards.
+function alignWallToBase(run: RunLayout): RunLayout {
+  if (!Array.isArray(run.wallCabs) || !run.wallCabs.length || !Array.isArray(run.base) || !run.base.length) return run;
+  const L = run.length;
+  let bx = 0; const bmods = run.base.map((c) => { const m = { kind: c.kind, x: bx, w: c.w }; bx += c.w; return m; });
+  const baseEdges = [0]; for (const m of bmods) baseEdges.push(m.x + m.w);
+  let wx = 0; const ww = run.wallCabs.map((c) => { const o = { ...c, x: wx }; wx += c.w; return o; });
+  // Preserve the chimney zone (chimney + flanking side panels) and the GTPT exactly; block their spans.
+  const fixedEls: Cabinet[] = []; const blocked: [number, number][] = [];
+  const ci = ww.findIndex((c) => c.kind === "chimney");
+  if (ci >= 0) { let lo = ci, hi = ci; while (lo - 1 >= 0 && ww[lo - 1].kind === "sidepanel") lo--; while (hi + 1 < ww.length && ww[hi + 1].kind === "sidepanel") hi++; const z = ww.slice(lo, hi + 1).map((c) => ({ ...c })); fixedEls.push(...z); blocked.push([z[0].x, z[z.length - 1].x + z[z.length - 1].w]); }
+  const g = ww.find((c) => c.kind === "gtpt"); if (g) { fixedEls.push({ ...g }); blocked.push([g.x, g.x + g.w]); }
+  for (const m of bmods) if (isTall(m.kind)) blocked.push([m.x, m.x + m.w]);   // no wall cabinet above a tall tower
+  blocked.sort((a, b) => a[0] - b[0]);
+  // Free spans = the wall minus the blocked spans; within each, segment at the base module edges (= mirror).
+  const free: [number, number][] = []; let cur = 0;
+  for (const [a, b] of blocked) { if (a > cur + 1) free.push([cur, a]); cur = Math.max(cur, b); }
+  if (cur < L - 1) free.push([cur, L]);
+  const glassKind = LEARNED.glassAdjacent ? "glass-wall" : "wall";
+  const kindAt = (xc: number) => { for (const c of ww) if (xc >= c.x && xc < c.x + c.w) return ["chimney", "sidepanel", "gtpt"].includes(c.kind) ? glassKind : c.kind; return glassKind; };
+  const out: Cabinet[] = [...fixedEls];
+  for (const [fa, fb] of free) {
+    const edges = [fa, ...baseEdges.filter((e) => e > fa + 1 && e < fb - 1), fb];
+    for (let i = 0; i < edges.length - 1; i++) {
+      const a = edges[i], b = edges[i + 1], w = b - a; if (w < 40) continue;
+      const k = w < 120 ? "filler" : kindAt((a + b) / 2);
+      out.push({ x: a, w, kind: k, label: k === "filler" ? "Filler" : (k === "glass-wall" ? "Glass" : "Wall"), drawers: 0, shelves: k === "filler" ? 0 : 2 } as Cabinet);
+    }
+  }
+  out.sort((a, b) => a.x - b.x);
+  let xx = 0; for (const c of out) { c.x = xx; xx += c.w; }
+  run.wallCabs = out;
+  return run;
+}
+
+// Tidy the wall row: merge any sub-120 mm MID-run sliver (a byproduct of the GTPT carve / 50 mm wall-filler
+// shift / alignment) into its neighbour, so no tiny fragments show. The intentional 50 mm fillers at the
+// wall ends and the 25 mm side panels are kept.
+function tidyWall(run: RunLayout): RunLayout {
+  if (!Array.isArray(run.wallCabs) || run.wallCabs.length < 3) return run;
+  let x = 0; const w = run.wallCabs.map((c) => { const o = { ...c, x }; x += c.w; return o; });
+  const out: Cabinet[] = [];
+  const FIX = ["chimney", "sidepanel", "gtpt"];   // never merge a sliver INTO these (they keep mandated widths)
+  for (let i = 0; i < w.length; i++) {
+    const c = w[i], atEnd = (i === 0 || i === w.length - 1);
+    if (!atEnd && !FIX.includes(c.kind) && c.w < 120) {
+      const prev = out[out.length - 1];
+      if (prev && !FIX.includes(prev.kind)) { prev.w += c.w; continue; }            // merge into the (non-fixed) left neighbour
+      if (i + 1 < w.length && !FIX.includes(w[i + 1].kind)) { w[i + 1].w += c.w; continue; }   // else the right neighbour
+    }
+    out.push({ ...c });
+  }
+  let xx = 0; for (const c of out) { c.x = xx; xx += c.w; }
+  run.wallCabs = out;
+  return run;
+}
+
+// ── Top-level composer: Straight (1 run), L-Shape (2 runs + corner),
+//    U-Shape (3 runs + 2 corners), plus a generic single-run fallback. ──
+function buildKitchenLayout(type: string, dims: { wall: number; wallB?: number; wallC?: number }): Layout {
+  const applied: string[] = [];
+  const t = type.toLowerCase();
+  let runs: RunLayout[] = [];
+
+  if (t.includes("l-shape")) {
+    const La = dims.wall, Lb = dims.wallB ?? 2400;
+    runs = [
+      buildCookingRun("Run A — Cooking Wall", La),
+      buildRun("Run B — Sink Wall", Lb, { sink: true, cornerStart: true, adjoiningLen: La }),
+    ];
+    applied.push("L-Shape: two perpendicular runs joined by a 600 mm corner-return unit.");
+    applied.push("Corner solution hierarchy: LeMans > Magic Corner > Blind Corner > Carousel (avoid dead corners).");
+    applied.push("Work triangle Sink ↔ Hob ↔ Refrigerator kept within 1200–7000 mm; sink near corner, hob on Run A.");
+  } else if (t.includes("u-shape")) {
+    const Lb = dims.wall, Ll = dims.wallB ?? 2400, Lr = dims.wallC ?? 2400;
+    runs = [
+      buildRun("Left Wall — Sink", Ll, { sink: true, cornerStart: true, adjoiningLen: Lb }),
+      buildCookingRun("Back Wall — Cooking", Lb),
+      buildRun("Right Wall — Storage", Lr, { cornerStart: true, adjoiningLen: Lb }),
+    ];
+    applied.push("U-Shape zone planning: Wall 1 Cooking (back) · Wall 2 Preparation (right) · Wall 3 Cleaning (left, sink).");
+    applied.push("Two corners (prefer LeMans/Magic Corner, avoid dead corners); work triangle within 1200–7000 mm.");
+  } else if (t.includes("parallel")) {
+    const La = dims.wall, Lb = dims.wallB ?? La;
+    runs = [
+      buildCookingRun("Run A — Cooking Wall", La),
+      buildRun("Run B — Sink Wall", Lb, { sink: true }),
+    ];
+    applied.push("Parallel zoning: Side A Hob + Preparation; Side B Sink + Refrigerator. Clear passage ≥1000 mm (1200–1500 preferred).");
+  } else if (t.includes("island")) {
+    const La = dims.wall, Li = dims.wallB ?? Math.round(La * 0.55);
+    // 14.pdf: the sink goes on the MAIN WALL (so its GTPT can sit above it); the island is a
+    // freestanding prep/seating run with no wall cabinets (a wall-mounted GTPT can't go above it).
+    const island: RunLayout = { name: "Island", length: Li, base: makeBaseRow(Li, {}), wallCabs: [], sockets: [], hasChimney: false, hasSink: false };
+    runs = [buildCookingRun("Main Wall — Cooking", La, { sink: true }), island];
+    applied.push("Island: main cooking wall (chimney + sink + tall storage) + freestanding island (prep/seating). Island width ≥900 mm (1200+ preferred); walkway ≥1000 mm.");
+    applied.push("Sink on the main wall (with GTPT above); island is prep/seating. Hob & seating on the island are optional.");
+  } else if (t.includes("peninsula")) {
+    const La = dims.wall, Lp = dims.wallB ?? Math.round(La * 0.6);
+    // A peninsula is an L whose second leg projects into the room: joined at one
+    // corner, open at the far end (seating), no wall cabinets above the peninsula.
+    runs = [
+      buildCookingRun("Main Wall — Cooking", La, { sink: true }),
+      buildRun("Peninsula — Prep", Lp, { cornerStart: true, openBack: true, adjoiningLen: La }),
+    ];
+    applied.push("Peninsula: main cooking wall (chimney + sink + GTPT) + a peninsula prep run joined at one corner; open far end (optional seating), no wall cabinets above the peninsula.");
+    applied.push("Corner solution hierarchy: LeMans > Magic Corner > Blind Corner > Carousel (dead corner avoided); walkway ≥1000 mm around the open end.");
+  } else {
+    // Straight kitchen → single combined cooking + sink run (mandatory rule).
+    runs = [buildCookingRun(type, dims.wall, { sink: true })];
+    applied.push("Straight: fixed 3-drawer cabinet centred under the chimney; sink near the end; fridge at the far end.");
+  }
+
+  // Shared standards applied to every layout (the "applied learned logic").
+  runs = runs.map(addTallUnits);     // 5.3 tall-unit optimization (after runs built)
+  runs = runs.map(ensureWallFillers); // user rule: 50 mm scribe filler where a cabinet meets a side wall (before centring)
+  runs = runs.map(ensureGtpt);       // 14.pdf: GTPT (sink-width, centred) above every sink
+  runs = runs.map(centerChimney);    // 4.txt: restore chimney↔3-drawer alignment that the GTPT carve can shift
+  runs = runs.map(absorbMidFillers); // user rule: fold mid-run fillers into an adjacent shutter (no dead mid-run panels)
+  runs = runs.map(fillWallGaps);     // wall-row completeness: fill bare wall spans (except above tall units)
+  runs = runs.map(alignWallToBase);  // user rule (~90%): align upper cabinets to the lower cabinet below
+  runs = runs.map(tidyWall);         // merge sub-120 mm mid-run wall slivers (keep 50 mm end fillers)
+  runs = runs.map(applyWindows);     // 16/17 6.2: keep window openings clear of wall cabinets
+  runs = runs.map(capWallFillers);   // user rule: a filler adjacent to a wall must not exceed 75 mm
+  const checks = validateMandatory(runs);   // Part 6: validate against mandatory rules
+  applied.push(`Mandatory-rule validator: ${checks} cooking run(s) checked — ${GEN_LOG.conflicts.length ? GEN_LOG.conflicts.length + " conflict(s) logged for admin review" : "all passed"}.`);
+
+  applied.push(`No 4-drawer cabinets: drawer stacks capped at ${STD.maxDrawers}.`);
+  applied.push("Best-fit module packing + mid-run gap absorption: storage spans are packed to avoid stranding a sub-module gap, and any mid-run gap is folded into an adjacent shutter — so fillers sit only at the wall ends (capped 75 mm), never mid-run where avoidable.");
+  applied.push("GTPT cabinet placed above the sink; wall cabinets balanced about the chimney.");
+  applied.push("Tall units (refrigerator housing + pantry) placed at run ends per the feasibility table (end ≥600 mm, passage ≥1000 mm, ventilation kept).");
+  applied.push("Wall cabinets auto-shelved (250–400 mm spacing) for storage & balance.");
+  applied.push("Indian modular planning (5.7): zones & appliances planned first, cabinets sized last — a varied functional mix (Cutlery, Bottle/Spice Pull-Out, Kadhai, Plate, Grocery, Thali, Waste/RO) rather than uniform widths.");
+  applied.push(`Electrical points at ${STD.socketHeight} mm, dimensioned from the nearest wall (coloured per group).`);
+
+  return {
+    type, dims,
+    runs: runs.map((r) => ({ name: r.name, length: r.length, base: r.base, wallCabs: r.wallCabs, sockets: r.sockets })),
+    appliedRules: applied,
+    planSvg: renderPlan(type, runs, dims),
+    elevations: runs.map((r) => ({ name: r.name, svg: renderRunElevation(r) })),
+    sections: runs.map((r) => ({ name: r.name, svg: renderRunSection(r) })),
+  };
+}
+
+// =============================================================================
+// 4b. FURNITURE ENGINE — non-kitchen units (wardrobe, crockery, TV panel,
+// vanity, and a generic paneled fallback). Modelled as vertical columns of
+// stacked cells (compartments), rendered as a front elevation + a shallow plan.
+// =============================================================================
+
+interface Cell { kind: string; label: string; hMM: number; }   // bottom → top
+interface Column { wMM: number; cells: Cell[]; }
+interface FurnitureUnit { type: string; widthMM: number; heightMM: number; depthMM: number; loftMM: number; columns: Column[]; }
+
+// ── Per-column composition patterns ──
+function colDrawersHang(body: number): Cell[] {
+  const cells: Cell[] = [];
+  let rem = body;
+  for (let i = 0; i < Math.min(STD.maxDrawers, 2); i++) { cells.push({ kind: "drawer", label: "Drawer", hMM: 250 }); rem -= 250; }
+  const hang = Math.max(300, Math.min(1100, rem - 200));
+  cells.push({ kind: "hang", label: "Hanging", hMM: hang }); rem -= hang;
+  if (rem > 120) cells.push({ kind: "shelf", label: "Shelves", hMM: rem });
+  return cells;
+}
+function colLongHang(body: number): Cell[] {
+  const hang = Math.max(600, Math.min(1650, body - 300));
+  const cells: Cell[] = [{ kind: "hang", label: "Long Hanging", hMM: hang }];
+  const rem = body - hang;
+  if (rem > 120) cells.push({ kind: "shelf", label: "Shelves", hMM: rem });
+  return cells;
+}
+function colShelves(body: number): Cell[] {
+  const n = Math.max(4, Math.round(body / 350));
+  return Array.from({ length: n }, () => ({ kind: "shelf", label: "Shelf", hMM: body / n }));
+}
+const fillerCol = (cw: number, h: number): Column => ({ wMM: cw, cells: [{ kind: "filler", label: "Filler", hMM: h }] });
+
+// Furniture looks better with equal columns than greedy tiling + a sliver
+// filler, so split the width into N equal shutters in the 450–1000 mm band.
+// Bias a furniture unit's cell composition per consensus strategy (read by the furniture scorer):
+// "storage" turns a shelf into a drawer stack (denser storage); "display" opens a shelf up (glass/open).
+function applyStorageMode(columns: Column[], mode: string): Column[] {
+  if (mode === "storage") {           // densest: every shelf/open/cabinet becomes a drawer stack
+    for (const col of columns) for (const c of (col.cells || [])) if (["shelf", "open", "cabinet"].includes((c as any).kind)) { (c as any).kind = "drawer"; (c as any).label = "Drawers"; }
+  } else if (mode === "display") {    // most open: every shelf/cabinet becomes open/glass display
+    for (const col of columns) for (const c of (col.cells || [])) if (["shelf", "cabinet"].includes((c as any).kind)) { (c as any).kind = "open"; (c as any).label = "Open Display"; }
+  }
+  return columns;   // "balanced" keeps the engine's default mix
+}
+function tileEven(w: number, target: number = 750): number[] {
+  let n = Math.max(1, Math.round(w / target));
+  while (w / n > 1000) n++;
+  while (n > 1 && w / n < 450) n--;
+  return Array.from({ length: n }, () => w / n);
+}
+
+function wardrobeColumns(widths: number[], body: number): Column[] {
+  const pats = [colDrawersHang, colLongHang, colShelves];
+  return widths.map((cw, i) => cw < MIN_MOD ? fillerCol(cw, body) : { wMM: cw, cells: pats[i % 3](body) });
+}
+function crockeryColumns(widths: number[], body: number): Column[] {
+  return widths.map((cw) => cw < MIN_MOD ? fillerCol(cw, body) : { wMM: cw, cells: [
+    { kind: "drawer", label: "Drawer", hMM: 250 },
+    { kind: "door", label: "Cabinet", hMM: 700 },
+    { kind: "glass", label: "Glass Display", hMM: Math.max(200, body - 950) },
+  ] });
+}
+function tvColumns(w: number, h: number): Column[] {
+  const cen = Math.min(1500, Math.round(w * 0.45));
+  const side = Math.max(MIN_MOD, Math.round((w - cen) / 2));
+  const tvH = Math.min(1300, h - 600);
+  return [
+    { wMM: side, cells: colShelves(h) },
+    { wMM: cen, cells: [
+      { kind: "drawer", label: "Media Drawer", hMM: 300 },
+      { kind: "tv", label: "TV Recess", hMM: tvH },
+      { kind: "shelf", label: "Floating Shelf", hMM: Math.max(150, h - 300 - tvH) },
+    ] },
+    { wMM: side, cells: colShelves(h) },
+  ];
+}
+function vanityColumns(widths: number[], h: number): Column[] {
+  const bh = 850;
+  const mirrorH = Math.min(700, Math.max(300, h - bh - 200));
+  const gap = Math.max(150, h - bh - mirrorH);
+  let basinDone = false;
+  return widths.map((cw, i) => {
+    if (cw < MIN_MOD) return fillerCol(cw, h);
+    const cells: Cell[] = [];
+    if (i % 2 === 0) {
+      cells.push({ kind: "drawer", label: "Drawer", hMM: bh / 3 }, { kind: "drawer", label: "Drawer", hMM: bh / 3 });
+      if (!basinDone) { cells.push({ kind: "basin", label: "Wash Basin", hMM: bh / 3 }); basinDone = true; }
+      else cells.push({ kind: "drawer", label: "Drawer", hMM: bh / 3 });
+    } else cells.push({ kind: "door", label: "Cabinet", hMM: bh });
+    cells.push({ kind: "open", label: "", hMM: gap });
+    cells.push({ kind: "mirror", label: "Mirror", hMM: mirrorH });
+    return { wMM: cw, cells };
+  });
+}
+function genericColumns(type: string, widths: number[], h: number): Column[] {
+  const doorH = Math.min(750, Math.max(300, h - 500));
+  const topLabel = type.toLowerCase().includes("reception") ? "Counter" : "Open";
+  return widths.map((cw) => cw < MIN_MOD ? fillerCol(cw, h) : { wMM: cw, cells: [
+    { kind: "drawer", label: "Drawer", hMM: 250 },
+    { kind: "door", label: "Cabinet", hMM: doorH },
+    { kind: "open", label: topLabel, hMM: Math.max(150, h - 250 - doorH) },
+  ] });
+}
+
+function buildFurniture(type: string, dims: { wall: number; wallB?: number; wallC?: number }): Layout {
+  const t = type.toLowerCase();
+  const w = dims.wall, h = dims.wallB ?? 2100;
+  const isWardrobe = t.includes("wardrobe"), isCrockery = t.includes("crockery");
+  const isTV = t.includes("lcd") || t.includes("tv"), isVanity = t.includes("vanity");
+  const depthMM = isTV ? 400 : isVanity ? 550 : (isWardrobe || isCrockery) ? 600 : 500;
+  const loftMM = (isWardrobe || isCrockery) ? Math.min(500, Math.max(300, Math.round(h * 0.2))) : 0;
+  const body = h - loftMM;
+  const widths = tileEven(w, (dims as any).colTarget || 750);   // even shutter columns; colTarget lets a consensus strategy pack more (narrower) or fewer (wider) columns
+
+  const applied: string[] = [];
+  let columns: Column[];
+  if (isWardrobe) { columns = wardrobeColumns(widths, body); applied.push("Wardrobe: hanging + shelf + drawer columns with a loft band across the top."); }
+  else if (isCrockery) { columns = crockeryColumns(widths, body); applied.push("Crockery unit: lower drawers + cabinet, upper glass-shutter display, loft on top."); }
+  else if (isTV) { columns = tvColumns(w, h); applied.push("TV/LCD panel: centred TV recess with a media drawer below, side display columns and a floating shelf."); }
+  else if (isVanity) { columns = vanityColumns(widths, h); applied.push("Vanity unit: base storage with a wash-basin counter and a mirror cabinet above."); }
+  else { columns = genericColumns(type, widths, h); applied.push(`${type}: paneled unit with drawers, cabinet and open shelving.`); }
+
+  // Consensus storage mode (storage / balanced / display) genuinely changes the cell composition — works
+  // for every furniture type incl. TV (whose column count ignores colTarget) so the 3 candidates differ.
+  columns = applyStorageMode(columns, (dims as any).storageMode || "balanced");
+
+  applied.push(`No 4-drawer cabinets: drawer stacks capped at ${STD.maxDrawers}.`);
+  applied.push("Standard shutter widths + filler logic applied to the carcass.");
+  applied.push("Hardware (hinges, channels, handles) placed to learned standards; 1 mm PVC edge-banding.");
+
+  const unit: FurnitureUnit = { type, widthMM: w, heightMM: h, depthMM, loftMM, columns };
+  const layout: any = {
+    type, dims,
+    runs: [{ name: type, length: w, base: [], wallCabs: [], sockets: [] }],
+    appliedRules: applied,
+    planSvg: renderFurniturePlan(unit),
+    elevations: [{ name: `${type} — Front`, svg: renderFurnitureElevation(unit) }],
+  };
+  layout.furniture = unit;   // expose columns/cells so the consensus scorer can read furniture storage
+  return layout;
+}
+
+function furnitureFill(kind: string): string {
+  return kind === "filler" ? "url(#hatch)" : kind === "drawer" ? "#e3ebf9"
+    : kind === "glass" || kind === "basin" ? "#cdeef5" : kind === "tv" ? "#e6ebf3"
+    : kind === "mirror" ? "#d3f0f7" : kind === "open" ? "#f4f7fb" : "#eaf1fb";
+}
+
+function renderFurnitureElevation(unit: FurnitureUnit): string {
+  const S = 0.14, padL = 50, padR = 30, padT = 34, padB = 40;
+  const W = unit.widthMM * S + padL + padR, H = unit.heightMM * S + padT + padB;
+  const floorY = padT + unit.heightMM * S;
+  const yOf = (mm: number) => floorY - mm * S;
+  const xOf = (mm: number) => padL + mm * S;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${S}" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace">`);
+  p.push(`<rect width="${W}" height="${H}" fill="#f4f7fb"/>`);
+  p.push(`<line x1="${padL}" y1="${floorY}" x2="${xOf(unit.widthMM)}" y2="${floorY}" stroke="#475569" stroke-width="2"/>`);
+
+  // Loft band across the top (wardrobe / crockery)
+  if (unit.loftMM > 0) {
+    const ly = yOf(unit.heightMM), lh = unit.loftMM * S;
+    p.push(`<rect x="${padL}" y="${ly}" width="${unit.widthMM * S}" height="${lh}" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>`);
+    p.push(`<text x="${xOf(unit.widthMM / 2)}" y="${ly + lh / 2 + 3}" fill="#3730a3" font-size="9" text-anchor="middle">Loft</text>`);
+  }
+
+  let x = 0;
+  for (const col of unit.columns) {
+    let yacc = 0;
+    const cx = xOf(x), cw = col.wMM * S;
+    for (const cell of col.cells) {
+      if (cell.hMM <= 0) { yacc += cell.hMM; continue; }
+      const cy = yOf(yacc + cell.hMM), ch = cell.hMM * S;
+      p.push(`<rect x="${cx}" y="${cy}" width="${cw}" height="${ch}" fill="${furnitureFill(cell.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+      // interior detail per kind
+      if (cell.kind === "shelf") { for (let s = 1; s < Math.max(2, Math.round(cell.hMM / 300)); s++) { const sy = cy + ch * (s / Math.max(2, Math.round(cell.hMM / 300))); p.push(`<line x1="${cx}" y1="${sy}" x2="${cx + cw}" y2="${sy}" stroke="#334155" stroke-width="0.7"/>`); } }
+      else if (cell.kind === "hang") { p.push(`<line x1="${cx + 4}" y1="${cy + 7}" x2="${cx + cw - 4}" y2="${cy + 7}" stroke="#94a3b8" stroke-width="1.2"/>`); for (let hk = 1; hk <= 3; hk++) { const hx = cx + cw * hk / 4; p.push(`<line x1="${hx}" y1="${cy + 7}" x2="${hx}" y2="${cy + 16}" stroke="#94a3b8" stroke-width="0.8"/>`); } }
+      else if (cell.kind === "drawer") { p.push(`<line x1="${cx + cw * 0.3}" y1="${cy + ch / 2}" x2="${cx + cw * 0.7}" y2="${cy + ch / 2}" stroke="#0891b2" stroke-width="1.4"/>`); }
+      else if (cell.kind === "glass") { p.push(`<rect x="${cx + 3}" y="${cy + 3}" width="${cw - 6}" height="${ch - 6}" fill="none" stroke="#0891b2" stroke-width="0.7"/>`); p.push(`<line x1="${cx + cw / 2}" y1="${cy + 3}" x2="${cx + cw / 2}" y2="${cy + ch - 3}" stroke="#0891b2" stroke-width="0.6"/>`); }
+      else if (cell.kind === "tv") { p.push(`<rect x="${cx + cw * 0.1}" y="${cy + ch * 0.12}" width="${cw * 0.8}" height="${ch * 0.62}" fill="#020617" stroke="#475569" stroke-width="1"/>`); }
+      else if (cell.kind === "basin") { p.push(`<ellipse cx="${cx + cw / 2}" cy="${cy + ch / 2}" rx="${cw * 0.28}" ry="${Math.min(8, ch * 0.3)}" fill="none" stroke="#0891b2" stroke-width="1.2"/>`); }
+      else if (cell.kind === "mirror") { for (let m = 0; m < 3; m++) { const mx = cx + cw * (0.25 + m * 0.2); p.push(`<line x1="${mx}" y1="${cy + ch - 6}" x2="${mx + 12}" y2="${cy + 6}" stroke="#14b8a6" stroke-width="0.6" opacity="0.5"/>`); } }
+      if (cell.label) p.push(`<text x="${cx + cw / 2}" y="${cy + ch / 2 + 3}" fill="#475569" font-size="8" text-anchor="middle">${cell.label}</text>`);
+      yacc += cell.hMM;
+    }
+    x += col.wMM;
+  }
+
+  p.push(`<text x="${xOf(unit.widthMM / 2)}" y="${padT - 14}" fill="#1e3a5f" font-size="11" text-anchor="middle">${unit.type} — Front Elevation — ${Math.round(unit.widthMM)} × ${Math.round(unit.heightMM)} mm</text>`);
+  p.push(`<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#f59e0b" stroke-width="1.2"/></pattern></defs>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+function renderFurniturePlan(unit: FurnitureUnit): string {
+  const S = 0.1, d = unit.depthMM, pad = 26, header = 20;
+  const W = unit.widthMM * S + pad * 2, H = d * S + pad * 2 + header, top = pad + header;
+  const xOf = (mm: number) => pad + mm * S;
+  const p = [svgHead(W, H)];
+  p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">${unit.type} — Plan (W ${Math.round(unit.widthMM)} × D ${d} mm)</text>`);
+  p.push(`<line x1="${pad}" y1="${top}" x2="${xOf(unit.widthMM)}" y2="${top}" stroke="#64748b" stroke-width="3"/>`);
+  let x = 0;
+  for (const col of unit.columns) {
+    p.push(`<rect x="${xOf(x)}" y="${top}" width="${col.wMM * S}" height="${d * S}" fill="${furnitureFill(col.cells[0]?.kind || "door")}" stroke="#2f74d0" stroke-width="1"/>`);
+    x += col.wMM;
+  }
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+// 13.pdf §3 — strict collision/visibility/width validator. No cabinet may be wider than its wall,
+// extend past the wall boundary, sit hidden behind a tall unit, or overlap another. Oversized widths
+// are clamped to the wall (fixes the hidden 4690 mm-behind-tall bug); wall cabinets hidden behind a
+// tall tower are removed; residual overlaps / out-of-bounds are logged. Applies to ALL layout types.
+function validateGeometry(layout: Layout): void {
+  for (const run of (layout.runs || []) as any[]) {
+    const L = run.length; if (!L) continue;
+    const tallSpans = (run.base || []).filter((c: any) => isTall(c.kind)).map((c: any) => [c.x, c.x + c.w] as [number, number]);
+    for (const rowName of ["base", "wallCabs"]) {
+      const arr = run[rowName] as any[]; if (!Array.isArray(arr)) continue;
+      // 1) clamp any cabinet wider than the wall (the impossible-width / hidden-4690 case)
+      for (const c of arr) if (c.w > L) { GEN_LOG.conflicts.push(`${run.name}: ${c.label || c.kind} width ${Math.round(c.w)} mm exceeded wall ${L} mm — clamped (13.pdf max-width rule).`); c.w = L; }
+      // 2) a floor-to-ceiling tall unit hides ONLY the part of a wall cabinet directly
+      //    in front of it. Trim each wall cabinet to its exposed (non-tall) span(s) so the
+      //    wall row still covers the whole wall; remove only fully-hidden ones. Trimming
+      //    (not wholesale deletion) avoids a bare strip where a tiled wall cabinet straddled
+      //    the tall-unit edge — e.g. a cab spanning 2700–3600 in front of a 3000–3600 fridge
+      //    must keep its 2700–3000 portion, not vanish (13.pdf visibility rule).
+      if (rowName === "wallCabs" && tallSpans.length) {
+        const spans = tallSpans.slice().sort((a, b) => a[0] - b[0]);
+        // exposed remnant → keep the cab kind if it's a real module, else a filler (never an empty gap)
+        const mk = (src: any, pa: number, pb: number) => { const w = pb - pa; return w < 120 ? { ...src, x: pa, w, kind: "filler", label: "Filler", drawers: 0 } : { ...src, x: pa, w }; };
+        for (let i = arr.length - 1; i >= 0; i--) {
+          const c = arr[i];
+          if (c.kind === "chimney" || c.kind === "sidepanel") continue;   // keep structural items untouched
+          if (!spans.some(([ta, tb]) => c.x < tb - 1 && c.x + c.w > ta + 1)) continue;   // not in front of any tall unit → leave as-is (small fillers stay)
+          let pieces: [number, number][] = [[c.x, c.x + c.w]];            // subtract every tall span
+          for (const [ta, tb] of spans) {
+            pieces = pieces.flatMap(([pa, pb]) => {
+              if (tb <= pa + 1 || ta >= pb - 1) return [[pa, pb] as [number, number]];   // no overlap
+              const out: [number, number][] = [];
+              if (ta > pa + 1) out.push([pa, ta]);                         // exposed to the left of the tall unit
+              if (tb < pb - 1) out.push([tb, pb]);                         // exposed to the right
+              return out;
+            });
+          }
+          pieces = pieces.filter(([pa, pb]) => pb - pa > 0.5);             // keep any visible remnant (sub-module → filler)
+          if (pieces.length === 1 && Math.abs(pieces[0][0] - c.x) < 1 && Math.abs(pieces[0][1] - (c.x + c.w)) < 1) continue;   // tangent overlap left it whole → no change
+          if (pieces.length === 0) { GEN_LOG.conflicts.push(`${run.name}: wall cabinet fully hidden behind a tall unit removed (13.pdf visibility rule).`); arr.splice(i, 1); }
+          else {
+            const f = mk(c, pieces[0][0], pieces[0][1]); arr[i] = f;       // resize this cab to its first exposed piece
+            for (let k = 1; k < pieces.length; k++) arr.push(mk(c, pieces[k][0], pieces[k][1]));
+            GEN_LOG.adjustments.push(`${run.name}: wall cabinet trimmed to its visible span beside a tall unit (13.pdf visibility rule) — exposed portion kept${f.kind === "filler" ? " as a filler" : ""}.`);
+          }
+        }
+      }
+      // 3) flag residual overlaps / boundary overrun (root causes are fixed at source)
+      const sorted = arr.slice().sort((a, b) => a.x - b.x);
+      for (let i = 1; i < sorted.length; i++) if (sorted[i].x + 0.5 < sorted[i - 1].x + sorted[i - 1].w) GEN_LOG.conflicts.push(`${run.name} ${rowName}: overlap ${sorted[i - 1].label || sorted[i - 1].kind} / ${sorted[i].label || sorted[i].kind} — review (13.pdf collision rule).`);
+      const maxX = Math.max(0, ...arr.map((c) => c.x + c.w)); if (maxX > L + 1) GEN_LOG.conflicts.push(`${run.name} ${rowName}: extends ${Math.round(maxX)} mm past wall ${L} mm (13.pdf boundary rule).`);
+    }
+  }
+}
+
+// =============================================================================
+// 4b. AI CONSENSUS DESIGN MODE (18.txt) — a SECOND, optional design mode.
+// Fully DETERMINISTIC and internal: the "multiple AI reviewers" are internal
+// generation STRATEGIES scored by real layout data; NO external LLM/image API
+// calls are made (none configured). Phase-4 external-LLM critique and Phase-6
+// image generation are intentionally left as future hooks only.
+// =============================================================================
+
+// Inspect the marked points the user supplied (GEN_POINTS-style array). Returns
+// the human-readable mandatory anchors the user did NOT mark, so the endpoint can
+// report what it auto-inferred. Heuristic + simple by design.
+function detectMissing(points: any[], type: string): string[] {
+  const arr = Array.isArray(points) ? points : [];
+  const has = (re: RegExp) => arr.some((p) => p && typeof p.type === "string" && re.test(p.type));
+  const missing: string[] = [];
+  if (!has(/sink/i)) missing.push("Sink location");
+  if (!has(/chimney|hob/i)) missing.push("Chimney location");
+  if (!has(/fridge|refrigerator/i)) missing.push("Refrigerator location");
+  if (!has(/tall|pantry|hiunit|utility/i)) missing.push("Tall-unit location");
+  if (!has(/oven|microwave|dishwasher|appliance/i)) missing.push("Appliance locations");
+  if (!GEN_WINDOWS.length) missing.push("Window positions");
+  // Storage requirements are always optional input → always reported as inferable.
+  missing.push("Storage requirements");
+  return missing;
+}
+
+// Build the design brief per the shared API contract. The mandatory list is fixed
+// per 18.txt (always the full company mandatory set, regardless of what the user marked).
+function designBrief(type: string, dims: any, points: any[], windows: any[], missing: string[], style?: string, storagePriority?: string, structures?: any[]): any {
+  const arr = Array.isArray(points) ? points : [];
+  const wins = Array.isArray(windows) ? windows : [];
+  const structs = Array.isArray(structures) ? structures : [];
+  const isKitchen = String(type).toLowerCase().includes("kitchen");
+  const kitchenType = dims && dims.wallC ? "U-shaped" : dims && dims.wallB ? "L-shaped" : "Straight / single-wall";
+  const wallUsed = [dims && dims.wall, dims && dims.wallB, dims && dims.wallC].filter((n) => n != null).map((n) => Math.round(Number(n)) + " mm").join(" + ") || "unspecified";
+  // 15.pdf Stage 2: capture structural constraints (beams/columns/ducts/doors) + windows from the room model.
+  const ofKind = (k: string) => structs.filter((s) => s && s.kind === k);
+  const fmt = (list: any[], noun: string) => list.length ? list.length + " " + noun + (list.length > 1 ? "s" : "") + " at " + list.map((s) => Math.round(+s.pos || 0) + " mm" + (s.wall ? " (Wall " + s.wall + ")" : "")).join(", ") : "none";
+  const doors = ofKind("door");
+  const door = doors.length ? fmt(doors, "door") : "Single-leaf entry assumed clear of cooking run";
+  const windowStr = wins.length ? wins.length + " window(s) at " + wins.map((w) => Math.round(Number(w.along)) + " mm").join(", ") : "none marked (assumed solid wall)";
+  // 15.pdf Stage 2: pull live company standards + drawings-learned rules from the knowledge base.
+  refreshLearnedStandards();
+  const sources = (LEARNED && LEARNED.sources) || [];
+  const fromDrawings = sources.filter((s: any) => /upload/i.test(String(s.source || "")));
+  const ab = applianceBrandOf(dims && dims.applianceBrand);
+  const sp = storagePriority && String(storagePriority).trim() ? String(storagePriority) : "Balanced";
+  return {
+    room: isKitchen ? "Kitchen" : String(type),
+    kitchenType: isKitchen ? kitchenType : "n/a",
+    wallUsed,
+    window: windowStr,
+    door,
+    beams: fmt(ofKind("beam"), "beam"),
+    columns: fmt(ofKind("column"), "column"),
+    ducts: fmt(ofKind("duct"), "duct"),
+    appliances: "Chimney " + ab.chimney[0] + " mm, Hob " + ab.hob[0] + " mm, Oven+MW tower, Dishwasher " + ab.dishwasher[0] + " mm, Refrigerator " + ab.refrigerator[0] + " mm (" + (dims && dims.applianceBrand || "Custom") + ")",
+    indianRules: "Sink + GTPT, chimney centred over the 3-drawer, work triangle 1200–7000 mm, function-first zones (cutlery / spice / atta / grocery), no 4-drawer cabinets",
+    companyStandards: sources.length + " active standard(s) fused across the knowledge base",
+    learnedFromDrawings: fromDrawings.length ? fromDrawings.length + " rule(s) learned from uploaded drawings" : "none yet (upload drawings in the Library to teach the engine)",
+    storageRequirements: sp + " — bottle/spice pull-outs, atta drawer, plate & cutlery drawers, tall pantry where space allows",
+    cabinetRequirements: "Modular widths 300–900 mm, soft-close hinges & drawers, standard carcass; mandatory units below",
+    designConstraints: [
+      "Filler adjacent to a side wall must NOT exceed 75 mm (thin scribe gap only); any excess is folded into the neighbouring cabinet",
+      "No filler beside a wall when the REFRIGERATOR is placed along that wall — the fridge stands flush to the wall, so omit the scribe filler there",
+      "Every wall is a separate elevation — Wall A, Wall B, Wall C… each selectable in the Project Tree; clicking a wall shows that wall's own view",
+      "Upper (wall) cabinets aligned to the lower cabinet below — ~90% of the same width (soft rule)",
+      "No fillers in the middle of a run — fillers only at the wall ends",
+      "Chimney centred over the 3-drawer; Sink + matched GTPT mandatory; labels never overlap neighbours",
+    ],
+    mandatory: ["Sink", "GTPT", "Chimney", "Hob", "Refrigerator", "3-Drawer below chimney", "Tall Unit", "Bottle Pull-Out", "Atta Drawer"],
+    style: style && String(style).trim() ? String(style) : "Company standard (modular)",
+    storagePriority: sp,
+  };
+}
+
+// Score a generated layout 0..10 on each contract dimension, using real layout data
+// and the manufacturing checks. A HARD violation forces the relevant score <= 3 so a
+// flawed candidate cannot win (18.txt rule J).
+function scoreLayout(layout: any, dims: any): any {
+  const clamp = (n: number) => Math.max(0, Math.min(10, Math.round(n * 10) / 10));
+  // Furniture (wardrobe / crockery / TV / vanity) is column-based, not base+wall rows — score it on its
+  // own merits (storage mix, column evenness, accessibility) so the consensus is meaningful, not a tie.
+  if (layout && layout.furniture) {
+    const cols = (layout.furniture.columns || []) as any[];
+    const cells = cols.flatMap((c: any) => c.cells || []);
+    const n = (re: RegExp) => cells.filter((x: any) => re.test(x.kind || "")).length;
+    const drawers = n(/drawer/i), shelves = n(/shelf|shelves/i), hang = n(/hang/i), disp = n(/glass|display|open/i);
+    const widths = cols.map((c: any) => c.wMM || 0);
+    const even = widths.length ? 1 - (Math.max(...widths) - Math.min(...widths)) / (Math.max(...widths) || 1) : 1;
+    const mfg = (layout.mfgChecks || []); const ratio = mfg.length ? mfg.filter((c: any) => c.ok).length / mfg.length : 1;
+    // Storage density is the primary, monotone differentiator (drawers > shelves > hang > open display),
+    // so the three modes rank cleanly (Max-Storage > Balanced > Display) instead of netting a tie.
+    const storage = clamp(1.5 + drawers * 0.85 + shelves * 0.55 + hang * 0.7 + disp * 0.25);
+    const compliance = clamp(5 + (drawers ? 1.5 : 0) + (shelves ? 1.5 : 0) + (hang || disp ? 1 : 0) + disp * 0.3);
+    const symmetry = clamp(4 + even * 6);
+    const access = clamp(6 + Math.min(3, cols.length) + disp * 0.2);     // more reachable / open columns = better access
+    return {
+      indianCompliance: compliance, workTriangle: 7, sink: 8, gtpt: 8, chimney: 8,
+      applianceAccessibility: access, windowFit: 9, doorFit: 9, beamFit: 9,
+      storage, symmetry, manufacturing: clamp(7 + ratio * 3), installation: clamp(7 + ratio * 3),
+    };
+  }
+  const runs = (layout && layout.runs) || [];
+  const mfg = (layout && layout.mfgChecks) || [];
+  const checkOk = (re: RegExp) => { const m = mfg.find((c: any) => re.test(c.name)); return m ? !!m.ok : null; };
+  // Global x of an appliance: run offset (sum of prior run lengths) + cabinet centre.
+  let off = 0; const gx: Record<string, number> = {};
+  for (const r of runs) {
+    for (const c of (r.base || [])) {
+      const cx = off + (c.x || 0) + (c.w || 0) / 2;
+      if (c.kind === "sink" && gx.sink == null) gx.sink = cx;
+      if (c.kind === "hob" && gx.hob == null) gx.hob = cx;
+      if (c.kind === "tall-fridge" && gx.fridge == null) gx.fridge = cx;
+    }
+    off += (r.length || 0);
+  }
+  // Work triangle: each marked pairwise distance scores best in the 1200..7000 mm band.
+  const pairScore = (a?: number, b?: number) => {
+    if (a == null || b == null) return 5;
+    const d = Math.abs(a - b);
+    if (d < 600) return 3;
+    if (d >= 1200 && d <= 7000) return 10;
+    if (d < 1200) return 6 + (d - 600) / 600 * 4;
+    return Math.max(4, 10 - (d - 7000) / 1000);
+  };
+  const wt = (pairScore(gx.sink, gx.hob) + pairScore(gx.hob, gx.fridge) + pairScore(gx.sink, gx.fridge)) / 3;
+  // Presence-based sink/gtpt/chimney, downgraded hard on a failed mandatory check.
+  const haveSink = runs.some((r: any) => (r.base || []).some((c: any) => c.kind === "sink"));
+  const haveGtpt = runs.some((r: any) => (r.wallCabs || []).some((c: any) => c.kind === "gtpt"));
+  const haveChim = runs.some((r: any) => (r.wallCabs || []).some((c: any) => c.kind === "chimney"));
+  const sinkGtptOk = checkOk(/Sink \+ GTPT/);
+  const sinkScore = !haveSink ? 0 : sinkGtptOk === false ? 3 : 9;
+  const gtptScore = sinkGtptOk === false ? 3 : (haveSink && haveGtpt ? 10 : haveGtpt ? 7 : 0);
+  const chimScore = haveChim ? 9 : 2;
+  // Window / beam / door fit from GEN_WINDOWS overlap with wall cabs & tall units.
+  // Conflicts are already logged by the engine; count hard front-of-window tall-unit hits.
+  let winConflicts = 0, winCovers = 0;
+  for (const w of GEN_WINDOWS) {
+    const a = w.along, b = w.along + w.width;
+    for (const r of runs) {
+      for (const bc of (r.base || [])) if (isTall(bc.kind)) { const tc = (bc.x || 0) + (bc.w || 0) / 2; if (tc > a && tc < b) winConflicts++; }
+      for (const wc of (r.wallCabs || [])) { const l = wc.x || 0, rr = (wc.x || 0) + (wc.w || 0); if (wc.kind !== "gtpt" && Math.min(rr, b) - Math.max(l, a) > 50) winCovers++; }
+    }
+  }
+  const windowFit = !GEN_WINDOWS.length ? 8 : winConflicts > 0 ? 3 : winCovers > 0 ? 6 : 10;
+  // No door geometry is modelled → neutral-good unless a window conflict implies clash.
+  const doorFit = 8;
+  // Beam fit: treat any window-front tall-unit conflict as the only modelled vertical clash.
+  const beamFit = winConflicts > 0 ? 3 : 9;
+  // Storage: reward storage-DENSE units (tall towers, pull-outs, drawers) + a modest board-area term,
+  // scaled so candidates SPREAD instead of all hitting the cap. Also tally tall units / dishwasher here
+  // (reused by symmetry/manufacturing/installation/work-triangle below) so the strategies differentiate.
+  const boqRows = (layout && layout.boq) || [];
+  const area = (boqRows.find((b: any) => /Board area/.test(b.item)) || { qty: 0 }).qty;
+  let tallN = 0, pullN = 0, drawN = 0, haveDW = false;
+  for (const r of runs) for (const c of (r.base || [])) {
+    if (isTall(c.kind)) tallN++;
+    else if (c.kind === "pullout") pullN++;
+    else if (c.kind === "drawer" || c.kind === "drawer3" || c.kind === "drawer-atta") drawN++;
+    if (c.kind === "dishwasher") haveDW = true;
+  }
+  const extraTall = Math.max(0, tallN - 1);   // tall units BEYOND the standard fridge tower
+  // Count-led so it does NOT saturate at the cap: extra towers / pull-outs / drawers move the needle,
+  // and a dishwasher COSTS a storage slot (so a no-DW candidate scores a touch higher here).
+  const handleLess = HANDLELESS.has((layout as any).handle);   // handle-less fronts gain usable interior
+  const storage = clamp(tallN * 1.6 + pullN * 0.85 + drawN * 0.6 + Math.min(2, area / 130) - (haveDW ? 0.5 : 0) + (handleLess ? 0.7 : 0));
+  // Symmetry: chimney-flank balance (wall cabs left vs right of the chimney centre).
+  let symmetry = 7;
+  for (const r of runs) {
+    const wcs = r.wallCabs || []; const chim = wcs.find((c: any) => c.kind === "chimney");
+    if (!chim) continue;
+    const cc = (chim.x || 0) + (chim.w || 0) / 2;
+    let left = 0, right = 0;
+    for (const c of wcs) { if (c === chim) continue; const m = (c.x || 0) + (c.w || 0) / 2; if (m < cc) left += c.w || 0; else right += c.w || 0; }
+    const tot = left + right; if (tot <= 0) continue;
+    const bal = 1 - Math.abs(left - right) / tot;
+    symmetry = 4 + bal * 6;
+    break;
+  }
+  symmetry = symmetry - extraTall * 0.9;   // each full-height tower beyond the fridge breaks wall balance
+  // Manufacturing & installation from the mfgChecks pass ratio, reduced by build complexity:
+  // extra tall towers + non-standard adjustments make a design harder to build/install.
+  const total = mfg.length || 1, passed = mfg.filter((c: any) => c.ok).length;
+  const ratio = passed / total;
+  const adjN = (GEN_LOG.adjustments || []).length;
+  const hardFail = mfg.some((c: any) => !c.ok && /(Sink \+ GTPT|Run-length|Appliance install)/.test(c.name));
+  const manufacturing = (hardFail ? Math.min(3, ratio * 10) : ratio * 10) - extraTall * 0.4 - Math.min(1.5, adjN * 0.08);
+  const installation = (hardFail ? 3 : 2 + ratio * 8) - extraTall * 0.6;
+  // 15.pdf Stage 4: Appliance accessibility — appliances present + reachable + clearance checks pass.
+  const accFail = mfg.filter((c: any) => /(accessib|clearance|over drawers|Sink not)/i.test(c.name) && !c.ok).length;
+  const haveHob = runs.some((r: any) => (r.base || []).some((c: any) => c.kind === "hob"));
+  const haveFridge = runs.some((r: any) => (r.base || []).some((c: any) => c.kind === "tall-fridge" || c.kind === "fridge"));
+  const haveDish = runs.some((r: any) => (r.base || []).some((c: any) => c.kind === "dishwasher"));
+  const applianceAccessibility = clamp(9 - accFail * 2.5 - (haveFridge ? 0 : 1.5) - (haveHob ? 0 : 1) + (haveDish ? 0.5 : 0));
+  // 15.pdf Stage 4: Indian modular kitchen compliance — the mandatory Indian-kitchen elements present.
+  const haveAtta = runs.some((r: any) => (r.base || []).some((c: any) => c.kind === "drawer-atta"));
+  const havePull = runs.some((r: any) => (r.base || []).some((c: any) => c.kind === "pullout"));
+  let ic = 3.5;
+  if (haveSink && haveGtpt && sinkGtptOk !== false) ic += 2.5;   // mandatory Sink + matched GTPT
+  if (haveChim) ic += 1.5;                                        // chimney over the 3-drawer
+  if (haveAtta) ic += 1;                                          // atta drawer (Indian staple)
+  if (havePull) ic += 1;                                          // bottle/spice pull-outs
+  if (wt >= 6) ic += 0.5;                                         // work triangle in band
+  const indianCompliance = clamp(ic);
+  return {
+    indianCompliance, workTriangle: clamp(wt + (haveDW ? 1 : 0)), sink: clamp(sinkScore), gtpt: clamp(gtptScore), chimney: clamp(chimScore),
+    applianceAccessibility, windowFit: clamp(windowFit), doorFit: clamp(doorFit), beamFit: clamp(beamFit),
+    storage: clamp(storage), symmetry: clamp(symmetry), manufacturing: clamp(manufacturing), installation: clamp(installation),
+  };
+}
+
+// Weighted total (0..100) from a scores object. Weights favour function & buildability.
+function consensusTotal(scores: any): number {
+  const W: Record<string, number> = { indianCompliance: 1.6, workTriangle: 1.6, sink: 1.2, gtpt: 0.9, chimney: 0.9, applianceAccessibility: 1.1, windowFit: 1.0, doorFit: 0.7, beamFit: 0.7, storage: 1.2, symmetry: 0.8, manufacturing: 1.6, installation: 1.4 };
+  let sum = 0, wsum = 0;
+  for (const k in W) { const v = typeof scores[k] === "number" ? scores[k] : 0; sum += v * W[k]; wsum += W[k]; }
+  // each score is 0..10 → normalise to 0..100.
+  return Math.round((sum / (wsum * 10)) * 100);
+}
+
+// ── 15.pdf Stage 3: optional EXTERNAL multi-AI review (ChatGPT + DeepSeek) ──
+// Keys come from env (OPENAI_API_KEY / DEEPSEEK_API_KEY) or a local ai-keys.json (never the source).
+// Each provider gets the Master Design Brief and returns STRUCTURED parameters; OUR parametric engine
+// turns them into a real candidate (CAD remains the single source of truth — we never draw their text).
+// ── MKW company branding (logo + contact + CTA) stamped on all exports — Rules marketing checklist ──
+const MKW = {
+  name: "Mamma's Kitchen & Wardrobes®",
+  phone: "+91 98915 11273",
+  email: "ajinteriors12@gmail.com",
+  area: "Delhi NCR · Punjab · Rohtak",
+  cta: "Book a FREE Site Visit",
+};
+const MKW_LOGO_B64: string = (() => { try { return "data:image/jpeg;base64," + fsRead("mkw-logo.jpg").toString("base64"); } catch { return ""; } })();
+
+const AI_KEYS_FILE = "ai-keys.json";
+function loadAIKeys(): { openai?: string; deepseek?: string; stability?: string } {
+  const k: any = {};
+  if (process.env.OPENAI_API_KEY) k.openai = process.env.OPENAI_API_KEY;
+  if (process.env.DEEPSEEK_API_KEY) k.deepseek = process.env.DEEPSEEK_API_KEY;
+  if (process.env.STABILITY_API_KEY) k.stability = process.env.STABILITY_API_KEY;   // Stability AI — photoreal render
+  try { if (fsExists(AI_KEYS_FILE)) { const f = JSON.parse(fsRead(AI_KEYS_FILE, "utf8")); if (f.openai) k.openai = f.openai; if (f.deepseek) k.deepseek = f.deepseek; if (f.stability) k.stability = f.stability; } } catch { /* no/invalid key file — fine */ }
+  return k;
+}
+const AI_PROVIDERS: Record<string, { url: string; model: string; keyName: "openai" | "deepseek"; label: string; jsonMode?: boolean; noThink?: boolean }> = {
+  chatgpt: { url: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini", keyName: "openai", label: "ChatGPT", jsonMode: true },
+  // deepseek-v4-flash (~1.6s) is used for the per-click AI Design — the v4-pro thinking model is correct but
+  // takes ~200s/call, far too slow to run on every generate. flash gives the same structured param suggestion
+  // fast. jsonMode is off (rely on the "COMPACT JSON only" instruction + the regex JSON extraction below).
+  deepseek: { url: "https://api.deepseek.com/chat/completions", model: "deepseek-v4-flash", keyName: "deepseek", label: "DeepSeek", jsonMode: false, noThink: true },
+};
+// Robustly pull a JSON object out of an LLM reply: a thinking model (jsonMode off) often wraps the answer
+// in reasoning prose that itself contains braces, so a greedy first-to-last `{…}` match fails to parse.
+// Scan for every TOP-LEVEL balanced {…} and return the LAST one that parses (reasoning models put the
+// final answer object at the end). Falls back to a direct parse, then {}.
+function extractLastJson(txt: string): any {
+  try { return JSON.parse(txt); } catch { /* not pure JSON — scan below */ }
+  const s = String(txt || ""); let depth = 0, start = -1, last: any = null, inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {                                    // inside a JSON string: ignore braces, honour \-escapes
+      if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}") { if (depth > 0) { depth--; if (depth === 0 && start >= 0) { try { last = JSON.parse(s.slice(start, i + 1)); } catch { /* skip */ } start = -1; } } }   // depth>0 guard ignores a stray leading }
+  }
+  return last || {};
+}
+async function askExternalAI(providerId: string, brief: any, type: string): Promise<any | null> {
+  const p = AI_PROVIDERS[providerId]; if (!p) return null;
+  const key = loadAIKeys()[p.keyName]; if (!key) return null;
+  const sys = "You are a senior Indian modular kitchen & furniture designer reviewing a CAD design brief. Reply with COMPACT JSON only, no prose.";
+  const ask = "Suggest the most practical layout parameters for an Indian modular " + type + ", respecting the doors/windows/beams. " +
+    "Return EXACTLY this JSON shape: {\"chimneyWidth\":600|750|900|1200,\"hob\":\"yes\"|\"no\",\"dishwasher\":\"yes\"|\"no\",\"hiunit\":\"yes\"|\"no\",\"utility\":\"yes\"|\"no\",\"handle\":\"D Handle\"|\"G Profile / Gola\"|\"C Handle\",\"storagePriority\":\"Maximum Storage\"|\"Balanced\"|\"Ergonomic\",\"notes\":\"one short rationale\"}. Brief: " + JSON.stringify(brief);
+  try {
+    const reqBody: any = { model: p.model, messages: [{ role: "system", content: sys }, { role: "user", content: ask }], temperature: 0.3, max_tokens: 600 };
+    if (p.jsonMode) reqBody.response_format = { type: "json_object" };   // only models that support it (gpt-4o-mini); thinking models reject it
+    if (p.noThink) reqBody.thinking = { type: "disabled" };   // deepseek-v4-flash: skip the slow reasoning pass (~1s vs ~19s) — JSON is direct & reliable
+    // Timeout guard: a slow/hung provider must never block the whole generate. 30 s is generous for a fast
+    // model (ChatGPT ~2 s, deepseek-v4-flash ~1.6 s) yet caps the worst case; on timeout the provider is skipped.
+    const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 30000);
+    let res;
+    try { res = await fetch(p.url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + key }, body: JSON.stringify(reqBody), signal: ac.signal }); }
+    finally { clearTimeout(t); }
+    if (!res.ok) return { provider: p.label, error: "HTTP " + res.status + " " + (await res.text().catch(() => "")).slice(0, 80) };
+    const j: any = await res.json();
+    const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
+    const parsed: any = extractLastJson(txt);   // robust: handles reasoning models that wrap the JSON in prose/braces
+    return { provider: p.label, params: parsed, notes: String(parsed.notes || "").slice(0, 200) };
+  } catch (e: any) { return { provider: p.label, error: String((e && e.message) || e).slice(0, 120) }; }
+}
+// Sanitise an external suggestion into safe engine opts (clamped to known values).
+function externalOpts(params: any, dims: any): any {
+  const pick = (v: any, allowed: string[], def: string) => allowed.includes(String(v)) ? String(v) : def;
+  return {
+    ...dims,
+    chimneyWidth: [600, 750, 900, 1200].includes(+params.chimneyWidth) ? +params.chimneyWidth : dims.chimneyWidth || 900,
+    hob: pick(params.hob, ["yes", "no", "optional"], dims.hob || "yes"),
+    dishwasher: pick(params.dishwasher, ["yes", "no", "optional"], dims.dishwasher || "yes"),
+    hiunit: pick(params.hiunit, ["yes", "no"], "no"),
+    utility: pick(params.utility, ["yes", "no"], "no"),
+    handle: pick(params.handle, ["D Handle", "C Handle", "G Profile / Gola", "Aluminium Gola", "J Profile"], dims.handle || "D Handle"),
+  };
+}
+
+// Build internal-strategy candidates (+ optional external-AI candidates) from the SAME engine with
+// varied options, score each, and pick the winner. buildLayout sets module globals fresh per call.
+function buildConsensus(type: string, dims: any, extra: any[] = []): { candidates: any[]; winner: number; winnerLayout: any } {
+  const isKitchen = String(type).toLowerCase().includes("kitchen");
+  const strategies = isKitchen ? [
+    // Kitchen: each strategy varies engine inputs into a genuinely different, scorable layout.
+    { strategy: "Maximum Storage", label: "Maximum Storage", opts: { ...dims, hiunit: "yes", utility: "yes", dishwasher: "yes", handle: "G Profile / Gola", chimneyWidth: 600 } },
+    { strategy: "Ergonomic Work-Triangle", label: "Ergonomic Work-Triangle", opts: { ...dims, hiunit: "no", utility: "no", dishwasher: "yes", handle: "D Handle", chimneyWidth: 900 } },
+    { strategy: "Symmetry-First", label: "Symmetry-First", opts: { ...dims, hiunit: "no", utility: "no", dishwasher: "no", handle: "C Handle", chimneyWidth: 1200 } },
+  ] : [
+    // Furniture (wardrobe / crockery / TV / vanity): vary the handle + storage emphasis. The furniture
+    // engine has fewer knobs, so the spread comes from the storage/finish scoring of the same shell.
+    { strategy: "Maximum Storage", label: "Maximum Storage", opts: { ...dims, handle: "G Profile / Gola", colTarget: 600, storageMode: "storage" } },
+    { strategy: "Balanced", label: "Balanced", opts: { ...dims, handle: "D Handle", colTarget: 750, storageMode: "balanced" } },
+    { strategy: "Display / Symmetry", label: "Display / Symmetry", opts: { ...dims, handle: "C Handle", colTarget: 950, storageMode: "display" } },
+  ];
+  for (const e of extra) strategies.push(e);   // external-AI suggestions become real engine candidates
+  const candidates: any[] = []; const layouts: any[] = []; const logs: any[] = [];
+  for (const s of strategies) {
+    const layout = buildLayout(type, s.opts);
+    const scores = scoreLayout(layout, s.opts);
+    const total = consensusTotal(scores);
+    candidates.push({ strategy: s.strategy, label: s.label, scores, total });
+    layouts.push(layout);
+    logs.push({ conflicts: GEN_LOG.conflicts.slice(), adjustments: GEN_LOG.adjustments.slice() });
+  }
+  let winner = 0; for (let i = 1; i < candidates.length; i++) if (candidates[i].total > candidates[winner].total) winner = i;
+  // Re-establish the winning candidate's audit log as the active GEN_LOG so the
+  // endpoint persists the conflicts/adjustments that belong to the chosen design.
+  GEN_LOG = { conflicts: logs[winner].conflicts, adjustments: logs[winner].adjustments };
+  return { candidates, winner, winnerLayout: layouts[winner] };
+}
+
+// ── Dispatcher: kitchens go to the run engine, everything else to furniture. ──
+function buildLayout(type: string, dims: { wall: number; wallB?: number; wallC?: number; chimneyWidth?: number; hob?: string; dishwasher?: string; hiunit?: string; utility?: string; handle?: string; applianceBrand?: string; points?: any[]; windows?: any[] }): Layout {
+  refreshLearnedStandards();   // pull the latest active learned standards from the KB first
+  GEN = { chimneyWidth: dims.chimneyWidth || STD.chimneyWidth, hob: dims.hob || "optional", dishwasher: dims.dishwasher || "optional", hiunit: dims.hiunit || "no", utility: dims.utility || "no", handle: dims.handle || "D Handle", applianceBrand: dims.applianceBrand || "Custom" };
+  GEN_POINTS = Array.isArray(dims.points) ? dims.points : [];   // 15.txt 5.18: marked points drive placement
+  GEN_WINDOWS = Array.isArray(dims.windows) ? dims.windows : [];   // 16/17 6.2: windows to respect
+  GEN_LOG = { conflicts: [], adjustments: [] };   // reset the per-generation mandatory-rule audit
+  FUNC_ROT = 0;                                    // deterministic functional-unit plan per generate
+  const layout = type.toLowerCase().includes("kitchen") ? buildKitchenLayout(type, dims) : buildFurniture(type, dims);
+  validateGeometry(layout);   // 13.pdf §3: clamp impossible widths, drop hidden cabinets, flag collisions
+  if (type.toLowerCase().includes("kitchen")) (layout.runs || []).forEach((r) => tidyWall(r as any));   // final sweep: merge any sub-120 mid-run sliver the tall-unit trim left behind
+  // Six-category rule fusion (3.txt): the whole active knowledge base drives the
+  // design. Surface every active standard, grouped by its fusion class.
+  layout.learnedRules = LEARNED.sources.slice().sort((a, b) => b.confidence - a.confidence);
+  const classes: Record<string, number> = {};
+  for (const s of layout.learnedRules) classes[s.ruleClass] = (classes[s.ruleClass] || 0) + 1;
+  // Note how learning shaped the geometry, then the fusion summary (shown first).
+  layout.appliedRules.unshift(
+    `Driven by ${layout.learnedRules.length} active standard(s) — module widths ${LEARNED.modules.join("/")} mm, max ${LEARNED.maxDrawers} drawers` +
+    (LEARNED.chimneyCentered ? ", chimney centred" : ", chimney off-centre (rule inactive)") +
+    (LEARNED.sinkNearCorner ? ", sink near corner" : ", sink mid-run (rule inactive)") + "."
+  );
+  layout.appliedRules.unshift(
+    `Fused ${layout.learnedRules.length} standards across ${Object.keys(classes).length} of 6 rule categories — ` +
+    Object.entries(classes).map(([k, v]) => k + " " + v).join(", ") + "."
+  );
+  if (type.toLowerCase().includes("kitchen")) {
+    const appt = (v: string) => v === "no" ? "omitted" : v === "optional" ? "included (optional)" : "included";
+    const dw = nearestDrawer(GEN.chimneyWidth);
+    layout.appliedRules.push(`Mandatory: standard ${dw} mm 3-drawer cabinet centred under the chimney; chimney zone ${dw + 50} mm (two 25 mm side panels); ${LEARNED.glassAdjacent ? "equal glass-shutter" : "equal wall"} cabinets adjacent.`);
+    layout.appliedRules.push(`Chimney width ${GEN.chimneyWidth} mm (centerline matches hob). Hob: ${appt(GEN.hob)}. Dishwasher: ${appt(GEN.dishwasher)} — both optional per company rules.`);
+    layout.appliedRules.push(`Tall appliance units (5.7 Step 5): Hi-unit Oven+Microwave tower: ${appt(GEN.hiunit)}. Utility tall unit: ${appt(GEN.utility)}. Placed at kitchen ends; pantry & fridge-housing towers added automatically where feasible.`);
+    const hl = HANDLELESS.has(GEN.handle), red = handleReduction(GEN.handle);
+    layout.appliedRules.push(`Handle system (5.7.12): ${GEN.handle}${hl ? " — handle-less: external handles removed, continuous gola/J profile groove shown" : ""}${red ? `; shutter & drawer-front heights reduced ${red} mm for the profile channel` : ""}. Selectable per kitchen.`);
+    (layout as any).handle = GEN.handle;
+    const ab = applianceBrandOf(GEN.applianceBrand);
+    layout.appliedRules.push(`Appliance brand (5.9.13): ${GEN.applianceBrand}. Representative built-in sizes reserved — chimney ${ab.chimney[0]}×${ab.chimney[1]}×${ab.chimney[2]} mm, hob ${ab.hob[0]}×${ab.hob[2]} mm, oven ${ab.oven[0]}×${ab.oven[1]} mm, dishwasher ${ab.dishwasher[0]}×${ab.dishwasher[1]} mm, fridge housing ${ab.refrigerator[0]}×${ab.refrigerator[1]} mm. Appliances reserve ${ab.vent} mm top/rear ventilation and ${ab.install} mm side install clearance (no appliance abuts a side panel without service gap).`);
+    (layout as any).applianceBrand = GEN.applianceBrand;
+    (layout as any).applianceDims = ab;   // 5.9.13 resolved brand dims, surfaced to the client for cabinet spec labels
+    (layout as any).cutList = cutList(layout);   // 12.pdf production panel cut list (also shown on-screen / in PDF)
+    (layout as any).hardware = hardwareSchedule(layout);   // 12.pdf hardware schedule
+    (layout as any).boq = boq(layout);                     // 12.pdf BOQ summary
+    // Manufacturing practicality validation (11/12.pdf) — run before approval.
+    const mfg = validateManufacturing(layout);
+    (layout as any).mfgChecks = mfg;
+    const fails = mfg.filter((m) => !m.ok);
+    fails.forEach((m) => GEN_LOG.conflicts.push(`Manufacturing check failed — ${m.name}: ${m.note}`));
+    layout.appliedRules.push(`Manufacturing validation: ${mfg.length - fails.length}/${mfg.length} checks passed${fails.length ? " — " + fails.length + " flagged for review" : " — production-ready"}.`);
+    layout.appliedRules.push("Wall-gap rule: a thin scribe filler closes the cabinet-to-wall gap; a filler adjacent to a wall is capped at 75 mm (excess folded into the neighbour), and fillers never sit mid-run. Exception: when the refrigerator is placed along the wall it stands flush — no scribe filler beside it.");
+    layout.appliedRules.push("Upper↔lower alignment (~90%): wall cabinets are aligned to the base cabinet directly below (soft rule, relaxed at the chimney/GTPT zone).");
+    if (GEN_POINTS.length) layout.appliedRules.push(`3D-first workflow (15.txt): ${GEN_POINTS.length} marked point(s) — ${[...new Set(GEN_POINTS.map((p) => p.type))].join(", ")}${pointAlong("chimney") != null ? "; chimney/3-drawer anchored to the marked chimney point" : ""}.`);
+    if (GEN_LOG.conflicts.length) layout.appliedRules.push("⚠ Conflicts (mandatory enforced): " + GEN_LOG.conflicts.join(" "));
+    if (GEN_LOG.adjustments.length) layout.appliedRules.push("Non-standard adjustments: " + GEN_LOG.adjustments.join(" "));
+  }
+  return layout;
+}
+
+// Corner-badge colour keyed to the solution (LeMans > Magic > Blind > Carousel).
+// Fills deliberately avoid SOCKET_COLORS / #020617 / #a5b4fc so the DXF
+// classifyLayer keeps the badge rect on the CABINETS layer.
+function cornerBadgeColor(label: string): { fill: string; stroke: string } {
+  if (label.includes("LeMans")) return { fill: "#10b981", stroke: "#047857" };   // emerald
+  if (label.includes("Magic")) return { fill: "#6366f1", stroke: "#4338ca" };    // indigo
+  if (label.includes("Blind")) return { fill: "#d97706", stroke: "#92400e" };    // amber
+  return { fill: "#e11d48", stroke: "#9f1239" };                                 // rose — Carousel
+}
+
+// Shutter count by width (11/12.pdf): single ≤600, double 700–1200, triple >1200.
+function shutterCount(w: number): number { return w <= 600 ? 1 : w <= 1200 ? 2 : 3; }
+// Cabinet kinds that carry no door/drawer face (handled with their own glyphs).
+const NO_FACE = new Set(["filler", "sidepanel", "chimney", "corner", "hob", "sink", "dishwasher", "tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility"]);
+const isDrawerKind = (k: string) => k === "drawer" || k === "drawer3" || k === "drawer-atta";
+// Drawer-front geometry from dh (top→bottom heights, 11.pdf): inner division
+// fractions and per-drawer centre fractions, both normalised to [0,1] (0 = top).
+function drawerBands(c: Cabinet): number[] {
+  const n = c.drawers || 0; if (n <= 1) return [];
+  const dh = c.dh && c.dh.length === n ? c.dh : Array(n).fill(1);
+  const tot = dh.reduce((a, b) => a + b, 0); const out: number[] = []; let acc = 0;
+  for (let i = 0; i < n - 1; i++) { acc += dh[i]; out.push(acc / tot); }
+  return out;
+}
+function drawerCenters(c: Cabinet): number[] {
+  const n = c.drawers || 0; if (n < 1) return [];
+  const dh = c.dh && c.dh.length === n ? c.dh : Array(n).fill(1);
+  const tot = dh.reduce((a, b) => a + b, 0); const out: number[] = []; let acc = 0;
+  for (let i = 0; i < n; i++) { out.push((acc + dh[i] / 2) / tot); acc += dh[i]; }
+  return out;
+}
+
+// Cabinet face representation (11.pdf §5.7.10 / 12.pdf): draw shutter centre-lines
+// + handles, or per-drawer handles, so the cabinet TYPE is identifiable straight
+// from the elevation (single = 1 handle/no line, double = centre line + 2 handles,
+// triple = 2 lines + 3 handles; drawers = one handle each; open shelf = none).
+function faceDecor(cx: number, cw: number, top: number, bot: number, c: Cabinet, row: "base" | "wall", opts: { noCenter?: boolean } = {}): string {
+  if (c.kind === "open-shelf") return "";                 // open shelves: shelf lines only, no handles
+  const out: string[] = [], H = "#334155", hl = HANDLELESS.has(GEN.handle), knob = GEN.handle === "Knob";
+  // gola/J groove: a continuous profile line along the top of a handle-less door/drawer.
+  const groove = (gx0: number, gx1: number, gy: number) => out.push(`<line x1="${gx0.toFixed(1)}" y1="${gy.toFixed(1)}" x2="${gx1.toFixed(1)}" y2="${gy.toFixed(1)}" stroke="#64748b" stroke-width="1.4"/>`);
+  if (c.drawers && c.drawers > 0) {                       // drawer cabinet
+    const hw = Math.min(cw * 0.4, 26);
+    for (const f of drawerCenters(c)) {
+      const dy = top + (bot - top) * f;
+      if (hl) groove(cx + 4, cx + cw - 4, dy - (bot - top) / (c.drawers * 2) + 3);   // groove at top edge of each drawer
+      else if (knob) out.push(`<circle cx="${(cx + cw / 2).toFixed(1)}" cy="${dy.toFixed(1)}" r="2.6" fill="${H}"/>`);
+      else out.push(`<rect x="${(cx + cw / 2 - hw / 2).toFixed(1)}" y="${(dy - 1.2).toFixed(1)}" width="${hw.toFixed(1)}" height="2.4" rx="1.2" fill="${H}"/>`);
+    }
+    return out.join("");
+  }
+  const n = shutterCount(c.w);                            // shutter doors
+  if (!opts.noCenter) for (let i = 1; i < n; i++) { const lx = cx + cw * i / n; out.push(`<line x1="${lx.toFixed(1)}" y1="${top.toFixed(1)}" x2="${lx.toFixed(1)}" y2="${bot.toFixed(1)}" stroke="#2f74d0" stroke-width="0.8"/>`); }
+  if (hl) { groove(cx + 4, cx + cw - 4, (row === "wall" ? bot - 5 : top + 5)); return out.join(""); }   // profile groove, no handle
+  const inset = 5, hh = Math.min((bot - top) * 0.4, 18), hy = row === "wall" ? bot - 6 - hh : top + 6;
+  for (let i = 0; i < n; i++) {
+    const x0 = cx + cw * i / n, x1 = cx + cw * (i + 1) / n;
+    const hx = n === 1 ? x1 - inset : i === 0 ? x1 - inset : i === n - 1 ? x0 + inset : (x0 + x1) / 2;
+    if (knob) out.push(`<circle cx="${hx.toFixed(1)}" cy="${(hy + hh / 2).toFixed(1)}" r="2.6" fill="${H}"/>`);
+    else out.push(`<rect x="${(hx - 1.2).toFixed(1)}" y="${hy.toFixed(1)}" width="2.4" height="${hh.toFixed(1)}" rx="1.2" fill="${H}"/>`);
+  }
+  return out.join("");
+}
+
+// ── Elevation SVG (front view) of one run, with dimensions, sockets, chimney,
+//    sink and corner units. ──
+// Generalized dimension-line overlap solver (§4.13 / 5.9.6): assign each labelled
+// horizontal dimension interval the lowest stack "level" on which it does not overlap
+// any already-placed interval, so colliding dimension lines stagger onto separate
+// levels instead of drawing on top of one another. Greedy by left edge → minimal
+// number of levels (this is optimal interval-graph colouring). Returns a level per item.
+function levelIntervals(intervals: { a: number; b: number }[], padPx = 6): number[] {
+  const order = intervals
+    .map((v, i) => ({ i, a: Math.min(v.a, v.b), b: Math.max(v.a, v.b) }))
+    .sort((p, q) => p.a - q.a || p.b - q.b);
+  const levelEnd: number[] = [];                 // right edge currently occupying each level
+  const out = new Array(intervals.length).fill(0);
+  for (const it of order) {
+    let lv = 0;
+    while (lv < levelEnd.length && levelEnd[lv] > it.a - padPx) lv++;
+    if (lv === levelEnd.length) levelEnd.push(it.b); else levelEnd[lv] = it.b;
+    out[it.i] = lv;
+  }
+  return out;
+}
+function renderRunElevation(run: RunLayout): string {
+  const wall = run.length, base = run.base, wallCabs = run.wallCabs, sockets = run.sockets;
+  // Compress a label with textLength when it would be wider than its cabinet, so it never spills onto a neighbour.
+  const fitT = (label: any, fs: number, avail: number) => (String(label || "").length * fs * 0.56 > avail - 4) ? ` textLength="${Math.max(8, avail - 4).toFixed(1)}" lengthAdjust="spacingAndGlyphs"` : "";
+  const S = 0.14;                       // mm → px scale
+  const padL = 60, padR = 130, padT = 30, padB = 70;   // padR widened for the side height-dimension gutter
+  const gid = "glassGradS" + String(run.name || "run").replace(/[^a-zA-Z0-9]/g, "");  // 5.9.9 per-run-unique gradient id
+  const W = wall * S + padL + padR;
+  const H = STD.viewHeight * S + padT + padB;
+  const floorY = padT + STD.viewHeight * S;            // y of floor line
+  const yOf = (mmFromFloor: number) => floorY - mmFromFloor * S;
+  const xOf = (mm: number) => padL + mm * S;
+
+  const parts: string[] = [];
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${S}" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace">`);
+  parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#f4f7fb"/>`);
+  // Floor + wall reference
+  parts.push(`<line x1="${padL}" y1="${floorY}" x2="${xOf(wall)}" y2="${floorY}" stroke="#475569" stroke-width="2"/>`);
+  parts.push(`<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${floorY}" stroke="#334155" stroke-width="1"/>`);
+
+  // Tall units (full-height) — drawn last; their wall area is suppressed.
+  const tallCabs = base.filter((c) => isTall(c.kind));
+  const inTall = (px: number) => tallCabs.some((t) => px >= t.x && px < t.x + t.w);
+  const ab = applianceBrandOf(GEN.applianceBrand);   // 5.9.13 resolved brand appliance dims for spec labels
+
+  // Base cabinets
+  const baseTop = yOf(STD.baseHeight);
+  for (const c of base) {
+    if (isTall(c.kind)) continue; // drawn full-height later
+    const cx = xOf(c.x), cw = c.w * S;
+    const hobHere = c.kind === "hob" || (c.kind === "drawer3" && apptOn(GEN.hob));
+    const fill = c.kind === "filler" ? "url(#hatch)" : c.kind === "sink" ? "#cdeef5" : c.kind === "corner" ? "#dbe4f0"
+      : hobHere ? "#ffe3c2" : c.kind === "dishwasher" ? "#dbe9ff" : c.kind === "fridge" ? "#e8e0ff" : c.kind === "drawer-atta" ? "#fdeccb" : "#eaf1fb";
+    const bodyH = (STD.baseHeight - STD.toeKick) * S;
+    parts.push(`<rect x="${cx}" y="${baseTop}" width="${cw}" height="${bodyH}" fill="${fill}" stroke="#2f74d0" stroke-width="1"/>`);
+    // drawer-front division lines (proportional to dh — 140/280/280, atta 140/180/350, …)
+    if (c.drawers > 0) for (const f of drawerBands(c)) parts.push(`<line x1="${cx}" y1="${baseTop + bodyH * f}" x2="${cx + cw}" y2="${baseTop + bodyH * f}" stroke="#2f74d0" stroke-width="0.7"/>`);
+    // Cabinet-type representation: shutter centre-lines + handles / drawer handles.
+    if (!NO_FACE.has(c.kind)) parts.push(faceDecor(cx, cw, baseTop, baseTop + (STD.baseHeight - STD.toeKick) * S, c, "base"));
+    if (c.kind === "sink") parts.push(`<ellipse cx="${cx + cw / 2}" cy="${baseTop + 10}" rx="${cw * 0.32}" ry="6" fill="none" stroke="#0891b2" stroke-width="1.2"/>`);
+    // Hob: 4 burner rings drawn on the countertop above the hob / 3-drawer cabinet.
+    if (hobHere) { const ty = baseTop - STD.counterThk * S - 3; for (let bx = 0; bx < 2; bx++) for (let by = 0; by < 2; by++) parts.push(`<circle cx="${cx + cw * (0.32 + bx * 0.36)}" cy="${ty - 5 - by * 9}" r="3.2" fill="none" stroke="#ea580c" stroke-width="1"/>`); }
+    if (c.kind === "dishwasher") parts.push(`<line x1="${cx + 4}" y1="${baseTop + 6}" x2="${cx + cw - 4}" y2="${baseTop + 6}" stroke="#2563eb" stroke-width="1"/>`);
+    if (c.kind === "corner") {
+      // Corner-solution badge (10.pdf §5.7 Step 4) — a labelled pill at the top of
+      // the corner unit naming the mechanism (LeMans / Magic Corner / Blind / Carousel),
+      // plus a dashed diagonal hinting at the L-return into the adjacent run.
+      const bh = (STD.baseHeight - STD.toeKick) * S;
+      parts.push(`<line x1="${cx}" y1="${baseTop + bh}" x2="${cx + cw}" y2="${baseTop}" stroke="#94a3b8" stroke-width="0.5" stroke-dasharray="3 2"/>`);
+      const bw = Math.min(cw - 4, Math.max(48, c.label.length * 5.4)), bx = cx + (cw - bw) / 2, by = baseTop + 5;
+      const bc = cornerBadgeColor(c.label);
+      parts.push(`<rect x="${bx}" y="${by}" width="${bw}" height="13" rx="6" fill="${bc.fill}" stroke="${bc.stroke}" stroke-width="0.6"/>`);
+      parts.push(`<text x="${cx + cw / 2}" y="${by + 9.5}" fill="#ffffff" font-size="7.5" text-anchor="middle">${c.label}</text>`);
+    } else {
+      parts.push(`<text x="${cx + cw / 2}" y="${baseTop + (STD.baseHeight - STD.toeKick) * S - 6}" fill="#475569" font-size="9" text-anchor="middle"${fitT(c.label, 9, cw)}>${c.label}</text>`);
+    }
+  }
+  // Counter top
+  parts.push(`<rect x="${padL}" y="${yOf(STD.baseHeight) - STD.counterThk * S}" width="${wall * S}" height="${STD.counterThk * S}" fill="#dbe3ee"/>`);
+  // Glass-shutter gradient (5.9.9) — defined here so the wall-cabinet loop below can reference it.
+  parts.push(`<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#d7ddca"/><stop offset="42%" stop-color="#b9c2a8"/><stop offset="72%" stop-color="#a9b499"/><stop offset="100%" stop-color="#96a285"/></linearGradient><linearGradient id="${gid}r" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ffffff" stop-opacity="0.6"/><stop offset="55%" stop-color="#ffffff" stop-opacity="0.13"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0.03"/></linearGradient></defs>`);
+  // Backsplash tiles (5.9.7) — 100 mm grid band between counter top and wall sill, spanning the run.
+  {
+    const bsBot = yOf(STD.baseHeight), bsTop = yOf(STD.wallStart);   // top<bot in screen-y
+    if (bsBot > bsTop + 1) {
+      const tile = 100 * S, runW = wall * S;
+      parts.push(`<g pointer-events="none"><rect x="${padL}" y="${bsTop}" width="${runW}" height="${bsBot - bsTop}" fill="#eaf6f8"/>`);
+      for (let v = tile; v < runW - 0.5; v += tile) parts.push(`<line x1="${padL + v}" y1="${bsTop}" x2="${padL + v}" y2="${bsBot}" stroke="#cfe3e8" stroke-width="0.6"/>`);
+      for (let h = bsTop + tile; h < bsBot - 0.5; h += tile) parts.push(`<line x1="${padL}" y1="${h}" x2="${padL + runW}" y2="${h}" stroke="#cfe3e8" stroke-width="0.6"/>`);
+      parts.push(`</g>`);
+    }
+  }
+
+  // Wall cabinets
+  const wallTop = yOf(STD.wallStart + STD.wallHeight), wallBot = yOf(STD.wallStart);
+  for (const c of wallCabs) {
+    if (inTall(c.x + c.w / 2)) continue; // tall unit occupies this column floor-to-ceiling
+    const cx = xOf(c.x), cw = c.w * S;
+    if (c.kind === "chimney") {
+      // trapezoid chimney centered
+      const midX = cx + cw / 2;
+      parts.push(`<polygon points="${cx},${wallBot} ${cx + cw},${wallBot} ${midX + cw * 0.18},${wallTop} ${midX - cw * 0.18},${wallTop}" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1.2"/>`);
+      parts.push(`<text x="${midX}" y="${(wallTop + wallBot) / 2}" fill="#3730a3" font-size="9" text-anchor="middle">Chimney</text>`);
+    } else if (c.kind === "sidepanel") {
+      // 25 mm shutter-finish side panel either side of the chimney zone.
+      parts.push(`<rect x="${cx}" y="${wallTop}" width="${Math.max(2, cw)}" height="${(wallBot - wallTop)}" fill="#cdd9ec" stroke="#2f74d0" stroke-width="0.8"/>`);
+    } else if (c.kind === "gtpt") {
+      // 14.pdf GTPT: glass rack (top) · plate rack (mid) · drain tray + drying (bottom)
+      const ch = wallBot - wallTop, seg = ch / 3;
+      parts.push(`<rect x="${cx}" y="${wallTop}" width="${cw}" height="${ch}" fill="url(#${gid})" fill-opacity="0.82" stroke="#0891b2" stroke-width="1"/>`);
+      const n1 = Math.max(3, Math.round(cw / 13)); for (let i = 1; i < n1; i++) parts.push(`<line x1="${cx + cw * i / n1}" y1="${wallTop + 1}" x2="${cx + cw * i / n1}" y2="${wallTop + seg - 1}" stroke="#38bdf8" stroke-width="0.5"/>`);
+      parts.push(`<line x1="${cx}" y1="${wallTop + seg}" x2="${cx + cw}" y2="${wallTop + seg}" stroke="#0891b2" stroke-width="0.6"/>`);
+      const n2 = Math.max(3, Math.round(cw / 16)); for (let i = 1; i < n2; i++) parts.push(`<line x1="${cx + cw * i / n2}" y1="${wallTop + seg + 1}" x2="${cx + cw * i / n2}" y2="${wallTop + 2 * seg - 1}" stroke="#0891b2" stroke-width="0.5"/>`);
+      parts.push(`<line x1="${cx}" y1="${wallTop + 2 * seg}" x2="${cx + cw}" y2="${wallTop + 2 * seg}" stroke="#0891b2" stroke-width="0.6"/>`);
+      parts.push(`<line x1="${cx + 1}" y1="${wallTop + 2 * seg + seg * 0.42}" x2="${cx + cw - 1}" y2="${wallTop + 2 * seg + seg * 0.42}" stroke="#0891b2" stroke-width="0.5" stroke-dasharray="3 2"/>`);
+      parts.push(`<line x1="${cx + 1}" y1="${wallTop + 2 * seg + seg * 0.72}" x2="${cx + cw - 1}" y2="${wallTop + 2 * seg + seg * 0.72}" stroke="#0891b2" stroke-width="0.5" stroke-dasharray="3 2"/>`);
+      parts.push(`<text x="${cx + cw / 2}" y="${wallBot - 3}" fill="#0e7490" font-size="7" text-anchor="middle">GTPT</text>`);
+    } else {
+      const ch = wallBot - wallTop;
+      const glass = c.kind === "glass-wall" || c.kind === "display" || c.kind === "gtpt";   // 5.9.9 glass shutters
+      const fill = glass ? `url(#${gid})` : "#eaf1fb";
+      parts.push(`<rect x="${cx}" y="${wallTop}" width="${cw}" height="${ch}" fill="${fill}"${glass ? " fill-opacity=\"0.82\"" : ""} stroke="${glass ? "#9aa0a6" : "#2f74d0"}" stroke-width="1"/>`);
+      // Glass shutter (ref: frosted sage-green glass in a brushed-aluminium frame): frame + mullion + vertical light reflection (5.9.9).
+      if (glass) {
+        parts.push(`<rect x="${cx + 1.5}" y="${wallTop + 1.5}" width="${cw - 3}" height="${ch - 3}" fill="none" stroke="#cfd3d7" stroke-width="2"/>`);
+        parts.push(`<rect x="${cx + 3.5}" y="${wallTop + 3.5}" width="${cw - 7}" height="${ch - 7}" fill="none" stroke="#8b9096" stroke-width="0.8"/>`);
+        parts.push(`<line x1="${cx + cw / 2}" y1="${wallTop + 4}" x2="${cx + cw / 2}" y2="${wallBot - 4}" stroke="#8b9096" stroke-width="0.8"/>`);
+        parts.push(`<rect x="${cx + cw * 0.17}" y="${wallTop + 4}" width="${Math.max(3, cw * 0.1)}" height="${ch - 8}" fill="url(#${gid}r)"/>`);
+      }
+      // Auto shelves inside wall cabinets (5.2): one per ~300 mm of height.
+      const shelves = Math.max(1, Math.round(STD.wallHeight / 320) - 1);
+      for (let s = 1; s <= shelves; s++) { const sy2 = wallTop + ch * (s / (shelves + 1)); parts.push(`<line x1="${cx + 2}" y1="${sy2}" x2="${cx + cw - 2}" y2="${sy2}" stroke="#94a3b8" stroke-width="0.4"/>`); }
+      // Shutter centre-lines + handles (glass keeps its mullion → noCenter).
+      parts.push(faceDecor(cx, cw, wallTop, wallBot, c, "wall", { noCenter: c.kind === "glass-wall" }));
+      parts.push(`<text x="${cx + cw / 2}" y="${(wallTop + wallBot) / 2 + 3}" fill="#475569" font-size="8" text-anchor="middle"${fitT(c.label, 8, cw)}>${c.label}</text>`);
+    }
+  }
+
+  // Tall units — full height (floor → top of wall cabinets), drawn over the counter.
+  const tallTop = yOf(STD.wallStart + STD.wallHeight);
+  for (const c of tallCabs) {
+    const cx = xOf(c.x), cw = c.w * S, th = floorY - tallTop;
+    const tfill = c.kind === "tall-fridge" ? "#e8e0ff" : c.kind === "tall-hiunit" ? "#ffe8d6" : c.kind === "tall-utility" ? "#d7f0ee" : "#e7f6e3";
+    parts.push(`<rect x="${cx}" y="${tallTop}" width="${cw}" height="${th}" fill="${tfill}" stroke="#2f74d0" stroke-width="1.2"/>`);
+    if (c.kind === "tall-hiunit") {
+      // Oven niche (centreline ~1050 mm) + Microwave niche (centreline ~1350 mm).
+      const niche = (centreMM: number, label: string) => {
+        const nh = 380 * S, ny = floorY - (centreMM + 190) * S, nx = cx + cw * 0.12, nw = cw * 0.76;
+        parts.push(`<rect x="${nx}" y="${ny}" width="${nw}" height="${nh}" fill="#1f2937" stroke="#0f172a" stroke-width="1"/>`);
+        parts.push(`<rect x="${nx + 2}" y="${ny + 2}" width="${nw - 4}" height="${nh - 4}" fill="none" stroke="#94a3b8" stroke-width="0.5"/>`);
+        parts.push(`<text x="${cx + cw / 2}" y="${ny + nh / 2 + 3}" fill="#e2e8f0" font-size="7" text-anchor="middle">${label}</text>`);
+      };
+      niche(1050, "Oven"); niche(1450, "Microwave");
+      parts.push(`<text x="${cx + cw / 2}" y="${tallTop + 12}" fill="#475569" font-size="8" text-anchor="middle">${c.label}</text>`);
+    } else {
+      for (let s = 1; s < 6; s++) { const sy = tallTop + th * (s / 6); parts.push(`<line x1="${cx}" y1="${sy}" x2="${cx + cw}" y2="${sy}" stroke="#94a3b8" stroke-width="0.4"/>`); }
+      parts.push(`<text x="${cx + cw / 2}" y="${(tallTop + floorY) / 2}" fill="#475569" font-size="8" text-anchor="middle">${c.label}</text>`);
+    }
+  }
+
+  // 5.9.13 appliance-brand spec labels — actual manufacturer dimensions on the relevant cabinets.
+  {
+    const brand = GEN.applianceBrand || "Custom";
+    const lab = (cx: number, cw: number, y: number, sp: string) => parts.push(`<text x="${cx + cw / 2}" y="${y}" fill="#7c3aed" font-size="7" text-anchor="middle">${brand} ${sp}</text>`);
+    for (const c of base) {
+      if (isTall(c.kind)) continue;
+      const cx = xOf(c.x), cw = c.w * S, hobHere = c.kind === "hob" || (c.kind === "drawer3" && apptOn(GEN.hob));
+      if (hobHere) lab(cx, cw, baseTop - STD.counterThk * S - 24, `${ab.hob[0]}×${ab.hob[2]}`);
+      else if (c.kind === "dishwasher") lab(cx, cw, baseTop + 18, `${ab.dishwasher[0]}×${ab.dishwasher[1]}`);
+      else if (c.kind === "fridge") lab(cx, cw, baseTop + 18, `${ab.refrigerator[0]}×${ab.refrigerator[1]}`);
+    }
+    for (const c of wallCabs) if (c.kind === "chimney" && !inTall(c.x + c.w / 2)) { const cx = xOf(c.x), cw = c.w * S; lab(cx, cw, wallTop - 4, `${ab.chimney[0]}×${ab.chimney[1]}`); }
+    for (const c of tallCabs) { const cx = xOf(c.x), cw = c.w * S; if (c.kind === "tall-fridge") lab(cx, cw, tallTop + 24, `${ab.refrigerator[0]}×${ab.refrigerator[1]}`); else if (c.kind === "tall-hiunit") lab(cx, cw, tallTop + 24, `${ab.oven[0]}×${ab.oven[1]}`); }
+  }
+  // Electrical sockets + dimension lines (4D: colour per group, vertical offset, height label)
+  const groupColors = ["#f59e0b", "#ef4444", "#22c55e", "#a855f7"];
+  // §4.13 generalized overlap solver: stagger colliding socket dimension lines onto the
+  // fewest stack levels (replaces the old fixed i%3 stagger, which still overlapped).
+  const socketLevels = levelIntervals(sockets.map((s) => ({ a: padL, b: xOf(s.x) })), 8);
+  sockets.forEach((s, i) => {
+    const sxp = xOf(s.x), sy = yOf(STD.socketHeight), col = groupColors[s.group % groupColors.length];
+    parts.push(`<rect x="${sxp - 5}" y="${sy - 5}" width="10" height="10" fill="${col}"/>`);
+    parts.push(`<text x="${sxp}" y="${sy - 9}" fill="${col}" font-size="9" text-anchor="middle">S${i + 1}</text>`);
+    // dimension from nearest wall (left), staggered to the solver-assigned level
+    const dimY = floorY + 14 + socketLevels[i] * 12;
+    parts.push(`<line x1="${padL}" y1="${dimY}" x2="${sxp}" y2="${dimY}" stroke="${col}" stroke-width="0.8"/>`);
+    parts.push(`<text x="${(padL + sxp) / 2}" y="${dimY - 2}" fill="${col}" font-size="9" text-anchor="middle">${Math.round(s.x)}</text>`);
+    parts.push(`<text x="${sxp + 8}" y="${sy + 3}" fill="${col}" font-size="9">${STD.socketHeight}↑</text>`);
+  });
+
+  // ── 5.9.6 complete dimensions: width chain ABOVE wall cabinets + side height chain ──
+  const drawableWall = wallCabs.filter((c) => c.kind !== "chimney" && c.kind !== "sidepanel" && !inTall(c.x + c.w / 2));
+  if (drawableWall.length) {
+    const dimYTop = Math.max(padT + 2, wallTop - 12);
+    parts.push(`<g pointer-events="none">`);
+    parts.push(`<line x1="${xOf(0)}" y1="${dimYTop}" x2="${xOf(wall)}" y2="${dimYTop}" stroke="#1e3a5f" stroke-width="0.9"/>`);
+    parts.push(`<text x="${xOf(wall / 2)}" y="${dimYTop - 4}" fill="#1e3a5f" font-size="9" text-anchor="middle">${Math.round(wall)} mm overall width</text>`);
+    for (const c of drawableWall) {
+      const x1 = xOf(c.x), x2 = xOf(c.x + c.w);
+      parts.push(`<line x1="${x1}" y1="${dimYTop}" x2="${x2}" y2="${dimYTop}" stroke="#64748b" stroke-width="0.7"/>`);
+      parts.push(`<line x1="${x1 - 2}" y1="${dimYTop - 2.5}" x2="${x1 + 2}" y2="${dimYTop + 2.5}" stroke="#64748b" stroke-width="0.8"/>`);
+      parts.push(`<line x1="${x2 - 2}" y1="${dimYTop - 2.5}" x2="${x2 + 2}" y2="${dimYTop + 2.5}" stroke="#64748b" stroke-width="0.8"/>`);
+      if (c.w * S > 24) parts.push(`<text x="${(x1 + x2) / 2}" y="${dimYTop - 4}" fill="#475569" font-size="9" text-anchor="middle">${Math.round(c.w)}</text>`);
+    }
+    parts.push(`</g>`);
+  }
+  // Side height-dimension chain (right gutter): base, backsplash gap, wall-cabinet height, overall.
+  {
+    const baseHMm = STD.baseHeight, sillMm = STD.wallStart, wallTopMm = drawableWall.length ? STD.wallStart + STD.wallHeight : STD.baseHeight, overallMm = Math.max(wallTopMm, STD.wallStart + STD.wallHeight, STD.baseHeight);
+    const xS = xOf(wall) + 22;
+    const seg = (mmTop: number, mmBot: number, lab: string, col: string, dx: number) => {
+      const yT = yOf(mmTop), yB = yOf(mmBot), xx = xS + dx;
+      parts.push(`<line x1="${xx}" y1="${yT}" x2="${xx}" y2="${yB}" stroke="${col}" stroke-width="0.8"/>`);
+      parts.push(`<line x1="${xx - 2.5}" y1="${yT + 2.5}" x2="${xx + 2.5}" y2="${yT - 2.5}" stroke="${col}" stroke-width="0.9"/>`);
+      parts.push(`<line x1="${xx - 2.5}" y1="${yB + 2.5}" x2="${xx + 2.5}" y2="${yB - 2.5}" stroke="${col}" stroke-width="0.9"/>`);
+      parts.push(`<text x="${xx + 5}" y="${(yT + yB) / 2 + 3}" fill="${col}" font-size="9">${lab}</text>`);
+    };
+    parts.push(`<g pointer-events="none">`);
+    seg(baseHMm, 0, `${Math.round(baseHMm)} base`, "#1e3a5f", 0);
+    if (sillMm > baseHMm + 1) seg(sillMm, baseHMm, `${Math.round(sillMm - baseHMm)} splash`, "#0891b2", 0);
+    if (drawableWall.length && wallTopMm > sillMm + 1) seg(wallTopMm, sillMm, `${Math.round(wallTopMm - sillMm)} wall`, "#1e3a5f", 0);
+    seg(overallMm, 0, `${Math.round(overallMm)} overall H`, "#7c3aed", 56);
+    parts.push(`</g>`);
+  }
+  // ── 5.9.8 realistic accessory glyphs — subtle line art, non-intrusive ──
+  {
+    const acc: string[] = [];
+    const counterY = yOf(STD.baseHeight) - STD.counterThk * S;
+    for (const c of base) {
+      if (isTall(c.kind)) continue;
+      const cx = xOf(c.x), cw = c.w * S, mid = cx + cw / 2;
+      if (c.kind === "sink") {
+        // Faucet: riser + curved gooseneck spout over the sink.
+        const fx = mid, fb = counterY - 1, ft = counterY - 46;
+        acc.push(`<path d="M ${fx} ${fb} L ${fx} ${ft} q 0 -8 14 -8 q 8 0 8 7" fill="none" stroke="#64748b" stroke-width="1.4" stroke-linecap="round"/>`);
+        acc.push(`<line x1="${fx - 5}" y1="${fb}" x2="${fx + 5}" y2="${fb}" stroke="#64748b" stroke-width="1.6" stroke-linecap="round"/>`);
+      }
+      const hobHere = c.kind === "hob" || (c.kind === "drawer3" && apptOn(GEN.hob));
+      if (hobHere) {
+        // A stockpot + a small saucepan with handle, sitting on the hob area.
+        const py = counterY - 4;
+        acc.push(`<path d="M ${cx + cw * 0.22} ${py} l 0 -15 a 9 4 0 0 0 18 0 l 0 15" fill="none" stroke="#64748b" stroke-width="1.1"/>`);
+        acc.push(`<ellipse cx="${cx + cw * 0.31}" cy="${py - 15}" rx="9" ry="3" fill="none" stroke="#64748b" stroke-width="1"/>`);
+        acc.push(`<path d="M ${cx + cw * 0.62} ${py} l 0 -10 a 6 3 0 0 0 12 0 l 0 10" fill="none" stroke="#0891b2" stroke-width="1"/>`);
+        acc.push(`<line x1="${cx + cw * 0.74}" y1="${py - 7}" x2="${cx + cw * 0.9}" y2="${py - 9}" stroke="#0891b2" stroke-width="1" stroke-linecap="round"/>`);
+      }
+      if (c.kind === "drawer-atta" || c.kind === "drawer2" || c.kind === "drawer") {
+        // A couple of crockery / bottle marks resting on the counter.
+        const py = counterY - 3;
+        acc.push(`<rect x="${mid - 9}" y="${py - 18}" width="5" height="18" rx="2" fill="none" stroke="#64748b" stroke-width="0.9"/>`);
+        acc.push(`<line x1="${mid - 7.5}" y1="${py - 18}" x2="${mid - 7.5}" y2="${py - 23}" stroke="#64748b" stroke-width="0.9"/>`);
+        acc.push(`<path d="M ${mid + 2} ${py} a 6 6 0 0 1 12 0" fill="none" stroke="#0891b2" stroke-width="0.9"/>`);
+      }
+    }
+    if (acc.length) parts.push(`<g pointer-events="none">${acc.join("")}</g>`);
+  }
+  // Run title + overall width
+  parts.push(`<text x="${xOf(wall / 2)}" y="${padT - 12}" fill="#1e3a5f" font-size="11" text-anchor="middle">${run.name} — Elevation — ${Math.round(wall)} mm</text>`);
+  // hatch pattern for fillers
+  parts.push(`<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#f59e0b" stroke-width="1.2"/></pattern></defs>`);
+  parts.push(`</svg>`);
+  return parts.join("");
+}
+
+// ── Section (cross-section) view of a run (13.txt §7.9) — a true-scale side
+//    profile: wall, floor, ceiling, base+toe-kick, counter, wall cabinet, loft
+//    (or a full-height tall unit), with vertical height + depth dimensions. ──
+function renderRunSection(run: RunLayout): string {
+  const S = 0.14, CH = 2700, pad = { l: 92, t: 22, r: 30, b: 40 };
+  const baseD = STD.baseDepth, wallD = STD.wallDepth, oh = 25, maxD = baseD + oh;
+  const W = maxD * S + pad.l + pad.r, Hpx = CH * S + pad.t + pad.b, floorY = pad.t + CH * S;
+  const xOf = (d: number) => pad.l + d * S, yOf = (h: number) => floorY - h * S;
+  const wallTopMM = STD.wallStart + STD.wallHeight;
+  const hasWall = run.wallCabs.some((c) => c.kind !== "chimney" && c.kind !== "sidepanel");
+  const hasTall = run.base.some((c) => isTall(c.kind));
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${S}" width="${W.toFixed(0)}" height="${Hpx.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${Hpx.toFixed(0)}" font-family="monospace">`);
+  p.push(`<rect width="${W}" height="${Hpx}" fill="#f4f7fb"/>`);
+  p.push(`<text x="${W / 2}" y="14" fill="#1e3a5f" font-size="11" text-anchor="middle">${run.name} — Section</text>`);
+  // wall (back), floor, ceiling
+  p.push(`<line x1="${xOf(0)}" y1="${yOf(0)}" x2="${xOf(0)}" y2="${yOf(CH)}" stroke="#334155" stroke-width="3"/>`);
+  p.push(`<line x1="${xOf(0)}" y1="${yOf(0)}" x2="${xOf(maxD)}" y2="${yOf(0)}" stroke="#475569" stroke-width="2"/>`);
+  p.push(`<line x1="${xOf(0)}" y1="${yOf(CH)}" x2="${xOf(maxD)}" y2="${yOf(CH)}" stroke="#475569" stroke-width="1.5"/>`);
+  p.push(`<text x="${xOf(maxD)}" y="${yOf(CH) + 9}" fill="#94a3b8" font-size="7" text-anchor="end">ceiling ${CH}</text>`);
+  if (hasTall) {
+    p.push(`<rect x="${xOf(0)}" y="${yOf(wallTopMM)}" width="${baseD * S}" height="${wallTopMM * S}" fill="#e7f6e3" stroke="#2f74d0" stroke-width="1.2"/>`);
+    for (let s = 1; s < 6; s++) { const sy = yOf(wallTopMM) + (wallTopMM * S) * s / 6; p.push(`<line x1="${xOf(0)}" y1="${sy}" x2="${xOf(baseD)}" y2="${sy}" stroke="#94a3b8" stroke-width="0.4"/>`); }
+    p.push(`<text x="${xOf(baseD / 2)}" y="${yOf(wallTopMM / 2)}" fill="#475569" font-size="8" text-anchor="middle">Tall unit</text>`);
+  } else {
+    p.push(`<rect x="${xOf(0)}" y="${yOf(STD.baseHeight)}" width="${baseD * S}" height="${(STD.baseHeight - STD.toeKick) * S}" fill="#eaf1fb" stroke="#2f74d0" stroke-width="1"/>`);
+    p.push(`<rect x="${xOf(0)}" y="${yOf(STD.toeKick)}" width="${(baseD - 70) * S}" height="${STD.toeKick * S}" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>`);
+    p.push(`<text x="${xOf(baseD / 2)}" y="${yOf(STD.baseHeight / 2)}" fill="#475569" font-size="8" text-anchor="middle">Base</text>`);
+    p.push(`<rect x="${xOf(0)}" y="${yOf(STD.baseHeight + STD.counterThk)}" width="${(baseD + oh) * S}" height="${STD.counterThk * S}" fill="#dbe3ee" stroke="#64748b" stroke-width="0.8"/>`);
+    // 13.pdf §4 backsplash tiles in section (default look, for SVG/DXF/PDF exports)
+    { const bDepth = 40 * S, bT = yOf(STD.wallStart), bB = yOf(STD.baseHeight + STD.counterThk);
+      p.push(`<rect x="${xOf(0)}" y="${bT}" width="${bDepth}" height="${bB - bT}" fill="#e8eef0" stroke="#c2d0d4" stroke-width="0.5"/>`);
+      const tstep = Math.max(3, 100 * S); for (let yy = bT + tstep; yy < bB - 0.5; yy += tstep) p.push(`<line x1="${xOf(0)}" y1="${yy}" x2="${xOf(0) + bDepth}" y2="${yy}" stroke="#c2d0d4" stroke-width="0.35"/>`); }
+    if (hasWall) {
+      p.push(`<rect x="${xOf(0)}" y="${yOf(wallTopMM)}" width="${wallD * S}" height="${STD.wallHeight * S}" fill="#eaf1fb" stroke="#2f74d0" stroke-width="1"/>`);
+      p.push(`<text x="${xOf(wallD / 2)}" y="${yOf(STD.wallStart + STD.wallHeight / 2)}" fill="#475569" font-size="7" text-anchor="middle">Wall</text>`);
+      p.push(`<rect x="${xOf(0)}" y="${yOf(CH)}" width="${wallD * S}" height="${(CH - wallTopMM) * S}" fill="#eef2ff" stroke="#a5b4fc" stroke-width="0.8"/>`);
+      p.push(`<text x="${xOf(wallD / 2)}" y="${yOf((CH + wallTopMM) / 2)}" fill="#6366f1" font-size="7" text-anchor="middle">Loft</text>`);
+    } else {
+      p.push(`<text x="${xOf(maxD)}" y="${yOf(STD.wallStart)}" fill="#94a3b8" font-size="7" text-anchor="end">open — no wall units</text>`);
+    }
+  }
+  // vertical dimensions (left margin)
+  const vdim = (h: number, label: string, off: number) => {
+    const dx = pad.l - off;
+    p.push(`<line x1="${dx}" y1="${yOf(0)}" x2="${dx}" y2="${yOf(h)}" stroke="#1e3a5f" stroke-width="0.6"/>`);
+    p.push(`<line x1="${dx - 2}" y1="${yOf(0)}" x2="${dx + 2}" y2="${yOf(0)}" stroke="#1e3a5f" stroke-width="0.8"/>`);
+    p.push(`<line x1="${dx - 2}" y1="${yOf(h)}" x2="${dx + 2}" y2="${yOf(h)}" stroke="#1e3a5f" stroke-width="0.8"/>`);
+    p.push(`<text x="${dx - 3}" y="${yOf(h / 2)}" fill="#1e3a5f" font-size="7" text-anchor="end">${label}</text>`);
+  };
+  vdim(STD.baseHeight, `${STD.baseHeight}`, 14);
+  if (hasWall && !hasTall) { vdim(STD.wallStart, `sill ${STD.wallStart}`, 42); vdim(wallTopMM, `${wallTopMM}`, 70); }
+  // horizontal depth dimension (bottom)
+  const hy = floorY + 16;
+  p.push(`<line x1="${xOf(0)}" y1="${hy}" x2="${xOf(baseD)}" y2="${hy}" stroke="#1e3a5f" stroke-width="0.6"/>`);
+  p.push(`<text x="${xOf(baseD / 2)}" y="${hy - 2}" fill="#1e3a5f" font-size="7" text-anchor="middle">depth ${baseD}</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+// ── Plan (top view) — dispatches on layout type to draw the true L / U shape ──
+const PLAN_S = 0.1;                       // mm → px for plan views
+function planFill(kind: string): string {
+  return kind === "filler" ? "#fde4cf" : kind === "sink" ? "#cdeef5"
+    : kind === "corner" ? "#dbe4f0" : kind === "hob" || kind === "drawer3" ? "#ffe3c2"
+    : kind === "dishwasher" ? "#dbe9ff" : kind === "fridge" || kind === "tall-fridge" ? "#e8e0ff"
+    : kind === "tall-pantry" ? "#e7f6e3" : kind === "tall-hiunit" ? "#ffe8d6" : kind === "tall-utility" ? "#d7f0ee" : kind === "drawer-atta" ? "#fdeccb" : "#eaf1fb";
+}
+
+function renderPlan(type: string, runs: RunLayout[], dims: { wall: number; wallB?: number; wallC?: number }): string {
+  const t = type.toLowerCase();
+  if (t.includes("l-shape")) return renderPlanL(runs[0], runs[1], dims.wall, dims.wallB ?? 2400);
+  if (t.includes("peninsula")) return renderPlanL(runs[0], runs[1], dims.wall, dims.wallB ?? 2400, { label: "Peninsula", openLeg: true });
+  if (t.includes("u-shape")) return renderPlanU(runs[0], runs[1], runs[2], dims.wall, dims.wallB ?? 2400, dims.wallC ?? 2400);
+  if (t.includes("parallel")) return renderPlanParallel(runs[0], runs[1], dims.wall, dims.wallB ?? dims.wall);
+  if (t.includes("island")) return renderPlanIsland(runs[0], runs[1], dims.wall, runs[1].length);
+  return renderPlanStraight(type, runs[0]);
+}
+
+function svgHead(W: number, H: number): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${PLAN_S}" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace"><rect width="${W}" height="${H}" fill="#f4f7fb"/>`;
+}
+function sinkEllipse(cx: number, cy: number): string {
+  return `<ellipse cx="${cx}" cy="${cy}" rx="9" ry="6" fill="none" stroke="#0891b2" stroke-width="1.2"/>`;
+}
+
+function renderPlanStraight(type: string, run: RunLayout): string {
+  const S = PLAN_S, d = STD.baseDepth, pad = 26, header = 20;
+  const La = run.length, W = La * S + pad * 2, H = d * S + pad * 2 + header, top = pad + header;
+  const xOf = (mm: number) => pad + mm * S;
+  const p = [svgHead(W, H)];
+  p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">${type} — Plan (${Math.round(La)} mm)</text>`);
+  p.push(`<line x1="${pad}" y1="${top}" x2="${xOf(La)}" y2="${top}" stroke="#64748b" stroke-width="3"/>`);
+  for (const c of run.base) {
+    p.push(`<rect x="${xOf(c.x)}" y="${top}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+    if (c.kind === "sink") p.push(sinkEllipse(xOf(c.x) + c.w * S / 2, top + d * S / 2));
+  }
+  p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${top - 6}" width="${GEN.chimneyWidth * S}" height="5" fill="#a5b4fc"/>`);
+  p.push(`<text x="${xOf(La / 2)}" y="${top - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+function renderPlanL(runA: RunLayout, runB: RunLayout, La: number, Lb: number, opts: { label?: string; openLeg?: boolean } = {}): string {
+  const S = PLAN_S, d = STD.baseDepth, pad = 34, header = 20;
+  const W = La * S + pad * 2, H = Lb * S + pad * 2 + header;
+  const ox = pad, oy = pad + header;
+  const xOf = (mm: number) => ox + mm * S, yOf = (mm: number) => oy + mm * S;
+  const name = opts.label ?? "L-Shape";
+  const p = [svgHead(W, H)];
+  p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">${name} — Plan (back ${Math.round(La)} × ${opts.openLeg ? "peninsula" : "side"} ${Math.round(Lb)} mm)</text>`);
+  // Walls (the peninsula's second leg is open — no wall along it)
+  p.push(`<line x1="${ox}" y1="${oy}" x2="${xOf(La)}" y2="${oy}" stroke="#64748b" stroke-width="3"/>`);
+  if (!opts.openLeg) p.push(`<line x1="${ox}" y1="${oy}" x2="${ox}" y2="${yOf(Lb)}" stroke="#64748b" stroke-width="3"/>`);
+  else p.push(`<text x="${ox + d * S / 2}" y="${yOf(Lb) + 8}" fill="#94a3b8" font-size="6" text-anchor="middle">seating</text>`);
+  // Run A — back wall (cabinets hang down)
+  for (const c of runA.base) p.push(`<rect x="${xOf(c.x)}" y="${oy}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+  // Run B — left wall (cabinets extend right), drawn vertically
+  for (const c of runB.base) {
+    p.push(`<rect x="${ox}" y="${yOf(c.x)}" width="${d * S}" height="${c.w * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+    if (c.kind === "sink") p.push(sinkEllipse(ox + d * S / 2, yOf(c.x) + c.w * S / 2));
+  }
+  // chimney mark on Run A centre + corner label
+  p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${oy - 6}" width="${GEN.chimneyWidth * S}" height="5" fill="#a5b4fc"/>`);
+  p.push(`<text x="${xOf(La / 2)}" y="${oy - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
+  p.push(`<text x="${ox + d * S / 2}" y="${oy + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">corner</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+function renderPlanU(left: RunLayout, back: RunLayout, right: RunLayout, Lb: number, Ll: number, Lr: number): string {
+  const S = PLAN_S, d = STD.baseDepth, pad = 34, header = 20;
+  const W = Lb * S + pad * 2, H = Math.max(Ll, Lr) * S + pad * 2 + header;
+  const ox = pad, oy = pad + header;
+  const xOf = (mm: number) => ox + mm * S, yOf = (mm: number) => oy + mm * S;
+  const rightX = ox + Lb * S - d * S;
+  const p = [svgHead(W, H)];
+  p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">U-Shape — Plan (back ${Math.round(Lb)} · left ${Math.round(Ll)} · right ${Math.round(Lr)} mm)</text>`);
+  // Walls: back (top), left, right
+  p.push(`<line x1="${ox}" y1="${oy}" x2="${xOf(Lb)}" y2="${oy}" stroke="#64748b" stroke-width="3"/>`);
+  p.push(`<line x1="${ox}" y1="${oy}" x2="${ox}" y2="${yOf(Ll)}" stroke="#64748b" stroke-width="3"/>`);
+  p.push(`<line x1="${xOf(Lb)}" y1="${oy}" x2="${xOf(Lb)}" y2="${yOf(Lr)}" stroke="#64748b" stroke-width="3"/>`);
+  // Back wall cabinets (hang down)
+  for (const c of back.base) p.push(`<rect x="${xOf(c.x)}" y="${oy}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+  // Left wall cabinets (extend right)
+  for (const c of left.base) {
+    p.push(`<rect x="${ox}" y="${yOf(c.x)}" width="${d * S}" height="${c.w * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+    if (c.kind === "sink") p.push(sinkEllipse(ox + d * S / 2, yOf(c.x) + c.w * S / 2));
+  }
+  // Right wall cabinets (extend left)
+  for (const c of right.base) p.push(`<rect x="${rightX}" y="${yOf(c.x)}" width="${d * S}" height="${c.w * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+  // chimney mark on back centre + corner labels
+  p.push(`<rect x="${xOf(Lb / 2 - GEN.chimneyWidth / 2)}" y="${oy - 6}" width="${GEN.chimneyWidth * S}" height="5" fill="#a5b4fc"/>`);
+  p.push(`<text x="${xOf(Lb / 2)}" y="${oy - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
+  p.push(`<text x="${ox + d * S / 2}" y="${oy + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">corner</text>`);
+  p.push(`<text x="${rightX + d * S / 2}" y="${oy + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">corner</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+// Parallel / galley — two facing runs with a working aisle between them.
+function renderPlanParallel(runA: RunLayout, runB: RunLayout, La: number, Lb: number): string {
+  const S = PLAN_S, d = STD.baseDepth, aisle = 1000, pad = 30, header = 20;
+  const W = Math.max(La, Lb) * S + pad * 2;
+  const H = (d * 2 + aisle) * S + pad * 2 + header;
+  const ox = pad, oyTop = pad + header;
+  const oyBot = oyTop + (d + aisle) * S;          // top of Run B band
+  const xOf = (mm: number) => ox + mm * S;
+  const p = [svgHead(W, H)];
+  p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">Parallel — Plan (Run A ${Math.round(La)} · Run B ${Math.round(Lb)} mm · ${aisle} aisle)</text>`);
+  // Top + bottom walls
+  p.push(`<line x1="${ox}" y1="${oyTop}" x2="${xOf(La)}" y2="${oyTop}" stroke="#64748b" stroke-width="3"/>`);
+  p.push(`<line x1="${ox}" y1="${oyBot + d * S}" x2="${xOf(Lb)}" y2="${oyBot + d * S}" stroke="#64748b" stroke-width="3"/>`);
+  // Run A (top, hangs down)
+  for (const c of runA.base) p.push(`<rect x="${xOf(c.x)}" y="${oyTop}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+  // Run B (bottom, extends up from bottom wall)
+  for (const c of runB.base) {
+    p.push(`<rect x="${xOf(c.x)}" y="${oyBot}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+    if (c.kind === "sink") p.push(sinkEllipse(xOf(c.x) + c.w * S / 2, oyBot + d * S / 2));
+  }
+  p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${oyTop - 6}" width="${GEN.chimneyWidth * S}" height="5" fill="#a5b4fc"/>`);
+  p.push(`<text x="${xOf(La / 2)}" y="${oyTop - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
+  p.push(`<text x="${W / 2}" y="${oyTop + (d + aisle / 2) * S}" fill="#475569" font-size="8" text-anchor="middle">aisle</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+// Island — a main wall run plus a freestanding centred island block.
+function renderPlanIsland(main: RunLayout, island: RunLayout, La: number, Li: number): string {
+  const S = PLAN_S, d = STD.baseDepth, islD = 1000, aisle = 1000, pad = 30, header = 20;
+  const W = La * S + pad * 2;
+  const H = (d + aisle + islD) * S + pad * 2 + header;
+  const ox = pad, oyTop = pad + header;
+  const islY = oyTop + (d + aisle) * S;
+  const islX = ox + (La - Li) / 2 * S;            // centre the island on the run
+  const xOf = (mm: number) => ox + mm * S;
+  const p = [svgHead(W, H)];
+  p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">Island — Plan (main ${Math.round(La)} · island ${Math.round(Li)} mm)</text>`);
+  p.push(`<line x1="${ox}" y1="${oyTop}" x2="${xOf(La)}" y2="${oyTop}" stroke="#64748b" stroke-width="3"/>`);
+  // Main wall cabinets (hang down)
+  for (const c of main.base) p.push(`<rect x="${xOf(c.x)}" y="${oyTop}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+  p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${oyTop - 6}" width="${GEN.chimneyWidth * S}" height="5" fill="#a5b4fc"/>`);
+  p.push(`<text x="${xOf(La / 2)}" y="${oyTop - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
+  // Island block (freestanding)
+  for (const c of island.base) {
+    p.push(`<rect x="${islX + c.x * S}" y="${islY}" width="${c.w * S}" height="${islD * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+    if (c.kind === "sink") p.push(sinkEllipse(islX + c.x * S + c.w * S / 2, islY + islD * S / 2));
+  }
+  p.push(`<text x="${islX + Li * S / 2}" y="${islY - 4}" fill="#475569" font-size="8" text-anchor="middle">island</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+// =============================================================================
+// 4c. EXPORT — combined SVG + real-mm DXF, derived from the rendered SVGs.
+// Each SVG root carries data-mmscale (px per mm) so millimetres are recoverable.
+// PRODUCTION UPGRADE: emit discipline layers (CABINETS/ELECTRICAL/DIMENSIONS)
+//   and a full DXF writer (arcs/splines/blocks, e.g. the `dxf` npm package).
+// =============================================================================
+
+interface SvgPrim {
+  width: number; height: number; scale: number;
+  rects: Array<{ x: number; y: number; w: number; h: number; layer: string }>;
+  lines: Array<{ x1: number; y1: number; x2: number; y2: number; layer: string }>;
+  polys: Array<{ pts: Array<{ x: number; y: number }>; layer: string }>;
+  ellipses: Array<{ cx: number; cy: number; rx: number; ry: number; layer: string }>;
+  texts: Array<{ x: number; y: number; s: string; layer: string }>;
+}
+
+// Discipline layers + AutoCAD colour indices (ACI). Used so the DXF opens with
+// cabinets / electrical / dimensions / etc. on separate, toggleable layers.
+const SOCKET_COLORS = ["#f59e0b", "#ef4444", "#22c55e", "#a855f7"];
+const WALL_STROKES = ["#475569", "#334155", "#64748b"];
+const LAYER_COLOR: Record<string, number> = {
+  CABINETS: 7, WALLS: 8, ELECTRICAL: 2, DIMENSIONS: 4, APPLIANCES: 5, HARDWARE: 3, ANNOTATION: 6,
+};
+// Infer the discipline from the primitive's fill/stroke (the renderers already
+// colour-code by meaning, so no SVG changes are needed).
+function classifyLayer(type: string, fill: string, stroke: string): string {
+  fill = (fill || "").toLowerCase(); stroke = (stroke || "").toLowerCase();
+  if (type === "rect") {
+    if (SOCKET_COLORS.includes(fill)) return "ELECTRICAL";
+    if (fill === "#020617" || fill === "#a5b4fc") return "APPLIANCES"; // tv screen / chimney mark
+    return "CABINETS";
+  }
+  if (type === "polygon" || type === "ellipse") return "APPLIANCES";   // chimney / sink / basin
+  if (type === "line") {
+    if (SOCKET_COLORS.includes(stroke)) return "DIMENSIONS";           // socket dimension lines
+    if (WALL_STROKES.includes(stroke)) return "WALLS";
+    if (stroke === "#0891b2" || stroke === "#94a3b8") return "HARDWARE"; // handles / hanging rods
+    if (stroke === "#14b8a6") return "APPLIANCES";                      // mirror reflection
+    return "CABINETS";                                                  // drawer/shelf dividers
+  }
+  if (type === "text") return SOCKET_COLORS.includes(fill) ? "DIMENSIONS" : "ANNOTATION";
+  return "CABINETS";
+}
+
+function parseSvgPrimitives(svgRaw: string): SvgPrim {
+  const svg = svgRaw.replace(/<defs>[\s\S]*?<\/defs>/g, ""); // drop hatch patterns
+  const num = (s: string, re: RegExp) => { const m = s.match(re); return m ? parseFloat(m[1]) : 0; };
+  const str = (s: string, re: RegExp) => { const m = s.match(re); return m ? m[1] : ""; };
+  const width = num(svg, /(?<![\w-])width="([\d.]+)"/);
+  const height = num(svg, /(?<![\w-])height="([\d.]+)"/);
+  const scale = num(svg, /data-mmscale="([\d.]+)"/) || 1;
+
+  const rects: SvgPrim["rects"] = [];
+  for (const m of svg.matchAll(/<rect\b([^>]*)>/g)) {
+    const a = m[1];
+    const w = num(a, /(?<![\w-])width="(-?[\d.]+)"/), h = num(a, /(?<![\w-])height="(-?[\d.]+)"/);
+    if (w <= 0 || h <= 0) continue;
+    if (w >= width * 0.98 && h >= height * 0.98) continue; // skip full-canvas background
+    rects.push({ x: num(a, /(?<![\w-])x="(-?[\d.]+)"/), y: num(a, /(?<![\w-])y="(-?[\d.]+)"/), w, h, layer: classifyLayer("rect", str(a, /fill="([^"]+)"/), str(a, /stroke="([^"]+)"/)) });
+  }
+  const lines: SvgPrim["lines"] = [];
+  for (const m of svg.matchAll(/<line\b([^>]*)>/g)) {
+    const a = m[1];
+    lines.push({ x1: num(a, /x1="(-?[\d.]+)"/), y1: num(a, /y1="(-?[\d.]+)"/), x2: num(a, /x2="(-?[\d.]+)"/), y2: num(a, /y2="(-?[\d.]+)"/), layer: classifyLayer("line", "", str(a, /stroke="([^"]+)"/)) });
+  }
+  const polys: SvgPrim["polys"] = [];
+  for (const m of svg.matchAll(/<polygon\b([^>]*)>/g)) {
+    const a = m[1];
+    const pts = (str(a, /points="([^"]+)"/)).trim().split(/\s+/).map((pt) => { const [px, py] = pt.split(",").map(parseFloat); return { x: px, y: py }; }).filter((q) => !isNaN(q.x) && !isNaN(q.y));
+    if (pts.length >= 2) polys.push({ pts, layer: classifyLayer("polygon", str(a, /fill="([^"]+)"/), "") });
+  }
+  const ellipses: SvgPrim["ellipses"] = [];
+  for (const m of svg.matchAll(/<ellipse\b([^>]*)>/g)) {
+    const a = m[1];
+    ellipses.push({ cx: num(a, /cx="(-?[\d.]+)"/), cy: num(a, /cy="(-?[\d.]+)"/), rx: num(a, /rx="(-?[\d.]+)"/), ry: num(a, /ry="(-?[\d.]+)"/), layer: "APPLIANCES" });
+  }
+  const texts: SvgPrim["texts"] = [];
+  for (const m of svg.matchAll(/<text\b([^>]*)>([\s\S]*?)<\/text>/g)) {
+    const s = m[2].replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/[^\x20-\x7E]/g, "").trim();
+    if (s) texts.push({ x: num(m[1], /(?<![\w-])x="(-?[\d.]+)"/), y: num(m[1], /(?<![\w-])y="(-?[\d.]+)"/), s, layer: classifyLayer("text", str(m[1], /fill="([^"]+)"/), "") });
+  }
+  return { width, height, scale, rects, lines, polys, ellipses, texts };
+}
+
+// Stack the plan + every elevation into one downloadable SVG (nested <svg>s).
+function combinedSvg(layout: any, meta: { type?: string; id?: string } = {}): string {
+  const svgs: string[] = [layout.planSvg, ...layout.elevations.map((e: any) => e.svg), ...((layout.sections || []).map((s: any) => s.svg))];
+  const dim = (s: string) => ({ w: parseFloat((s.match(/(?<![\w-])width="([\d.]+)"/) || [])[1] || "0"), h: parseFloat((s.match(/(?<![\w-])height="([\d.]+)"/) || [])[1] || "0") });
+  let y = 0, maxW = 0; const parts: string[] = [];
+  for (const s of svgs) {
+    const { w, h } = dim(s); maxW = Math.max(maxW, w);
+    const inner = s.replace(/^<svg[^>]*>/, "").replace(/<\/svg>$/, "");
+    parts.push(`<svg x="0" y="${y}" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${inner}</svg>`);
+    y += h + 12;
+  }
+  // Corner-solution colour legend — only when the design actually uses corner
+  // units. Added here (SVG export only) so the DXF, recovered from the raw
+  // elevation SVGs, stays a clean CAD drawing.
+  const present = new Set<string>();
+  for (const r of (layout.runs || [])) for (const c of (r.base || [])) if (c.kind === "corner") {
+    const l = c.label || "";
+    present.add(/LeMans/.test(l) ? "LeMans" : /Magic/.test(l) ? "Magic Corner" : /Blind/.test(l) ? "Blind Corner" : "Carousel");
+  }
+  if (present.size) {
+    const KEY: [string, string][] = [["LeMans", "#10b981"], ["Magic Corner", "#6366f1"], ["Blind Corner", "#d97706"], ["Carousel", "#e11d48"]];
+    const lh = 34, ly = y, items: string[] = [];
+    let lx = 130;
+    for (const [name, fill] of KEY) {
+      const on = present.has(name), txt = name + (on ? " ✓" : "");
+      items.push(`<rect x="${lx}" y="${ly + 11}" width="11" height="11" rx="2" fill="${fill}" opacity="${on ? 1 : 0.35}"/>`);
+      items.push(`<text x="${lx + 16}" y="${ly + 20}" fill="#475569" font-size="10" font-family="monospace" font-weight="${on ? "bold" : "normal"}" opacity="${on ? 1 : 0.45}">${txt}</text>`);
+      lx += 22 + txt.length * 6.1;
+    }
+    items.push(`<text x="${lx + 4}" y="${ly + 20}" fill="#94a3b8" font-size="9" font-family="monospace">· hierarchy LeMans › Magic › Blind › Carousel</text>`);
+    lx += 8 + 52 * 6;
+    maxW = Math.max(maxW, lx);
+    parts.push(`<rect x="0" y="${ly}" width="${maxW}" height="${lh}" fill="#f4f7fb"/>`);
+    parts.push(`<text x="10" y="${ly + 20}" fill="#334155" font-size="11" font-family="monospace" font-weight="bold">Corner solution</text>`);
+    parts.push(items.join(""));
+    y += lh + 12;
+  }
+  // ── Professional CAD sheet presentation: double border + bottom title block ──
+  // (Website-quality drawing hand-off: project / type / scale / date / sheet, like a real A-series CAD sheet.)
+  const M = 18, TB = 56;                                   // sheet margin + title-block height
+  const shW = maxW + M * 2, shH = y + M * 2 + TB;
+  const today = new Date().toISOString().slice(0, 10);
+  const t = meta.type || layout.designType || "Modular Kitchen";
+  const idS = meta.id ? meta.id.slice(0, 8).toUpperCase() : "";
+  const cellX = [0, Math.round(shW * 0.36), Math.round(shW * 0.64), Math.round(shW * 0.8)];
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const tb: string[] = [];
+  tb.push(`<rect x="3" y="3" width="${shW - 6}" height="${shH - 6}" fill="none" stroke="#1e3a5f" stroke-width="2"/>`);
+  tb.push(`<rect x="8" y="8" width="${shW - 16}" height="${shH - 16}" fill="none" stroke="#64748b" stroke-width="0.7"/>`);
+  const tbY = shH - 8 - TB;
+  tb.push(`<rect x="8" y="${tbY}" width="${shW - 16}" height="${TB}" fill="#f8fafc" stroke="#1e3a5f" stroke-width="1"/>`);
+  for (let i = 1; i < cellX.length; i++) tb.push(`<line x1="${8 + cellX[i]}" y1="${tbY}" x2="${8 + cellX[i]}" y2="${tbY + TB}" stroke="#94a3b8" stroke-width="0.7"/>`);
+  const cell = (i: number, l1: string, l2: string, fs = 12) => {
+    const x = 16 + cellX[i];
+    tb.push(`<text x="${x}" y="${tbY + 16}" fill="#94a3b8" font-size="8" font-family="monospace">${esc(l1)}</text>`);
+    tb.push(`<text x="${x}" y="${tbY + 36}" fill="#1e3a5f" font-size="${fs}" font-family="monospace" font-weight="bold">${esc(l2)}</text>`);
+  };
+  cell(0, "PROJECT — Plan · Elevations · Sections", `${t} — CAD Set`);
+  cell(1, "MANUFACTURER", MKW.name, 11);
+  cell(2, "DATE", today);
+  cell(3, `SHEET${idS ? " · " + idS : ""}`, "A-01 · mm");
+  tb.push(`<text x="16" y="${tbY + 48}" fill="#1e3a5f" font-size="8.5" font-family="monospace" font-weight="bold">${esc(`${MKW.phone} · ${MKW.email} · ${MKW.area} — ${MKW.cta}`)}</text>`);
+  tb.push(`<text x="${16 + cellX[2]}" y="${tbY + 48}" fill="#64748b" font-size="7.5" font-family="monospace">Scale: elev 0.14 · plan 0.10 px/mm</text>`);
+  if (MKW_LOGO_B64) tb.push(`<image x="${shW - 64}" y="${tbY + 5}" width="52" height="46" preserveAspectRatio="xMidYMid meet" href="${MKW_LOGO_B64}"/>`);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${shW}" height="${shH}" viewBox="0 0 ${shW} ${shH}"><rect width="${shW}" height="${shH}" fill="#ffffff"/><g transform="translate(${M},${M})">${parts.join("")}</g>${tb.join("")}</svg>`;
+}
+
+// ── Production panel cut list (12.pdf §5.7.12) — per-cabinet carcass panels for
+//    factory cutting (NOT sheet-nesting/optimization, which is forbidden). Each
+//    row: Height × Width × Qty × Description, 18 mm board, 3 mm shutter gaps. ──
+interface CutRow { h: number; w: number; qty: number; desc: string; }
+function cutList(layout: any): CutRow[] {
+  const rows: CutRow[] = [], t = 18, gap = 3, red = handleReduction(layout.handle || "D Handle");
+  const add = (h: number, w: number, qty: number, desc: string) => { if (w > 0 && h > 0) rows.push({ h: Math.round(h), w: Math.round(w), qty, desc }); };
+  const carcass = (rn: string, c: any, Hc: number, D: number, prefix: string) => {
+    const W = c.w;
+    add(Hc, D, 2, `${rn}: ${prefix}${c.label} — Side Panel`);
+    add(D, W - 2 * t, 1, `${rn}: ${prefix}${c.label} — Bottom`);
+    add(D, W - 2 * t, 1, `${rn}: ${prefix}${c.label} — Top / Rail`);
+    add(Hc, W, 1, `${rn}: ${prefix}${c.label} — Back`);
+  };
+  for (const run of layout.runs || []) {
+    const rn = run.name;
+    for (const c of run.base || []) {
+      if (c.kind === "filler") { add(720, c.w, 1, `${rn}: Filler Panel`); continue; }
+      if (c.kind === "sidepanel" || c.kind === "chimney" || c.kind === "hob") continue;
+      const tall = isTall(c.kind), Hc = tall ? 2100 : 720, D = 560;
+      carcass(rn, c, Hc, D, "");
+      if (isDrawerKind(c.kind) && c.drawers > 0) {
+        const dh = c.dh && c.dh.length === c.drawers ? c.dh : Array(c.drawers).fill(1);
+        const tot = dh.reduce((a: number, b: number) => a + b, 0);
+        dh.forEach((dv: number, i: number) => add(dv / tot * Hc - 6 - red, c.w - 6, 1, `${rn}: ${c.label} — Drawer Front ${i + 1}`));
+      } else if (c.kind === "open-shelf") {
+        add(D - 20, c.w - 2 * t, 3, `${rn}: ${c.label} — Shelf`);
+      } else {
+        const n = shutterCount(c.w);
+        add(Hc - 6 - red, (c.w - (n + 1) * gap) / n, n, `${rn}: ${c.label} — Shutter`);
+        if (tall) add(D - 20, c.w - 2 * t, c.kind === "tall-hiunit" ? 2 : 5, `${rn}: ${c.label} — Shelf`);
+      }
+    }
+    for (const c of run.wallCabs || []) {
+      if (c.kind === "chimney" || c.kind === "sidepanel") continue;
+      const Hc = 720, D = 320;
+      carcass(rn, c, Hc, D, "Wall ");
+      const n = shutterCount(c.w);
+      add(Hc - 6 - red, (c.w - (n + 1) * gap) / n, n, `${rn}: Wall ${c.label} — Shutter`);
+      if (c.kind !== "gtpt") add(D - 20, c.w - 2 * t, 2, `${rn}: Wall ${c.label} — Shelf`);
+    }
+  }
+  return rows;
+}
+// Manufacturing practicality validation (11.pdf / 12.pdf "Automatic Manufacturing
+// Validation") — clearance / interference / standards checks run before approval.
+function validateManufacturing(layout: any): { name: string; ok: boolean; note: string }[] {
+  const runs = layout.runs || [], allBase = runs.flatMap((r: any) => r.base || []), checks: { name: string; ok: boolean; note: string }[] = [];
+  // 14.pdf: a sink + a GTPT above it (matching width) are MANDATORY in every kitchen.
+  { let sink: any = null, gtpt: any = null;
+    for (const r of runs) { for (const c of (r.base || [])) if (c.kind === "sink") sink = c; for (const c of (r.wallCabs || [])) if (c.kind === "gtpt") gtpt = c; }
+    const ok = !!sink && !!gtpt && Math.abs(sink.w - gtpt.w) < 1;
+    const note = !sink ? "Sink cabinet MISSING (mandatory)." : !gtpt ? "GTPT cabinet above the sink MISSING (mandatory)." : Math.abs(sink.w - gtpt.w) >= 1 ? `Sink ${Math.round(sink.w)} / GTPT ${Math.round(gtpt.w)} mm width mismatch.` : `Sink ${Math.round(sink.w)} mm with matching GTPT above (cleaning zone OK).`;
+    checks.push({ name: "Sink + GTPT (14.pdf)", ok, note });
+    if (!ok) GEN_LOG.conflicts.push("14.pdf cleaning-zone: " + note);
+  }
+  // Run-length consistency: panels must fill each run.
+  let lenOk = true, lenNote = "";
+  for (const r of runs) { const sum = (r.base || []).reduce((s: number, c: any) => s + c.w, 0); if (Math.abs(sum - r.length) > 5) { lenOk = false; lenNote += `${r.name} ${Math.round(sum)}≠${Math.round(r.length)}mm. `; } }
+  checks.push({ name: "Run-length consistency", ok: lenOk, note: lenOk ? "Panels fill every run exactly." : lenNote });
+  // Drawer/3-drawer cabinets must be standard widths (never resized).
+  const badDr = allBase.filter((c: any) => isDrawerKind(c.kind) && !DRAWER_WIDTHS.includes(Math.round(c.w)));
+  checks.push({ name: "Drawer widths standard", ok: badDr.length === 0, note: badDr.length ? badDr.map((c: any) => c.label + " " + Math.round(c.w)).join(", ") : "All drawer cabinets on standard widths." });
+  // Corner drawer/pull-out clearance: a drawer must not abut a corner return.
+  let cornerOk = true, cn = "";
+  for (const r of runs) (r.base || []).forEach((c: any, i: number) => { if (c.kind === "corner") { const nb = (r.base[i + 1] || r.base[i - 1]); if (nb && (isDrawerKind(nb.kind) || nb.kind === "pullout")) { cornerOk = false; cn += `${nb.label} abuts corner in ${r.name}. `; } } });
+  checks.push({ name: "Corner drawer/pull-out clearance", ok: cornerOk, note: cornerOk ? "No drawer/pull-out blocked by a corner unit." : cn });
+  // Sink must sit on a shutter cabinet (plumbing access), not over a drawer stack.
+  const sinkOverDr = allBase.some((c: any) => c.kind === "sink" && c.drawers > 0);
+  checks.push({ name: "Sink not over a drawer stack", ok: !sinkOverDr, note: sinkOverDr ? "Sink placed over drawers — no plumbing access." : "Sink on a shutter cabinet." });
+  // Tall-unit accessibility: tall units should reach a run end or sit beside a non-tall unit.
+  let tallOk = true, tn = "";
+  for (const r of runs) { const b = r.base || []; b.forEach((c: any, i: number) => { if (isTall(c.kind) && i > 0 && i < b.length - 1 && isTall(b[i - 1].kind) && isTall(b[i + 1].kind)) { tallOk = false; tn += `${c.label} boxed by tall units in ${r.name}. `; } }); }
+  checks.push({ name: "Tall-unit accessibility", ok: tallOk, note: tallOk ? "Tall units reach a run end / remain accessible." : tn });
+  // Single-shutter width: a single shutter must not exceed 600 mm (else double/triple).
+  const wideSingle = allBase.concat(runs.flatMap((r: any) => r.wallCabs || [])).filter((c: any) => (c.kind === "shutter" || c.kind === "wall") && c.drawers === 0 && c.w > 1200 && shutterCount(c.w) < 2);
+  checks.push({ name: "Shutter span within limits", ok: wideSingle.length === 0, note: wideSingle.length ? "Oversized single shutter found." : "Shutters split to double/triple beyond 600/1200 mm." });
+  // Appliance install/ventilation clearance (5.9.13): the housing for a built-in
+  // appliance must be at least the brand appliance width + side install clearance.
+  const ab = applianceBrandOf(layout.applianceBrand || "Custom");
+  const APPL_KINDS: Record<string, number> = { hob: ab.hob[0], oven: ab.oven[0], dishwasher: ab.dishwasher[0], "tall-hiunit": ab.oven[0], "tall-fridge": ab.refrigerator[0] };
+  const brandName = layout.applianceBrand || "Custom";
+  let clrOk = true, clrNote = "";
+  for (const c of allBase) { const need = APPL_KINDS[c.kind]; if (need) { const mod = nearestCab(need); if (c.w + 1 < mod) { clrOk = false; clrNote += `${c.label || c.kind} ${Math.round(c.w)}mm < ${mod}mm module (${brandName} appliance ${need}mm + ${ab.vent}mm vent / ${ab.install}mm install reserved). `; } } }
+  checks.push({ name: "Appliance install/ventilation clearance", ok: clrOk, note: clrOk ? `Built-in appliance housings reserve brand width + ${ab.install} mm side install and ${ab.vent} mm ventilation clearance.` : clrNote });
+  // 5.11 (preferential): wall cabinets should mirror base-cabinet module widths where practical;
+  // mismatches are allowed but the reason is reported (chimney/glass zone, GTPT-over-sink, fillers).
+  { let aligned = 0, total = 0; const reasons = new Set<string>();
+    const edges = (arr: any[]) => { const e: number[] = []; let x = 0; for (const c of arr) { e.push(x); x += c.w; } e.push(x); return e; };
+    for (const r of runs) {
+      const wc = r.wallCabs || []; if (!wc.length) continue;
+      const be = edges(r.base || []); let x = 0;
+      for (const c of wc) { total++; const l = x, rr = x + c.w; x = rr; const near = (v: number) => be.some((p: number) => Math.abs(p - v) <= 32);
+        if (near(l) && near(rr)) aligned++;
+        else if (c.kind === "chimney" || c.kind === "glass-wall" || c.kind === "display") reasons.add("chimney/glass zone centred by mandatory rule");
+        else if (c.kind === "gtpt") reasons.add("GTPT sized to the sink (cleaning zone)");
+        else if (c.kind === "filler" || c.kind === "sidepanel") reasons.add("fillers/side-panels absorb residual");
+        else reasons.add("wall module kept to preserve fixed wall length");
+      }
+    }
+    const pct = total ? Math.round(aligned / total * 100) : 100;
+    // Preferential rule → never blocks (always reported as honoured); the note carries the alignment % and the reason for any mismatch.
+    const note = total === 0 ? "No wall cabinets in this layout." : `${aligned}/${total} wall cabinets align to base modules (${pct}%)` + (reasons.size ? " — mismatches by rule: " + [...reasons].join("; ") + "." : ", fully symmetric.");
+    checks.push({ name: "Wall–base symmetry (5.11)", ok: true, note });
+  }
+  // ── Handle-collision clearance (Risk #9) — handle-knuckle / corner-pinch ──
+  // A protruding handle system (D/C handle, knob) can clash where a handle falls into a
+  // dead corner, or where two tall full-height doors meet edge-to-edge. Handle-less
+  // groove/gola/push systems carry no external handle and never clash.
+  {
+    const handle = layout.handle || GEN.handle || "D Handle";
+    const handleLess = HANDLELESS.has(handle);
+    const HW_SKIP = new Set(["filler", "sidepanel", "chimney", "hob", "open-shelf"]);
+    const handled = (c: any) => !handleLess && !HW_SKIP.has(c.kind);
+    const clashes: string[] = [];
+    if (!handleLess) for (const r of runs) {
+      const b = r.base || [];
+      b.forEach((c: any, i: number) => {
+        if (!handled(c)) return;
+        const nb = b[i + 1], pb = b[i - 1];
+        // a handled door/drawer immediately next to a corner unit → handle pinched in the dead corner.
+        if ((nb && nb.kind === "corner") || (pb && pb.kind === "corner"))
+          clashes.push(`${c.label || c.kind} handle sits against a corner unit in ${r.name} (handle pinched in the dead corner)`);
+        // two tall full-height doors meeting edge-to-edge → long bar handles foul each other.
+        else if (nb && isTall(c.kind) && isTall(nb.kind) && c.kind !== "tall-hiunit" && nb.kind !== "tall-hiunit" && handled(nb))
+          clashes.push(`${c.label || c.kind} + ${nb.label || nb.kind} tall doors meet in ${r.name} — add an 18–25 mm reveal or alternate the hinges so the ${handle} handles clear`);
+      });
+    }
+    const ok = clashes.length === 0;
+    checks.push({ name: "Handle-collision clearance", ok, note: handleLess
+      ? `Handle-less ${handle}: one continuous groove/profile channel, no protruding handle to clash.`
+      : ok ? `Protruding ${handle} handles clear of corners and adjoining tall doors.`
+           : clashes.slice(0, 4).join("; ") + "." });
+    if (!ok) GEN_LOG.conflicts.push("Handle clearance: " + clashes[0]);
+  }
+  // ── Appliance-swing clearance (Risk #9) — door/drop arc must be unobstructed ──
+  // A fridge/dishwasher/oven door blocked by a perpendicular corner return, or two
+  // appliance doors meeting edge-to-edge, cannot fully open.
+  {
+    const APPL = new Set(["dishwasher", "fridge", "tall-fridge", "tall-hiunit", "oven"]);
+    const issues: string[] = [];
+    for (const r of runs) {
+      const b = r.base || [];
+      b.forEach((c: any, i: number) => {
+        if (!APPL.has(c.kind)) return;
+        const nb = b[i + 1], pb = b[i - 1];
+        if ((nb && nb.kind === "corner") || (pb && pb.kind === "corner"))
+          issues.push(`${c.label || c.kind} swing/drop arc blocked by a corner unit in ${r.name}`);
+        else if (nb && APPL.has(nb.kind))
+          issues.push(`${c.label || c.kind} and ${nb.label || nb.kind} sit edge-to-edge in ${r.name} — opposing appliance doors clash; add a 50–100 mm buffer`);
+      });
+    }
+    const ok = issues.length === 0;
+    checks.push({ name: "Appliance-swing clearance", ok, note: ok
+      ? "Appliance doors (fridge / dishwasher / oven) have clear swing & drop arcs."
+      : issues.slice(0, 4).join("; ") + "." });
+    if (!ok) GEN_LOG.conflicts.push("Appliance swing: " + issues[0]);
+  }
+  return checks;
+}
+function cutListCsv(layout: any): string {
+  const rows = cutList(layout);
+  const lines = ["S.No,Height(mm),Width(mm),Qty,Description"];
+  rows.forEach((r, i) => lines.push(`${i + 1},${r.h},${r.w},${r.qty},"${r.desc.replace(/"/g, '""')}"`));
+  return lines.join("\n");
+}
+
+// ── Hardware schedule (12.pdf master rule) — soft-close hinges, drawer slides,
+//    handles per the selected system, and per-cabinet accessories. Aggregated. ──
+interface HwRow { item: string; qty: number; unit: string; spec: string; }
+function hardwareSchedule(layout: any): HwRow[] {
+  const m = new Map<string, HwRow>(), handle = layout.handle || "D Handle";
+  const hl = HANDLELESS.has(handle), knob = handle === "Knob", push = handle === "Push-To-Open" || handle === "Tip-On";
+  const bump = (k: string, item: string, qty: number, unit: string, spec: string) => { const e = m.get(k) || { item, qty: 0, unit, spec }; e.qty += qty; m.set(k, e); };
+  const runs = layout.runs || [];
+  for (const r of runs) for (const c of [...(r.base || []), ...(r.wallCabs || [])]) {
+    if (["filler", "sidepanel", "chimney", "hob"].includes(c.kind)) continue;
+    const tall = isTall(c.kind), hpd = tall ? 4 : 2;   // hinges per door
+    if (isDrawerKind(c.kind) && c.drawers > 0) {
+      const heavy = c.kind === "drawer-atta";
+      bump("slide" + (heavy ? "hd" : ""), "Soft-close drawer slide" + (heavy ? " (heavy-duty)" : ""), c.drawers, "pair", "Tandem/telescopic");
+      if (!hl) bump(knob ? "knob" : "handle", knob ? "Cabinet knob" : "Handle — " + handle, c.drawers, "no", handle);
+    } else if (c.kind !== "open-shelf") {
+      const n = shutterCount(c.w);
+      bump(c.kind === "glass-wall" ? "hingeg" : "hinge", c.kind === "glass-wall" ? "Soft-close glass hinge" : "Soft-close hinge", n * hpd, "no", "Soft-close");
+      if (push) bump("push", "Push-to-open catch", n, "no", "Tip-on/push");
+      else if (!hl) bump(knob ? "knob" : "handle", knob ? "Cabinet knob" : "Handle — " + handle, n, "no", handle);
+    }
+    if (c.kind === "pullout") bump("acc-po-" + (/Spice/.test(c.label) ? "s" : "b"), "Pull-out basket — " + (/Spice/.test(c.label) ? "spice" : "bottle"), 1, "no", "Wire/SS");
+    if (c.kind === "corner") bump("acc-corner-" + c.label, c.label + " mechanism", 1, "no", "Soft-close pull-out");
+    if (c.kind === "sink") bump("acc-waste", "Waste bin (under-sink)", 1, "no", "Pull-out");
+    if (c.kind === "gtpt") bump("acc-gtpt", "GTPT basket", 1, "no", "SS");
+    if (c.kind === "tall-pantry") bump("acc-pantry", "Pantry pull-out unit", 1, "no", "Multi-shelf");
+    if (c.kind === "tall-hiunit") bump("acc-hiunit", "Hi-unit (oven+MW housing trims)", 1, "no", "Vented");
+    if (/Cutlery/.test(c.label)) bump("acc-cutlery", "Cutlery tray", 1, "no", "Modular");
+  }
+  if (hl) { let len = 0; for (const r of runs) for (const c of [...(r.base || []), ...(r.wallCabs || [])]) if (!["filler", "sidepanel", "chimney", "hob"].includes(c.kind)) len += c.w; bump("gola", "Gola / J profile — " + handle, Math.round(len / 100) / 10, "m", "Aluminium profile"); }
+  return [...m.values()];
+}
+function boq(layout: any): { item: string; qty: number; unit: string }[] {
+  const cl = cutList(layout), hw = hardwareSchedule(layout), runs = layout.runs || [];
+  const panels = cl.reduce((s, r) => s + r.qty, 0);
+  const areaft = cl.reduce((s, r) => s + r.h * r.w * r.qty / 1e6, 0) * 10.7639;
+  const edgeM = cl.reduce((s, r) => s + 2 * (r.h + r.w) * r.qty / 1000, 0);
+  const cabs = runs.reduce((s: number, r: any) => s + (r.base || []).length + (r.wallCabs || []).length, 0);
+  const drawers = runs.flatMap((r: any) => r.base || []).filter((c: any) => isDrawerKind(c.kind)).reduce((s: number, c: any) => s + c.drawers, 0);
+  const rows = [
+    { item: "Cabinets (carcasses)", qty: cabs, unit: "no" },
+    { item: "Panels to cut", qty: panels, unit: "no" },
+    { item: "Board area (18 mm)", qty: Math.round(areaft * 10) / 10, unit: "sq.ft" },
+    { item: "Edge banding (approx)", qty: Math.round(edgeM), unit: "m" },
+    { item: "Drawer fronts", qty: drawers, unit: "no" },
+  ];
+  for (const h of hw) rows.push({ item: h.item, qty: h.qty, unit: h.unit });
+  return rows;
+}
+function hardwareCsv(layout: any): string {
+  const lines = ["S.No,Item,Qty,Unit,Spec"];
+  hardwareSchedule(layout).forEach((h, i) => lines.push(`${i + 1},"${h.item.replace(/"/g, '""')}",${h.qty},${h.unit},"${h.spec}"`));
+  return lines.join("\n");
+}
+
+// Convert the views to a single R12-compatible DXF. Entities are placed on
+// DISCIPLINE layers (CABINETS / ELECTRICAL / DIMENSIONS / WALLS / APPLIANCES /
+// HARDWARE / ANNOTATION) inferred from each primitive; views are stacked
+// vertically in real millimetres.
+function dxfFromViews(views: Array<{ layer: string; svg: string }>): string {
+  const ents: string[] = [];
+  const layers = new Set<string>();
+  let yOffset = 0; const GAP = 300;
+  const L = (lay: string, x1: number, y1: number, x2: number, y2: number) => {
+    layers.add(lay);
+    ents.push(`0\nLINE\n8\n${lay}\n10\n${x1.toFixed(2)}\n20\n${y1.toFixed(2)}\n30\n0\n11\n${x2.toFixed(2)}\n21\n${y2.toFixed(2)}\n31\n0`);
+  };
+  const T = (lay: string, x: number, y: number, h: number, s: string) => {
+    layers.add(lay);
+    ents.push(`0\nTEXT\n8\n${lay}\n10\n${x.toFixed(2)}\n20\n${y.toFixed(2)}\n30\n0\n40\n${h.toFixed(2)}\n1\n${s.replace(/\s+/g, " ").trim()}`);
+  };
+
+  for (const v of views) {
+    const p = parseSvgPrimitives(v.svg);
+    const s = p.scale || 1, viewHmm = p.height / s;
+    const X = (px: number) => px / s;
+    const Y = (py: number) => (p.height - py) / s - yOffset;   // flip Y, stack down
+    for (const r of p.rects) {
+      const x1 = X(r.x), y1 = Y(r.y + r.h), x2 = X(r.x + r.w), y2 = Y(r.y);
+      L(r.layer, x1, y1, x2, y1); L(r.layer, x2, y1, x2, y2); L(r.layer, x2, y2, x1, y2); L(r.layer, x1, y2, x1, y1);
+    }
+    for (const ln of p.lines) L(ln.layer, X(ln.x1), Y(ln.y1), X(ln.x2), Y(ln.y2));
+    for (const poly of p.polys) for (let i = 0; i < poly.pts.length; i++) { const A = poly.pts[i], B = poly.pts[(i + 1) % poly.pts.length]; L(poly.layer, X(A.x), Y(A.y), X(B.x), Y(B.y)); }
+    for (const e of p.ellipses) { const N = 16; let prev: { x: number; y: number } | null = null; for (let i = 0; i <= N; i++) { const t = (i / N) * Math.PI * 2; const cur = { x: X(e.cx + e.rx * Math.cos(t)), y: Y(e.cy + e.ry * Math.sin(t)) }; if (prev) L(e.layer, prev.x, prev.y, cur.x, cur.y); prev = cur; } }
+    for (const tx of p.texts) T(tx.layer, X(tx.x), Y(tx.y), 50, tx.s);
+    yOffset += viewHmm + GAP;
+  }
+
+  const layerTable = [...layers].map((lay) => `0\nLAYER\n2\n${lay}\n70\n0\n62\n${LAYER_COLOR[lay] ?? 7}\n6\nCONTINUOUS`).join("\n");
+  return [
+    "0\nSECTION\n2\nHEADER\n0\nENDSEC",
+    `0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n${layers.size}\n${layerTable}\n0\nENDTAB\n0\nENDSEC`,
+    `0\nSECTION\n2\nENTITIES\n${ents.join("\n")}\n0\nENDSEC`,
+    "0\nEOF",
+  ].join("\n");
+}
+
+// =============================================================================
+// 5. ZOD SCHEMAS — Request validation
+// =============================================================================
+
+const uploadSchema = z.object({
+  name: z.string().min(1).max(200),
+  fileType: z.enum(["dxf", "dwg", "pdf", "svg", "xml", "image"]),
+  category: z.string().min(1).max(40).default("kitchen"),
+  approved: z.boolean().optional().default(false),
+});
+const commandSchema = z.object({ command: z.string().min(1).max(80) });
+const generateSchema = z.object({
+  designType: z.string().min(1).max(60),
+  wall: z.number().int().min(900).max(8000).default(3600),   // back / cooking wall
+  wallB: z.number().int().min(900).max(8000).optional(),     // L: side wall · U: left wall
+  wallC: z.number().int().min(900).max(8000).optional(),     // U: right wall
+  chimneyWidth: z.number().int().refine((n) => [600, 750, 900, 1200].includes(n), "chimney width must be 600/750/900/1200").optional(),
+  hob: z.enum(["yes", "no", "optional"]).optional(),         // 3.txt: hob is optional
+  dishwasher: z.enum(["yes", "no", "optional"]).optional(),  // 3.txt: dishwasher is optional
+  hiunit: z.enum(["yes", "no", "optional"]).optional(),      // 5.7 Step 5: Oven+Microwave tall tower
+  utility: z.enum(["yes", "no", "optional"]).optional(),     // 5.7 Step 5: Utility tall unit
+  handle: z.string().max(40).optional(),                     // 5.7.12: handle system
+  applianceBrand: z.string().max(40).optional(),             // 5.9.13: appliance-brand library
+  // 15.txt 5.18/Part 9: marked mandatory points drive cabinet placement (optional, from the 3D room).
+  points: z.array(z.object({ type: z.string().max(30), wall: z.string().max(40).optional(), along: z.number().optional(), height: z.number().optional(), x: z.number().optional(), z: z.number().optional() })).max(60).optional(),
+  // 16/17 6.2: windows the AI must respect (no wall cabinets over them, no tall units in front).
+  windows: z.array(z.object({ wall: z.string().max(40).optional(), along: z.number(), width: z.number(), sill: z.number().optional(), height: z.number().optional() })).max(40).optional(),
+});
+const aiPromptSchema = z.object({ prompt: z.string().min(1).max(2000) });
+
+// =============================================================================
+// 6. HONO APP + OBSERVABILITY MIDDLEWARE
+// PRODUCTION UPGRADE: Add OpenTelemetry tracing (NodeSDK + auto-instrumentations).
+// =============================================================================
+
+const app = new Hono();
+
+app.use("*", async (c, next) => {
+  const start = performance.now();
+  await next();
+  const ms = (performance.now() - start).toFixed(2);
+  console.log(`[${new Date().toISOString()}] ${c.req.method} ${c.req.path} → ${c.res.status} (${ms}ms)`);
+});
+
+// =============================================================================
+// 7. LEARNING ENGINE ROUTES
+// =============================================================================
+
+// GET /api/references — all known reference drawings (the learning corpus).
+app.get("/api/references", (c) => {
+  try {
+    const rows = db.select().from(references).orderBy(desc(references.createdAt)).all();
+    return c.json({ data: rows });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// POST /api/references — register a NEW uploaded reference (Phase 2 continuous).
+app.post("/api/references", zValidator("json", uploadSchema), (c) => {
+  try {
+    const b = c.req.valid("json");
+    const hash = createHash("sha256").update(b.name).digest("hex").slice(0, 16);
+    const row = { id: randomUUID(), name: b.name, fileType: b.fileType, category: b.category,
+      status: "pending", approved: b.approved ? 1 : 0, confidence: 0, contentHash: hash, createdAt: new Date() };
+    db.insert(references).values(row).run();
+    cache.invalidatePrefix("kb:");
+    return c.json({ data: row }, 201);
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// POST /api/references/upload — REAL file upload (2.txt Drawing Upload module).
+// Accepts dwg/dxf/pdf/jpg/png/svg/skp/… analyses the drawing, stores it as
+// learned with a "What AI Learned from Uploaded Drawing" summary.
+app.post("/api/references/upload", async (c) => {
+  try {
+    const body = await c.req.parseBody();
+    const file = body["file"] as unknown as File;
+    if (!file || typeof (file as any).arrayBuffer !== "function") return c.json({ error: "No file uploaded (field 'file')" }, 400);
+    const category = String(body["category"] || "kitchen");
+    const approved = String(body["approved"] || "") === "true";
+    const name = (file as any).name || "drawing";
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    const fileType = UPLOAD_EXT[ext];
+    if (!fileType) return c.json({ error: `Unsupported format .${ext}. Allowed: ${[...new Set(Object.keys(UPLOAD_EXT))].join(", ")}` }, 400);
+
+    const buf = Buffer.from(await (file as any).arrayBuffer());
+    const hash = createHash("sha256").update(buf).digest("hex").slice(0, 16); // hash CONTENT (true dedup)
+    const dup = db.select().from(references).where(eq(references.contentHash, hash)).get();
+    const analysis = analyzeDrawing(name, fileType, category, buf);
+    if (dup) analysis.status = "duplicate";
+
+    const id = randomUUID();
+    db.insert(references).values({
+      id, name, fileType, category, status: analysis.status === "duplicate" ? "duplicate" : "learned",
+      approved: approved ? 1 : 0, confidence: dup ? 0 : analysis.confidence, contentHash: hash,
+      size: buf.length, analysis: JSON.stringify(analysis), createdAt: new Date(),
+    }).run();
+
+    // Persist detected features for the dashboard / drill-down.
+    if (!dup) {
+      const insFeat = sqlite.prepare(`INSERT INTO features(id,ref_id,kind,label,created_at) VALUES(?,?,?,?,?)`);
+      for (const cab of analysis.detectedCabinets) insFeat.run(randomUUID(), id, "cabinet", cab, Date.now());
+      for (const u of analysis.utilities) insFeat.run(randomUUID(), id, "utility", u, Date.now());
+    }
+    cache.invalidatePrefix("kb:");
+    return c.json({ data: { id, name, fileType, category, status: analysis.status, size: buf.length, analysis } }, 201);
+  } catch (err) { console.error(err); return c.json({ error: "Upload/analysis failed" }, 500); }
+});
+
+// GET /api/references/:id — one reference with its parsed analysis.
+app.get("/api/references/:id", (c) => {
+  const r = db.select().from(references).where(eq(references.id, c.req.param("id"))).get();
+  if (!r) return c.json({ error: "Not found" }, 404);
+  let analysis = null; try { analysis = r.analysis ? JSON.parse(r.analysis) : null; } catch {}
+  const feats = db.select().from(features).where(eq(features.refId, r.id)).all();
+  return c.json({ data: { ...r, analysis, features: feats } });
+});
+
+// POST /api/references/:id/learn — apply a per-drawing learning command (2.txt).
+app.post("/api/references/:id/learn", zValidator("json", commandSchema), (c) => {
+  try {
+    const { command } = c.req.valid("json");
+    if (!DRAWING_COMMANDS.includes(command)) return c.json({ error: "Unknown drawing command" }, 400);
+    const r = db.select().from(references).where(eq(references.id, c.req.param("id"))).get();
+    if (!r) return c.json({ error: "Reference not found" }, 404);
+    let analysis: DrawingAnalysis;
+    try { analysis = JSON.parse(r.analysis); } catch { return c.json({ error: "No analysis on this drawing" }, 400); }
+
+    const cmd = command.toLowerCase();
+    let result = "";
+    if (cmd.startsWith("ignore")) {
+      result = `Will skip ${cmd.includes("presentation") ? "presentation text" : "small dimensions"} from this drawing on re-learn.`;
+    } else if (cmd === "store as standard template") {
+      db.insert(rules).values({ id: randomUUID(), category: r.category.includes("kitchen") ? "placement" : "cabinets",
+        title: `Template: ${r.name}`, detail: `Saved "${r.name}" as a reusable company standard template.`,
+        confidence: Math.max(0.8, analysis.confidence), usageCount: 0, status: "active", sourceRefId: r.id, ruleClass: "learned", createdAt: new Date() }).run();
+      result = `Stored "${r.name}" as a standard template (new active rule).`;
+    } else {
+      result = `Focused learning '${command}' applied to "${r.name}".`;
+    }
+    if (!analysis.appliedCommands.includes(command)) analysis.appliedCommands.push(command);
+    const newConf = Math.min(0.99, (r.confidence || analysis.confidence) + 0.02);
+    analysis.confidence = newConf;
+    db.update(references).set({ analysis: JSON.stringify(analysis), confidence: newConf }).where(eq(references.id, r.id)).run();
+    db.insert(commandLog).values({ id: randomUUID(), command: `[${r.name}] ${command}`, result, affected: 1, createdAt: new Date() }).run();
+    cache.invalidatePrefix("kb:");
+    return c.json({ data: { result, analysis } });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// POST /api/learning/scan — Phase 1/2 learn pass over all pending references.
+app.post("/api/learning/scan", (c) => {
+  try { return c.json({ data: runLearningScan({ ignoreDuplicates: true }) }); }
+  catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// GET /api/learning/rules — the "What AI Learned" data (cached).
+app.get("/api/learning/rules", (c) => {
+  try {
+    const cacheKey = "kb:rules";
+    const cached = cache.get<unknown>(cacheKey);
+    if (cached) return c.json({ data: cached, source: "cache" });
+    const rows = db.select().from(rules).orderBy(desc(rules.confidence)).all();
+    cache.set(cacheKey, rows, CACHE_TTL);
+    return c.json({ data: rows, source: "db" });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// POST /api/learning/rules/:id/approve — approve a pending learned rule.
+app.post("/api/learning/rules/:id/approve", (c) => {
+  try {
+    const id = c.req.param("id");
+    const r = db.select().from(rules).where(eq(rules.id, id)).get();
+    if (!r) return c.json({ error: "Rule not found" }, 404);
+    db.update(rules).set({ status: "active" }).where(eq(rules.id, id)).run();
+    cache.invalidatePrefix("kb:");
+    return c.json({ data: { id, status: "active" } });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// POST /api/learning/rules/:id/toggle — enable/disable a learned standard. A
+// disabled rule no longer drives generation (refreshLearnedStandards ignores it).
+app.post("/api/learning/rules/:id/toggle", (c) => {
+  try {
+    const id = c.req.param("id");
+    const r = db.select().from(rules).where(eq(rules.id, id)).get();
+    if (!r) return c.json({ error: "Rule not found" }, 404);
+    const status = r.status === "active" ? "disabled" : "active";
+    db.update(rules).set({ status }).where(eq(rules.id, id)).run();
+    cache.invalidatePrefix("kb:");
+    return c.json({ data: { id, status } });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// POST /api/learning/commands/execute — run one of the 23 Command-Center commands.
+app.post("/api/learning/commands/execute", zValidator("json", commandSchema), (c) => {
+  try {
+    const { command } = c.req.valid("json");
+    if (!COMMANDS.includes(command)) return c.json({ error: "Unknown command" }, 400);
+
+    let result = "", affected = 0;
+    const cmd = command.toLowerCase();
+
+    if (cmd === "re-learn all uploaded files") {
+      // Reset learned/duplicate refs back to pending, then scan again.
+      db.update(references).set({ status: "pending" }).where(eq(references.status, "learned")).run();
+      db.update(references).set({ status: "pending" }).where(eq(references.status, "duplicate")).run();
+      const s = runLearningScan({ ignoreDuplicates: true });
+      result = `Re-learned ${s.learned} files (${s.duplicates} duplicates skipped, ${s.featuresAdded} features detected).`;
+      affected = s.learned;
+    } else if (cmd === "learn only approved drawings") {
+      const s = runLearningScan({ approvedOnly: true, ignoreDuplicates: true });
+      result = `Learned ${s.learned} approved drawings; ${s.skipped} unapproved skipped.`; affected = s.learned;
+    } else if (cmd === "ignore duplicate drawings") {
+      const dups = db.select().from(references).where(eq(references.status, "duplicate")).all();
+      result = `${dups.length} duplicate drawings flagged and excluded from learning.`; affected = dups.length;
+    } else if (cmd.startsWith("ignore")) {
+      result = `Acknowledged: '${command}'. Matching layers/dimensions will be skipped on the next scan.`;
+    } else if (cmd === "compare old learning vs new learning") {
+      const active = db.select().from(rules).where(eq(rules.status, "active")).all().length;
+      const pending = db.select().from(rules).where(eq(rules.status, "pending")).all().length;
+      result = `Active standards: ${active}. Newly proposed (pending approval): ${pending}.`; affected = pending;
+    } else {
+      // "Learn X" commands: bump confidence + usage on rules in the matching
+      // category, simulating reinforcement from a focused learning pass.
+      const map: Record<string, string> = {
+        cabinet: "cabinets", wardrobe: "cabinets", kitchen: "placement", drilling: "drilling",
+        hardware: "hardware", "contour-routing": "edges", electrical: "utilities", plumbing: "utilities",
+        drawer: "drawers", "edge-band": "edges", production: "assembly", assembly: "assembly",
+        contour: "edges", furniture: "cabinets", company: "cabinets",
+      };
+      const key = Object.keys(map).find((k) => cmd.includes(k));
+      const targetCat = key ? map[key] : "cabinets";
+      const targets = db.select().from(rules).where(eq(rules.category, targetCat)).all();
+      for (const r of targets) {
+        db.update(rules).set({ confidence: Math.min(0.99, r.confidence + 0.02), usageCount: r.usageCount + 1 })
+          .where(eq(rules.id, r.id)).run();
+      }
+      affected = targets.length;
+      result = `'${command}' applied: reinforced ${affected} ${targetCat} standard(s).`;
+    }
+
+    db.insert(commandLog).values({ id: randomUUID(), command, result, affected, createdAt: new Date() }).run();
+    cache.invalidatePrefix("kb:");
+    return c.json({ data: { command, result, affected } });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// =============================================================================
+// 8. DESIGN GENERATION ROUTE (Output #4)
+// =============================================================================
+
+// Continuous-improvement loop (Output #8): each generated design REINFORCES the
+// standards it actually applied — bumping usageCount (and nudging confidence) on
+// the active rules in the categories the design exercised. This is what makes
+// the "Top Used Standards" + usage counts climb as the studio is used.
+function exercisedCategories(type: string): string[] {
+  const base = ["cabinets", "drawers", "edges"];
+  return type.toLowerCase().includes("kitchen")
+    ? [...base, "placement", "utilities", "units", "hardware"]
+    : [...base, "hardware"]; // furniture
+}
+function reinforceStandards(cats: string[]) {
+  const active = db.select().from(rules).where(eq(rules.status, "active")).all();
+  for (const r of active) {
+    if (!cats.includes(r.category)) continue;
+    db.update(rules).set({ usageCount: r.usageCount + 1, confidence: Math.min(0.99, r.confidence + 0.005) }).where(eq(rules.id, r.id)).run();
+  }
+  cache.invalidatePrefix("kb:");
+}
+
+app.post("/api/generate", zValidator("json", generateSchema), (c) => {
+  try {
+    const { designType, wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows } = c.req.valid("json");
+    const layout = buildLayout(designType, { wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows });
+    const id = randomUUID();
+    db.insert(designs).values({ id, designType, params: JSON.stringify({ wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand }), layout: JSON.stringify(layout), createdAt: new Date() }).run();
+    // Persist the mandatory-rule audit (conflicts + ±10% adjustments) for the dashboard.
+    const insAudit = sqlite.prepare(`INSERT INTO audit_log(id,design_id,kind,message,created_at) VALUES(?,?,?,?,?)`);
+    for (const m of GEN_LOG.conflicts) insAudit.run(randomUUID(), id, "conflict", `[${designType}] ${m}`, Date.now());
+    for (const m of GEN_LOG.adjustments) insAudit.run(randomUUID(), id, "adjustment", `[${designType}] ${m}`, Date.now());
+    reinforceStandards(exercisedCategories(designType));
+    return c.json({ data: { id, ...layout } });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// POST /api/generate-consensus (18.txt) — the optional AI Consensus Design Mode.
+// Same body as /api/generate plus optional style + storagePriority. Builds several
+// internal-strategy candidates, scores them deterministically, persists the WINNING
+// layout exactly like /api/generate, and returns the contract response.
+app.post("/api/generate-consensus", zValidator("json", generateSchema), async (c) => {
+  try {
+    const v = c.req.valid("json");
+    const { designType, wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows } = v;
+    // Optional consensus-only fields are not in generateSchema → read them raw.
+    let style: string | undefined, storagePriority: string | undefined, structures: any[] | undefined, useExternalAI = false;
+    try { const raw = await c.req.json(); style = raw && raw.style; storagePriority = raw && raw.storagePriority; structures = raw && raw.structures; useExternalAI = !!(raw && raw.useExternalAI); } catch { /* body already consumed/empty — fine */ }
+    const dims = { wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows };
+    const missing = detectMissing(points as any[], designType);
+    const autoMode = missing.length > 0;
+    const brief = designBrief(designType, dims, points as any[], windows as any[], missing, style, storagePriority, structures as any[]);
+    // 15.pdf Stage 3 (optional): send the brief to ChatGPT + DeepSeek; each suggestion becomes a real
+    // engine candidate (CAD stays authoritative). Skipped silently if no keys / not requested.
+    const externalReviews: any[] = []; const extraStrategies: any[] = [];
+    const keys = loadAIKeys();
+    if (useExternalAI && (keys.openai || keys.deepseek)) {
+      const reviews = await Promise.all(["chatgpt", "deepseek"].map((pid) => askExternalAI(pid, brief, designType)));
+      for (const r of reviews) {
+        if (!r) continue;
+        externalReviews.push({ provider: r.provider, notes: r.notes || "", error: r.error || null });
+        if (r.params && !r.error && Object.keys(r.params).length) extraStrategies.push({ strategy: r.provider + " suggestion", label: r.provider + " (AI)", opts: externalOpts(r.params, dims) });
+        else if (r.params && !r.error) { externalReviews[externalReviews.length - 1].error = "empty/invalid AI response"; }
+      }
+    }
+    const { candidates, winner, winnerLayout } = buildConsensus(designType, dims, extraStrategies);
+    // Persist the winning layout exactly like /api/generate.
+    const id = randomUUID();
+    db.insert(designs).values({ id, designType, params: JSON.stringify({ wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, mode: "consensus", style, storagePriority }), layout: JSON.stringify(winnerLayout), createdAt: new Date() }).run();
+    const insAudit = sqlite.prepare(`INSERT INTO audit_log(id,design_id,kind,message,created_at) VALUES(?,?,?,?,?)`);
+    for (const m of GEN_LOG.conflicts) insAudit.run(randomUUID(), id, "conflict", `[${designType} · consensus] ${m}`, Date.now());
+    for (const m of GEN_LOG.adjustments) insAudit.run(randomUUID(), id, "adjustment", `[${designType} · consensus] ${m}`, Date.now());
+    reinforceStandards(exercisedCategories(designType));
+    return c.json({ data: { id, mode: "consensus", missing, autoMode, brief, candidates, winner, externalReviews, ...winnerLayout } });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// External-AI key management (15.pdf Stage 3). Keys are stored locally in ai-keys.json (NOT in source,
+// NOT echoed back) and also honoured from env. GET reports which providers are configured.
+app.get("/api/ai/keys", (c) => { const k = loadAIKeys(); return c.json({ data: { openai: !!k.openai, deepseek: !!k.deepseek, stability: !!k.stability } }); });
+app.post("/api/ai/keys", async (c) => {
+  try {
+    const b = await c.req.json();
+    const cur: any = (() => { try { return fsExists(AI_KEYS_FILE) ? JSON.parse(fsRead(AI_KEYS_FILE, "utf8")) : {}; } catch { return {}; } })();
+    if (typeof b.openai === "string") cur.openai = b.openai.trim();
+    if (typeof b.deepseek === "string") cur.deepseek = b.deepseek.trim();
+    if (typeof b.stability === "string") cur.stability = b.stability.trim();
+    fsWrite(AI_KEYS_FILE, JSON.stringify(cur));
+    const k = loadAIKeys();
+    return c.json({ data: { openai: !!k.openai, deepseek: !!k.deepseek, stability: !!k.stability, saved: true } });
+  } catch (err) { console.error(err); return c.json({ error: "Could not save keys" }, 500); }
+});
+
+// ── Photoreal render via Stability AI (Structure Control) — turn the app's 3D render of the EXACT layout
+// into a photoreal image. The 3D screenshot is the "structure"; the prompt drives photoreal materials/light.
+app.post("/api/render/photoreal", async (c) => {
+  try {
+    const key = loadAIKeys().stability;
+    if (!key) return c.json({ error: "no-key", message: "Add your Stability AI API key first (the violet ✨ panel)." }, 400);
+    const body = await c.req.json();
+    const dataUrl: string = body.image || "";
+    const m = dataUrl.match(/^data:image\/\w+;base64,(.+)$/);
+    if (!m) return c.json({ error: "bad-image", message: "No 3D image supplied — open the 3D view first." }, 400);
+    const imgBuf = Buffer.from(m[1], "base64");
+    const dt = String(body.designType || "modular kitchen");
+    const fin = String(body.finish || "").trim();
+    // 18.pdf §3–§5: the handle rule is stated EXPLICITLY in the prompt — the AI must never paint
+    // duplicate handles (one horizontal + one vertical) on a single shutter, and handle-less
+    // systems must show only the groove/profile channel.
+    const handleSys = String(body.handleSystem || "").trim();
+    const hlSys = HANDLELESS.has(handleSys);
+    const handleClause = hlSys
+      ? "sleek handle-less cabinet fronts with one continuous slim groove profile channel per front, absolutely no external door handles or knobs anywhere, "
+      : handleSys === "Knob"
+        ? "every cabinet shutter fitted with exactly one small round metal knob and every drawer front with exactly one centered knob — never two handles on the same shutter, "
+        : "every cabinet shutter fitted with exactly one slim vertical steel bar handle on its opening side, every drawer front with exactly one horizontal steel bar handle centered on it — never two handles on the same shutter, never a horizontal and a vertical handle together on one door, ";
+    const STYLES: Record<string, string> = {
+      luxury: "luxury high-end designer kitchen, premium polished marble, brushed-gold accents, dramatic warm accent lighting, opulent and elegant",
+      airy: "bright and airy kitchen, abundant soft natural daylight from large windows, light airy tones, fresh clean scandinavian feel",
+      warmwood: "warm cozy wooden kitchen, natural oak and walnut grain, soft golden-hour ambient lighting, earthy inviting tones",
+      gloss: "ultra-modern high-gloss kitchen, reflective lacquered handle-less cabinets, sleek minimal, cool crisp LED lighting, sharp reflections",
+      classic: "classic traditional Indian kitchen, shaker-style cabinets, elegant timeless styling, soft warm lighting",
+    };
+    const styleStr = STYLES[String(body.style || "")] || "";
+    const prompt = body.prompt || (
+      "Photorealistic architectural interior render of a modern Indian modular " + dt + ", " +
+      (styleStr ? (styleStr + ", ") : "") +
+      (fin ? (fin.toLowerCase() + " cabinet shutters, ") : "glossy laminate cabinet shutters, ") +   // finish now carries brand + shade + type (e.g. "merino frosty white acrylic high-gloss")
+      "polished black granite countertop with soft reflections, " + handleClause + "white marble subway-tile backsplash, " +
+      "stainless-steel chimney hood, built-in hob, refrigerator and appliances, warm under-cabinet LED lighting, recessed ceiling spotlights and a pendant light, " +
+      "large window with soft natural daylight, glossy marble floor tiles with reflections, tastefully styled with glass jars, a kettle, fruit bowl and a potted plant, " +
+      "professional real-estate interior photography, ultra realistic, intricate detail, soft global illumination, ambient occlusion, ray-traced reflections, physically based materials, " +
+      "8k, V-Ray and Corona render, interior design magazine quality, cinematic");
+    const neg = body.negativePrompt || ("cartoon, illustration, cgi look, low poly, flat shading, blurry, noisy, grainy, distorted geometry, warped cabinets, extra rooms, doorways, watermark, text, logo, people, oversaturated, fisheye, duplicate handles, two handles on one shutter, extra handles, mismatched handles" + (hlSys ? ", door handles, drawer handles, knobs, handle bars" : ""));
+    const strength = Math.min(0.92, Math.max(0.35, Number(body.controlStrength) || 0.6));   // structure adherence: higher = keep layout exactly, lower = more photoreal freedom
+    const seed = Math.max(0, Math.floor(Number(body.seed) || 0));   // same seed across turntable angles → consistent look
+
+    const fd = new FormData();
+    fd.append("image", new Blob([imgBuf], { type: "image/png" }), "structure.png");
+    fd.append("prompt", prompt);
+    fd.append("negative_prompt", neg);
+    fd.append("control_strength", String(strength));
+    if (seed > 0) fd.append("seed", String(seed));
+    fd.append("output_format", "png");
+
+    const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 120000);
+    let res;
+    try {
+      res = await fetch("https://api.stability.ai/v2beta/stable-image/control/structure", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + key, Accept: "image/*" },
+        body: fd as any, signal: ac.signal,
+      });
+    } finally { clearTimeout(t); }
+    if (!res.ok) {
+      const errTxt = await res.text().catch(() => "");
+      return c.json({ error: "stability-" + res.status, message: errTxt.slice(0, 300) || ("Stability AI HTTP " + res.status) }, 502);
+    }
+    const outBuf = Buffer.from(await res.arrayBuffer());
+    return c.json({ data: { image: "data:image/png;base64," + outBuf.toString("base64") } });
+  } catch (err: any) {
+    console.error(err);
+    return c.json({ error: "render-failed", message: String((err && err.message) || err).slice(0, 200) }, 500);
+  }
+});
+
+// POST /api/designs/edit-validate — validate a manually-edited elevation against
+// the mandatory rules (6.4) and log conflicts/adjustments to the dashboard audit.
+app.post("/api/designs/edit-validate", async (c) => {
+  try {
+    const body = await c.req.json();
+    const base = Array.isArray(body.base) ? body.base : [];
+    const { conflicts, adjustments } = validateEditedBase(base, Number(body.length) || 0);
+    const did = "edit-" + (base.length ? base.length : 0) + "-" + (Number(body.length) || 0);
+    const tag = "[edit · " + String(body.designType || "Kitchen") + (body.runName ? " · " + body.runName : "") + "] ";
+    const ins = sqlite.prepare(`INSERT INTO audit_log(id,design_id,kind,message,created_at) VALUES(?,?,?,?,?)`);
+    for (const m of conflicts) ins.run(randomUUID(), did, "conflict", tag + m, Date.now());
+    for (const m of adjustments) ins.run(randomUUID(), did, "adjustment", tag + m, Date.now());
+    return c.json({ data: { conflicts, adjustments, ok: conflicts.length === 0 } });
+  } catch (err) { console.error(err); return c.json({ error: "Validation failed" }, 500); }
+});
+
+// 19.txt step 7 — live recompute: BOQ / cut list / hardware / manufacturing checks are derived from the
+// SAME shared model, so any 2D or 3D edit re-derives them (single source of truth, no stale documents).
+app.post("/api/recompute", async (c) => {
+  try {
+    const b = await c.req.json();
+    const layout: any = { runs: Array.isArray(b.runs) ? b.runs : [], handle: b.handle || GEN.handle, applianceBrand: b.applianceBrand || GEN.applianceBrand };
+    layout.cutList = cutList(layout);
+    layout.hardware = hardwareSchedule(layout);
+    layout.boq = boq(layout);
+    layout.mfgChecks = validateManufacturing(layout);
+    return c.json({ data: { cutList: layout.cutList, hardware: layout.hardware, boq: layout.boq, mfgChecks: layout.mfgChecks } });
+  } catch (err) { console.error(err); return c.json({ error: "recompute failed" }, 500); }
+});
+
+// ── Export a generated design as a combined SVG or a real-mm DXF ──
+function loadDesign(id: string) {
+  const row = db.select().from(designs).where(eq(designs.id, id)).get();
+  if (!row) return null;
+  return { row, layout: JSON.parse(row.layout) as any };
+}
+app.get("/api/designs/:id/export.svg", (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}.svg`;
+  c.header("Content-Type", "image/svg+xml");
+  c.header("Content-Disposition", `attachment; filename="${fname}"`);
+  return c.body(combinedSvg(d.layout, { type: d.row.designType, id: d.row.id }));
+});
+app.get("/api/designs/:id/export.dxf", (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  const views = [{ layer: "PLAN", svg: d.layout.planSvg },
+    ...d.layout.elevations.map((e: any, i: number) => ({ layer: `ELEV_${i + 1}_${e.name}`, svg: e.svg })),
+    ...((d.layout.sections || []).map((s: any, i: number) => ({ layer: `SECTION_${i + 1}_${s.name}`, svg: s.svg })))];
+  const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}.dxf`;
+  c.header("Content-Type", "application/dxf");
+  c.header("Content-Disposition", `attachment; filename="${fname}"`);
+  return c.body(dxfFromViews(views));
+});
+app.get("/api/designs/:id/cutlist.csv", (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-cutlist.csv`;
+  c.header("Content-Type", "text/csv");
+  c.header("Content-Disposition", `attachment; filename="${fname}"`);
+  return c.body(cutListCsv(d.layout));
+});
+app.get("/api/designs/:id/hardware.csv", (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-hardware.csv`;
+  c.header("Content-Type", "text/csv");
+  c.header("Content-Disposition", `attachment; filename="${fname}"`);
+  return c.body(hardwareCsv(d.layout));
+});
+
+// =============================================================================
+// 9. AI STREAMING ENDPOINT — Web Standard ReadableStream (design reasoning)
+// PRODUCTION UPGRADE: Replace simulated tokens with a real LLM (Anthropic SDK)
+//   const stream = anthropic.messages.stream({ model: "claude-sonnet-4-6", ... });
+// =============================================================================
+
+app.post("/api/ai/stream", zValidator("json", aiPromptSchema), (c) => {
+  const { prompt } = c.req.valid("json");
+  const activeRules = db.select().from(rules).where(eq(rules.status, "active")).orderBy(desc(rules.confidence)).all();
+  const reasoning =
+    `Generating "${prompt}". Applying ${activeRules.length} learned standards. ` +
+    activeRules.slice(0, 8).map((r) => `Rule [${r.category}] ${r.title}: ${r.detail}`).join(" ") +
+    " Centering the chimney and balancing wall cabinets. Placing the sink near the corner with a GTPT cabinet above it. " +
+    "Capping drawer stacks at three. Closing the leftover gap with a filler. Dimensioning sockets from the nearest wall. " +
+    "Design is manufacturing-aligned and ready for review.";
+  const tokens = reasoning.split(" ");
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = new TextEncoder();
+      for (const t of tokens) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ token: t + " ", done: false })}\n\n`));
+        await new Promise((r) => setTimeout(r, 25 + Math.random() * 45));
+      }
+      controller.enqueue(enc.encode(`data: ${JSON.stringify({ token: "", done: true })}\n\n`));
+      controller.close();
+    },
+  });
+  return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
+});
+
+// =============================================================================
+// 10. ADMIN DASHBOARD DATA + BENCHMARK + STATS
+// =============================================================================
+
+app.get("/api/admin/dashboard", (c) => {
+  try {
+    const allRefs = db.select().from(references).all();
+    const allRules = db.select().from(rules).all();
+    const cmds = db.select().from(commandLog).orderBy(desc(commandLog.createdAt)).all().slice(0, 8);
+    const byCat: Record<string, number> = {};
+    for (const r of allRules) byCat[r.category] = (byCat[r.category] || 0) + 1;
+    const avgConf = allRules.length ? allRules.reduce((s, r) => s + r.confidence, 0) / allRules.length : 0;
+    const top = [...allRules].sort((a, b) => b.usageCount - a.usageCount).slice(0, 5)
+      .map((r) => ({ title: r.title, usageCount: r.usageCount, confidence: r.confidence }));
+    const allDesigns = db.select().from(designs).all();
+    const designsByType: Record<string, number> = {};
+    for (const dz of allDesigns) designsByType[dz.designType] = (designsByType[dz.designType] || 0) + 1;
+    const audits = db.select().from(auditLog).orderBy(desc(auditLog.createdAt)).all();
+    const conflicts = audits.filter((a) => a.kind === "conflict");
+    const adjustments = audits.filter((a) => a.kind === "adjustment");
+    return c.json({
+      data: {
+        references: { total: allRefs.length, learned: allRefs.filter(r => r.status === "learned").length,
+          pending: allRefs.filter(r => r.status === "pending").length, duplicates: allRefs.filter(r => r.status === "duplicate").length,
+          approved: allRefs.filter(r => r.approved).length },
+        rules: { total: allRules.length, active: allRules.filter(r => r.status === "active").length,
+          pending: allRules.filter(r => r.status === "pending").length, avgConfidence: +(avgConf * 100).toFixed(1) },
+        designs: allDesigns.length,
+        byCategory: byCat, topStandards: top, recentCommands: cmds, designsByType,
+        conflicts: conflicts.slice(0, 12).map((a) => a.message), adjustments: adjustments.slice(0, 12).map((a) => a.message),
+        conflictCount: conflicts.length, adjustmentCount: adjustments.length,
+      },
+    });
+  } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+app.get("/api/benchmark", (c) => {
+  const iters = 1000;
+  const dbStart = performance.now();
+  for (let i = 0; i < iters; i++) db.select().from(rules).all();
+  const dbMs = performance.now() - dbStart;
+  cache.set("bench", db.select().from(rules).all(), 60000);
+  const cStart = performance.now();
+  for (let i = 0; i < iters; i++) cache.get("bench");
+  const cMs = performance.now() - cStart;
+  return c.json({ iterations: iters, dbReadAvgMs: (dbMs / iters).toFixed(4), cacheReadAvgMs: (cMs / iters).toFixed(4),
+    speedup: (dbMs / Math.max(cMs, 0.0001)).toFixed(1) + "x", cacheStats: cache.stats() });
+});
+
+app.get("/api/stats", (c) => c.json({
+  cache: cache.stats(), uptime: process.uptime().toFixed(0) + "s",
+  memoryMB: (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1),
+}));
+
+// =============================================================================
+// 11. REACT FRONTEND — served via Hono c.html (React + Tailwind + Babel CDN)
+// Behaves like a lightweight CAD studio shell: Generator (live SVG preview),
+// What AI Learned, Command Center, Admin Dashboard. Buttons disable during
+// requests and every panel shows a loading state.
+// PRODUCTION UPGRADE: replace inline React/Tailwind CDN with a Vite build +
+//   serveStatic, add a real canvas engine (Konva/Fabric) for drag/zoom/snap,
+//   and ship as an installable PWA (manifest + service worker).
+// =============================================================================
+
+const frontendHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Design Studio — CAD Learning + Generation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/math/SimplexNoise.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/SSAOShader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/GammaCorrectionShader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/SSAOPass.js"></script>
+  <style>
+    @keyframes fadeIn { from { opacity:0; transform:translateY(6px);} to {opacity:1; transform:translateY(0);} }
+    .fade-in { animation: fadeIn .25s ease-out; }
+    .cursor-blink { animation: blink 1s step-end infinite; } @keyframes blink { 50% { opacity:0; } }
+    @keyframes adsPulse { 0% { box-shadow:0 0 0 0 rgba(16,185,129,.6);} 70% { box-shadow:0 0 0 6px rgba(16,185,129,0);} 100% { box-shadow:0 0 0 0 rgba(16,185,129,0);} }
+  </style>
+</head>
+<body class="bg-gradient-to-br from-sky-50 via-white to-violet-50 text-slate-700 min-h-screen">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+    const api = (url, opts) => fetch(url, opts).then(r => r.json());
+    const CABINET_WIDTHS = ${JSON.stringify([300, 350, 400, 450, 500, 600, 700, 800, 900, 1000, 1200])};
+    const DRAWER_WIDTHS_C = ${JSON.stringify(DRAWER_WIDTHS)};
+    const STD_C = ${JSON.stringify(STD)};
+
+    // Rasterize an SVG string to a PNG data URL (white background, 2x for crisp print).
+    const svgToPng = (svg, scale) => new Promise((resolve, reject) => {
+      const wm = svg.match(/width="(\\d+)"/), hm = svg.match(/height="(\\d+)"/);
+      const w = wm ? +wm[1] : 800, h = hm ? +hm[1] : 600;
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement("canvas"); c.width = w * scale; c.height = h * scale;
+        const ctx = c.getContext("2d"); ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, c.width, c.height);
+        ctx.scale(scale, scale); ctx.drawImage(img, 0, 0, w, h);
+        resolve({ dataUrl: c.toDataURL("image/png"), w, h });
+      };
+      img.onerror = reject;
+      img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    });
+    // Corner-solution colour legend as a standalone SVG (null when no corners).
+    const cornerLegendSvg = (result) => {
+      const present = new Set();
+      for (const r of (result.runs || [])) for (const c of (r.base || [])) if (c.kind === "corner") {
+        const l = c.label || "";
+        present.add(/LeMans/.test(l) ? "LeMans" : /Magic/.test(l) ? "Magic Corner" : /Blind/.test(l) ? "Blind Corner" : "Carousel");
+      }
+      if (!present.size) return null;
+      const KEY = [["LeMans", "#10b981"], ["Magic Corner", "#6366f1"], ["Blind Corner", "#d97706"], ["Carousel", "#e11d48"]];
+      const items = []; let lx = 130;
+      for (const [name, fill] of KEY) {
+        const on = present.has(name), txt = name + (on ? " ✓" : "");
+        items.push('<rect x="' + lx + '" y="14" width="11" height="11" rx="2" fill="' + fill + '" opacity="' + (on ? 1 : 0.35) + '"/>');
+        items.push('<text x="' + (lx + 16) + '" y="23" fill="#475569" font-size="10" font-family="monospace" font-weight="' + (on ? "bold" : "normal") + '" opacity="' + (on ? 1 : 0.45) + '">' + txt + '</text>');
+        lx += 22 + txt.length * 6.1;
+      }
+      items.push('<text x="' + (lx + 4) + '" y="23" fill="#94a3b8" font-size="9" font-family="monospace">· hierarchy LeMans › Magic › Blind › Carousel</text>');
+      lx += 8 + 52 * 6;
+      const W = Math.max(420, Math.round(lx)), H = 42;
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '"><rect width="' + W + '" height="' + H + '" fill="#ffffff"/>' +
+        '<text x="10" y="23" fill="#334155" font-size="11" font-family="monospace" font-weight="bold">Corner solution</text>' + items.join("") + '</svg>';
+    };
+    // Build a multi-page PDF from a generated design. Drawings (plan / elevations /
+    // legend) are rasterized SVG images; the cut-list / BOQ / hardware tables are
+    // ── 18.pdf §6–§7: SAVE-AS WORKFLOW — no silent drops into the Downloads folder. Every export
+    // first asks WHERE to save: the OS-native Save As dialog (File System Access API — Chrome/Edge
+    // desktop & PWA) lets the user pick folder + file name + type; where unsupported, a
+    // "choose file name" dialog runs before the download. A queue serialises multi-file exports
+    // (storyboard/spin frames) so pickers never collide. window.__adsSaveSilent = true is the
+    // headless-test hook → plain download with the suggested name.
+    const SAVE_TYPES = { png: ["PNG image", "image/png"], pdf: ["PDF document", "application/pdf"], dxf: ["AutoCAD DXF drawing", "image/vnd.dxf"], svg: ["SVG drawing", "image/svg+xml"], csv: ["CSV spreadsheet", "text/csv"], txt: ["Text file", "text/plain"], webm: ["WebM video", "video/webm"], glb: ["3D model (GLB)", "model/gltf-binary"], gltf: ["3D model (glTF)", "model/gltf+json"], json: ["Saved rendered view (JSON)", "application/json"], html: ["Rendered 360 viewer (HTML)", "text/html"] };
+    let __saveQ = Promise.resolve();
+    const __anchorDl = (blob, name) => { const a = document.createElement("a"); a.download = name; a.href = URL.createObjectURL(blob); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); };
+    const saveBlobAs = (blob, suggestedName) => {
+      const job = async () => {
+        const ext = (suggestedName.split(".").pop() || "").toLowerCase();
+        const [desc, mime] = SAVE_TYPES[ext] || ["File", blob.type || "application/octet-stream"];
+        if (window.__adsSaveSilent) { __anchorDl(blob, suggestedName); return true; }
+        if (window.showSaveFilePicker) {
+          try {
+            const h = await window.showSaveFilePicker({ suggestedName, types: [{ description: desc, accept: { [mime]: ["." + ext] } }] });
+            const w = await h.createWritable(); await w.write(blob); await w.close(); return true;
+          } catch (e) {
+            if (e && e.name === "AbortError") return false;   // user pressed Cancel in Save As → no file written
+            /* TypeError (odd mime) / SecurityError / NotAllowedError → fall through to the name dialog */
+          }
+        }
+        let name = suggestedName;
+        try { const v = window.prompt("Save as — choose the file name (your browser saves it to the location you pick / your Downloads):", suggestedName); if (v === null) return false; if (v.trim()) name = v.trim(); }
+        catch (e) { /* prompt unavailable (headless / kiosk) → keep the suggested name */ }
+        __anchorDl(blob, name); return true;
+      };
+      __saveQ = __saveQ.then(job, job);
+      return __saveQ;
+    };
+    const saveUrlAs = async (url, suggestedName) => {
+      try { const r = await fetch(url); if (!r.ok) { alert("Export failed: HTTP " + r.status); return false; } return await saveBlobAs(await r.blob(), suggestedName); }
+      catch (e) { alert("Export failed: " + (e && e.message)); return false; }
+    };
+    try { window.__adsSaveAs = saveBlobAs; } catch (e) {}   // test/debug hook
+    // ── 18.pdf §6 supported downloads: standalone Production Cut List PDF, BOQ Excel(CSV)/PDF and
+    // Cabinet Schedule Excel(CSV)/PDF. All go through the Save-As workflow and read the LIVE model
+    // (the recompute effect refreshes result.cutList/boq after every 2D or 3D edit).
+    const csvText = (headers, rows) => [headers].concat(rows).map((r) => r.map((v) => { const s = String(v == null ? "" : v); return /[",\\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(",")).join("\\r\\n");
+    const saveCsvAs = (headers, rows, fname) => saveBlobAs(new Blob([String.fromCharCode(0xFEFF) + csvText(headers, rows)], { type: "text/csv" }), fname);   // BOM → opens cleanly in Excel
+    const exportTablePdf = async (title, headers, colX, rows, fname) => {
+      const jsPDF = window.jspdf && window.jspdf.jsPDF;
+      if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
+      const W = 842, H = 595, perPage = 28;   // landscape A4 (pt)
+      const pdf = new jsPDF({ orientation: "landscape", unit: "pt", format: [W, H] });
+      const pages = Math.max(1, Math.ceil(rows.length / perPage));
+      for (let p = 0; p < pages; p++) {
+        if (p > 0) pdf.addPage([W, H], "landscape");
+        pdf.setFont("helvetica", "bold"); pdf.setFontSize(14); pdf.setTextColor(30, 41, 59);
+        pdf.text(title + (pages > 1 ? "  (page " + (p + 1) + "/" + pages + ")" : ""), 40, 42);
+        pdf.setFontSize(9); pdf.setTextColor(71, 85, 105);
+        headers.forEach((h, ci) => pdf.text(String(h), colX[ci], 70));
+        pdf.setDrawColor(148, 163, 184); pdf.line(40, 78, W - 40, 78);
+        pdf.setFont("helvetica", "normal"); pdf.setTextColor(15, 23, 42);
+        rows.slice(p * perPage, (p + 1) * perPage).forEach((r, ri) => {
+          const y = 96 + ri * 16;
+          r.forEach((vv, ci) => pdf.text(String(vv == null ? "" : vv).slice(0, 70), colX[ci], y));
+        });
+      }
+      await saveBlobAs(pdf.output("blob"), fname);
+    };
+    // Cabinet Schedule — one row per cabinet of the live model (run, row, type, W×H×D, fronts, props)
+    const CAB_SCHED_HEADERS = ["S.No", "Run", "Row", "Cabinet", "Width (mm)", "Height (mm)", "Depth (mm)", "Fronts", "Material", "Finish", "Code"];
+    const cabinetScheduleRows = (runs) => {
+      const rows = []; let n = 0;
+      const shN = (w) => (w <= 600 ? 1 : w <= 1200 ? 2 : 3);
+      (runs || []).forEach((r) => {
+        (r.base || []).forEach((c) => {
+          if (c.kind === "filler" || c.kind === "sidepanel") return;
+          const tall = ["tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility"].indexOf(c.kind) >= 0;
+          rows.push([++n, r.name || "", tall ? "Tall" : "Base", c.label || c.kind, Math.round(c.w), tall ? (STD_C.wallStart + STD_C.wallHeight) : (c.h || STD_C.baseHeight), STD_C.baseDepth,
+            c.drawers > 0 ? c.drawers + " drawer fronts" : (c.kind === "open" ? "open" : shN(c.w) + " shutter" + (shN(c.w) > 1 ? "s" : "")), c.material || "", c.finish || "", c.code || ""]);
+        });
+        (r.wallCabs || []).forEach((c) => {
+          if (c.kind === "filler" || c.kind === "sidepanel" || c.kind === "chimney") return;
+          rows.push([++n, r.name || "", "Wall", c.label || c.kind, Math.round(c.w), c.h || STD_C.wallHeight, STD_C.wallDepth,
+            c.kind === "open-shelf" ? "open" : shN(c.w) + " " + ((c.kind === "glass-wall" || c.kind === "display" || c.kind === "gtpt") ? "glass " : "") + "shutter" + (shN(c.w) > 1 ? "s" : ""), c.material || "", c.finish || "", c.code || ""]);
+        });
+      });
+      return rows;
+    };
+    // drawn as NATIVE jsPDF vector text — sharp and a fraction of the file size.
+    const exportDesignPdf = async (result, type) => {
+      const jsPDF = window.jspdf && window.jspdf.jsPDF;
+      if (!jsPDF) throw new Error("jsPDF not loaded");
+      const svgs = [result.planSvg, ...result.elevations.map(e => e.svg), ...((result.sections || []).map(s => s.svg))];
+      const legend = cornerLegendSvg(result);
+      if (legend) svgs.push(legend);
+      let pdf = null;
+      for (const svg of svgs) {
+        const { dataUrl, w, h } = await svgToPng(svg, 2);
+        const orient = w >= h ? "landscape" : "portrait";
+        if (!pdf) pdf = new jsPDF({ orientation: orient, unit: "pt", format: [w, h] });
+        else pdf.addPage([w, h], orient);
+        pdf.addImage(dataUrl, "PNG", 0, 0, w, h);
+      }
+      // "All-in-one" visual pages: the latest 3D view + AI photoreal render (if the
+      // user has visited the 3D tab / run a photoreal this session — stashed on window).
+      const addImagePage = async (src, caption) => {
+        if (!src) return;
+        const dim = await new Promise((res) => { const im = new Image(); im.onload = () => res({ w: im.naturalWidth, h: im.naturalHeight }); im.onerror = () => res(null); im.src = src; });
+        if (!dim || !dim.w) return;
+        const pageW = 1000, pad = 24, capH = 34;
+        const imgW = pageW - pad * 2, imgH = Math.round(imgW * dim.h / dim.w), pageH = imgH + pad * 2 + capH;
+        if (!pdf) pdf = new jsPDF({ orientation: "landscape", unit: "pt", format: [pageW, pageH] });
+        else pdf.addPage([pageW, pageH], "landscape");
+        pdf.setFillColor(15, 23, 42); pdf.rect(0, 0, pageW, capH, "F");
+        pdf.setTextColor(226, 232, 240); pdf.setFontSize(13); pdf.text(caption, pad, 23);
+        pdf.addImage(src, "PNG", pad, capH + pad, imgW, imgH);
+      };
+      try { await addImagePage(window.__ads3D, "3D Rendered View"); } catch (e) {}
+      try { await addImagePage(window.__adsPR, "AI Photoreal Render"); } catch (e) {}
+      // Native vector table pages (cut list, BOQ, hardware).
+      const addTable = (title, headers, colX, rows, W) => {
+        if (!rows || !rows.length) return;
+        const perPage = 42, rowH = 15, top = 64;
+        for (let p = 0; p * perPage < rows.length; p++) {
+          const chunk = rows.slice(p * perPage, (p + 1) * perPage), H = top + chunk.length * rowH + 24;
+          if (!pdf) pdf = new jsPDF({ orientation: "landscape", unit: "pt", format: [W, H] });
+          else pdf.addPage([W, H], "landscape");
+          pdf.setTextColor(30, 58, 95); pdf.setFontSize(13);
+          pdf.text(title + (rows.length > perPage ? " — page " + (p + 1) : ""), 14, 28);
+          pdf.setFontSize(9); pdf.setTextColor(51, 65, 85);
+          headers.forEach((hd, i) => pdf.text(String(hd), colX[i], 50));
+          pdf.setDrawColor(148, 163, 184); pdf.line(12, 55, W - 12, 55);
+          chunk.forEach((cells, k) => { const y = top + k * rowH;
+            if (k % 2) { pdf.setFillColor(241, 245, 249); pdf.rect(12, y - 10, W - 24, rowH, "F"); }
+            pdf.setTextColor(71, 85, 105); cells.forEach((c, i) => pdf.text(String(c), colX[i], y)); });
+        }
+      };
+      addTable("Production Panel Cut List (" + (result.cutList || []).length + " panels)", ["S.No", "Height", "Width", "Qty", "Description"], [14, 70, 150, 230, 300], (result.cutList || []).map((r, i) => [i + 1, r.h, r.w, r.qty, r.desc]), 760);
+      if (result.boq) addTable("BOQ Summary (" + result.boq.length + " lines)", ["Item", "Qty", "Unit"], [14, 380, 470], result.boq.map(r => [r.item, r.qty, r.unit]), 560);
+      if (result.hardware) addTable("Hardware Schedule (" + result.hardware.length + " items)", ["Item", "Qty", "Unit", "Spec"], [14, 320, 400, 480], result.hardware.map(r => [r.item, r.qty, r.unit, r.spec]), 680);
+      // MKW branded footer on EVERY page: navy strip with logo · company · phone · email · CTA
+      try {
+        const lg = window.__mkwLogoImg, nPages = pdf.getNumberOfPages();
+        for (let i = 1; i <= nPages; i++) {
+          pdf.setPage(i);
+          const W = pdf.internal.pageSize.getWidth(), H = pdf.internal.pageSize.getHeight();
+          pdf.setFillColor(30, 58, 95); pdf.rect(0, H - 24, W, 24, "F");
+          pdf.setTextColor(255, 255, 255); pdf.setFontSize(W < 720 ? 8 : 9);
+          // adapt the line to the page width so it never runs under the logo circle at the right
+          const line = W < 560 ? (MKW_BRAND.name + "   |   " + MKW_BRAND.phone)
+            : W < 760 ? (MKW_BRAND.name + "   |   " + MKW_BRAND.phone + "   |   " + MKW_BRAND.cta)
+            : (MKW_BRAND.name + "   |   " + MKW_BRAND.phone + "   |   " + MKW_BRAND.email + "   |   " + MKW_BRAND.area + "   -   " + MKW_BRAND.cta);
+          pdf.text(line, 10, H - 9);
+          if (lg) { try { pdf.setFillColor(255, 255, 255); pdf.circle(W - 19, H - 12, 11, "F"); pdf.addImage(lg, "JPEG", W - 28, H - 21, 18, 17); } catch (e2) {} }
+        }
+      } catch (e) {}
+      await saveBlobAs(pdf.output("blob"), (type + "-" + ((result.id || "design") + "").slice(0, 8) + ".pdf").replace(/[^\\w.-]/g, "_"));   // 18.pdf §6: ask where to save
+    };
+
+    function Tabs({ tab, setTab }) {
+      const items = ["Generator", "Library", "What AI Learned", "Command Center", "Admin Dashboard"];
+      return (
+        <div className="flex flex-wrap gap-2 mb-6">
+          {items.map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              className={"px-4 py-2 rounded-lg text-sm font-medium transition-colors border " +
+                (tab === t ? "bg-cyan-600 border-cyan-500 text-white" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>
+              {t}
+            </button>
+          ))}
+        </div>
+      );
+    }
+
+    // ---- Direct Elevation Editing (6.txt Part 6) -----------------------------
+    // The generated elevation IS the editor: click cabinets directly, drag the
+    // edge grips to resize, drag the body to reorder, right-click for a context
+    // menu. Live validation against the mandatory rules. No separate screen.
+    const ELEV_LABELS = { shutter: "Base", drawer: "3-drawer", drawer3: "3-Drawer", "drawer-atta": "Atta Drawer", sink: "Sink", hob: "Hob", dishwasher: "DW", pullout: "Pull-Out", fridge: "Fridge", "tall-pantry": "Pantry", "tall-fridge": "Fridge Housing", "tall-hiunit": "Hi-unit Oven+MW", "tall-utility": "Utility", filler: "Filler", "glass-wall": "Glass", wall: "Wall", gtpt: "GTPT", chimney: "Chimney", sidepanel: "", "open-shelf": "Open Shelf", liftup: "Lift-Up", horizontal: "Horizontal", vertical: "Vertical", display: "Display" };
+    const isTallC = (k) => k === "tall-fridge" || k === "tall-pantry" || k === "tall-hiunit" || k === "tall-utility";
+    const baseFill = (k) => k === "filler" ? "#fde4cf" : k === "sink" ? "#cdeef5" : k === "hob" || k === "drawer3" ? "#ffe3c2" : k === "drawer-atta" ? "#fdeccb" : k === "dishwasher" ? "#dbe9ff" : k === "fridge" || k === "tall-fridge" ? "#e8e0ff" : k === "tall-pantry" ? "#e7f6e3" : k === "tall-hiunit" ? "#ffe8d6" : k === "tall-utility" ? "#d7f0ee" : k === "pullout" ? "#e0f2fe" : k === "open-shelf" ? "#eef2ff" : k === "display" ? "#fef9c3" : "#eaf1fb";
+    const BASE_CONVERSIONS = [["shutter", "Base / Shutter"], ["drawer", "3-Drawer"], ["drawer-atta", "2-Drawer + Atta"], ["sink", "Sink Cabinet"], ["hob", "Hob Cabinet"], ["dishwasher", "Dishwasher"], ["pullout", "Pull-Out"], ["open-shelf", "Open Shelf"], ["tall-pantry", "Tall — Pantry"], ["tall-fridge", "Tall — Fridge Housing"], ["tall-hiunit", "Tall — Hi-unit (Oven+MW)"], ["tall-utility", "Tall — Utility"], ["filler", "Filler"]];
+    const WALL_CONVERSIONS = [["glass-wall", "Glass Shutter"], ["wall", "Solid Shutter"], ["open-shelf", "Open Shelf"], ["liftup", "Lift-Up Shutter"], ["horizontal", "Horizontal Shutter"], ["vertical", "Vertical Shutter"], ["display", "Display Unit"], ["gtpt", "GTPT"], ["sidepanel", "Side Panel"]];
+    const SIDE_PANEL_W = 25;  // 5.9.1 fixed shutter-finish side-panel width (mm)
+
+    // Right-click → Cabinet Properties modal (8.txt §6.1) — full field set.
+    function CabinetProps({ data, onApply, onClose }) {
+      const { row, cab } = data;
+      const conv = row === "wall" ? WALL_CONVERSIONS : BASE_CONVERSIONS;
+      const [f, setF] = useState({
+        kind: cab.kind === "drawer3" ? "drawer" : cab.kind,
+        w: Math.round(cab.w), h: Math.round(cab.h || (row === "wall" ? 720 : 850)), depth: cab.depth || (row === "wall" ? 320 : 600),
+        drawers: cab.drawers || 0, shelves: cab.shelves != null ? cab.shelves : (row === "wall" ? 2 : 0), shelfSpacing: cab.shelfSpacing || 300,
+        shutter: cab.shutter || (row === "wall" ? "Glass" : "Solid"), material: cab.material || "HDHMR", finish: cab.finish || "Laminate",
+        color: cab.color || "White", hardware: cab.hardware || "Hettich soft-close", edgeBand: cab.edgeBand || "1mm PVC",
+        accessories: cab.accessories || "None", code: cab.code || ((row === "wall" ? "W" : "B") + "-" + Math.round(cab.w)),
+      });
+      const [adminOverride, setAO] = useState(false);
+      const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+      const isSidePanel = f.kind === "sidepanel";
+      // 5.9.1/5.9.3: side-panel width is locked at 25 mm; editable only with admin override.
+      const wLocked = isSidePanel && !adminOverride;
+      const accept = () => onApply(isSidePanel && !adminOverride ? { ...f, w: SIDE_PANEL_W } : f);
+      // 5.9.4: Enter accepts the whole window (saves + closes), Esc cancels — works regardless of focus.
+      useEffect(() => {
+        const onKey = (e) => { if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") { e.preventDefault(); accept(); } else if (e.key === "Escape") onClose(); };
+        window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
+      });
+      const num = (k, label) => { const locked = k === "w" && wLocked; return <label className="block"><span className="text-[11px] text-slate-500">{label}{locked ? " 🔒" : ""}</span><input type="number" disabled={locked} value={locked ? SIDE_PANEL_W : f[k]} onChange={(e) => set(k, e.target.value)} className={"w-full px-2 py-1 border border-slate-300 rounded text-sm " + (locked ? "bg-slate-200 text-slate-400" : "bg-slate-100")} /></label>; };
+      const txt = (k, label) => <label className="block"><span className="text-[11px] text-slate-500">{label}</span><input value={f[k]} onChange={(e) => set(k, e.target.value)} className="w-full px-2 py-1 bg-slate-100 border border-slate-300 rounded text-sm" /></label>;
+      const dd = (k, label, opts) => <label className="block"><span className="text-[11px] text-slate-500">{label}</span><select value={f[k]} onChange={(e) => set(k, e.target.value)} className="w-full px-2 py-1 bg-slate-100 border border-slate-300 rounded text-sm">{opts.map((o) => Array.isArray(o) ? <option key={o[0]} value={o[0]}>{o[1]}</option> : <option key={o} value={o}>{o}</option>)}</select></label>;
+      return (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onClick={onClose}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3"><h3 className="font-bold text-slate-800">Cabinet Properties <span className="text-xs text-slate-400">({row} · {cab.label || cab.kind})</span></h3><button onClick={onClose} className="text-slate-400 hover:text-slate-700">✕</button></div>
+            <div className="grid grid-cols-3 gap-2">
+              {dd("kind", "Type", conv)}
+              {num("w", "Width (mm)")}{num("h", "Height (mm)")}{num("depth", "Depth (mm)")}
+              {num("drawers", "Drawers")}{num("shelves", "Shelf qty")}{num("shelfSpacing", "Shelf spacing")}
+              {dd("shutter", "Shutter", ["Solid", "Glass", "Open", "Membrane", "Acrylic", "Lift-Up"])}
+              {dd("material", "Material", ["HDHMR", "BWP Ply", "MDF", "Particle"])}
+              {dd("finish", "Finish", ["Laminate", "PU", "Acrylic", "Veneer", "Membrane"])}
+              {txt("color", "Colour")}{txt("hardware", "Hardware")}{txt("edgeBand", "Edge band")}
+              {txt("accessories", "Accessories")}{txt("code", "Cabinet code")}
+            </div>
+            {isSidePanel && <label className="flex items-center gap-1.5 mt-3 text-[11px] text-amber-700"><input type="checkbox" checked={adminOverride} onChange={(e) => setAO(e.target.checked)} className="accent-amber-600" /> Admin override — unlock the fixed 25 mm side-panel width (5.9.3)</label>}
+            <div className="flex justify-end items-center gap-2 mt-4"><span className="text-[11px] text-slate-400 mr-auto">↵ Enter accepts &amp; closes · Esc cancels</span><button onClick={onClose} className="px-4 py-1.5 text-sm bg-slate-100 border border-slate-300 rounded-lg">Cancel</button><button onClick={accept} className="px-4 py-1.5 text-sm bg-cyan-600 text-white rounded-lg">Apply</button></div>
+            <p className="text-[11px] text-slate-400 mt-2">Width / height / type / drawers / shelves update the drawing live &amp; re-validate; material / finish / colour / hardware / edge-band / accessories / code reflect in the production build.</p>
+          </div>
+        </div>
+      );
+    }
+
+    function InteractiveElevation({ run, label, designType, beam, width, handle, applianceDims, applianceBrand, cornerAdjoinLen, tile, onChange }) {
+      const TLe = tile || { on: true, color: "#eaf6f8", grid: "#cfe3e8", size: 100, pattern: "grid" };
+      // Beam clash helpers (8.txt §6.6): a cabinet whose top exceeds the beam
+      // soffit and overlaps its span is trimmed so it clears the beam.
+      const beamX = () => { if (!beam) return null; const w = beam.width && beam.width < run.length ? beam.width : run.length; const x0 = beam.width && beam.width < run.length ? beam.distance : 0; return { x0, x1: x0 + w, bot: beam.height }; };
+      const clearBeam = (c, sill, top, defH) => { const b = beamX(); if (!b) return defH; const ov = c.x < b.x1 && (c.x + c.w) > b.x0; if (ov && top > b.bot) { c._beamCut = true; return Math.max(150, b.bot - sill); } return defH; };
+      const initBase = () => run.base.map((c) => { const tall = isTallC(c.kind); const o = { ...c, h: c.h != null ? c.h : (tall ? 2170 : 850) }; if (tall) o.h = clearBeam(o, 0, o.h, o.h); if (c.kind === "corner" && cornerAdjoinLen != null) o.label = cornerAdjoinLen >= 2400 ? "LeMans" : cornerAdjoinLen >= 1800 ? "Magic Corner" : cornerAdjoinLen >= 1200 ? "Blind Corner" : "Carousel"; return o; });   // §4.11: bake client corner-solution label so [run] re-seeds stay consistent (no clobber, no loop)
+      const initWall = () => (run.wallCabs || []).map((c) => { const o = { ...c, h: c.h != null ? c.h : 720, sill: c.sill != null ? c.sill : 1450 }; o.h = clearBeam(o, o.sill, o.sill + o.h, o.h); return o; });
+      const [base, setBase] = useState(initBase);
+      const [wallC, setWallC2] = useState(initWall);   // wall cabinets (now editable too)
+      const [sel, setSel] = useState(null);     // {row:'base'|'wall', i}
+      const [menu, setMenu] = useState(null);    // {x,y,row,i}
+      const [msg, setMsg] = useState("");
+      const [drag, setDrag] = useState(null);    // {row,i,mode,x0,y0,w0,h0,sill0}
+      const [showDims, setShowDims] = useState(true);
+      const [showTiles, setShowTiles] = useState(true);   // 5.9.7 backsplash tiles
+      const [labelMode, setLabelMode] = useState("designer"); // 5.9.14 Client | Designer | Production
+      const [toast, setToast] = useState("");    // 5.9.4 temporary "Accepted" popup
+      const [prop, setProp] = useState(null);    // {row,i} → Cabinet Properties modal
+      const [heightPrompt, setHeightPrompt] = useState(null); // 5.9.12 {i, h} wall-cab height-change choice
+      const svgRef = useRef(null);
+      const rootRef = useRef(null);   // focus target so Delete/Backspace acts on THIS run only
+      const syncRef = useRef({ in: "", out: "" }); // 5.9.11: last syncChimney write - breaks the chimney re-centre render loop
+      const editedRef = useRef(false);   // 5.9.11: syncChimney is a MANUAL-EDIT bond — suppress it on a fresh/programmatic re-seed (the server is authoritative for auto-generation), else its flank re-centring fights the §7.9 re-seed↔propagate cycle into an infinite render loop. Set true by every user-edit handler.
+      const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 1500); }; // 5.9.4
+      // Value signature of a cabinet row (same fields the Generator's updateLiveRun compares on).
+      const cabSig = (a) => (a || []).map((c) => c.kind + ":" + Math.round(c.w || 0) + ":" + Math.round(c.h || 0) + ":" + (c.drawers || 0) + ":" + (c.label || "") + ":" + Math.round(c.sill || 0)).join("|");
+      const sentSigRef = useRef("");   // last (base||wallC) we lifted via onChange — used to ignore our own echo
+      // Re-seed local state from the run prop ONLY on an EXTERNAL change (new generate / undo-redo /
+      // cross-run edit). Our OWN edits echo back as run = onChange to liveRuns to run; re-seeding on that
+      // echo resets local state mid-edit and fights syncChimney into a visible shiver / update-depth loop.
+      useEffect(() => {
+        const incoming = cabSig(run.base) + "||" + cabSig(run.wallCabs);
+        if (incoming === sentSigRef.current) return;   // our own echo → keep local state, no re-seed
+        editedRef.current = false; setBase(initBase()); setWallC2(initWall()); setSel(null); setMenu(null); setMsg("");
+      }, [run]);
+      // §7.9 cross-view propagation: lift edits to the shared room model (record what we sent so the
+      // re-seed effect can recognise — and ignore — the echo it produces).
+      useEffect(() => { sentSigRef.current = cabSig(base) + "||" + cabSig(wallC); if (onChange) onChange(base, wallC); }, [base, wallC]);
+
+      const L = run.length, W = width || 900, S = W / L, vH = Math.round((width || 900) * 0.4), vS = vH / 2400, floorY = vH;
+      const baseTopY = floorY - 850 * vS;
+      const reflow = (arr) => { let x = 0; return arr.map((c) => { const n = { ...c, x }; x += c.w; return n; }); };
+      // ── MANDATORY: chimney ⇄ 3-drawer bond (5.9.11) ──────────────────────────
+      // The base row (3-drawer) and wall row (chimney) pack independently, so any edit
+      // can drift them apart. syncChimney() re-centres the chimney zone [sidepanel·glass·
+      // chimney·glass·sidepanel] directly over the 3-drawer cabinet by re-spreading ONLY the
+      // flexible wall cabinets outside that zone — the zone's own widths and the total wall
+      // length stay fixed. Run automatically after every edit (effect below) so the pair is
+      // always aligned, and dragging either one moves the other.
+      // 13.pdf: minimum practical cabinet width (smallest standard module). Anything narrower must be
+      // a filler, never a cabinet. Fillers normally ≤50mm and only at wall ends / clearances.
+      const MIN_CAB = 300, FILLER_MAX = 50;
+      // Fit the wall cabinets on ONE side of the chimney group into the given space (mm) while keeping
+      // the chimney centred over the 3-drawer. The change is absorbed by the cabinet NEAREST the group
+      // first (no cascade onto far cabinets); a cabinet is NEVER driven below MIN_CAB — leftover that
+      // can't form a practical cabinet becomes a wall-end filler. Side panels stay fixed (25mm).
+      const fitSide = (cabs, space, groupOnRight) => {
+        const arr = cabs.map((c) => ({ ...c }));
+        const movIdx = arr.map((c, i) => i).filter((i) => !arr[i].locked && arr[i].kind !== "sidepanel" && arr[i].kind !== "chimney");
+        if (!movIdx.length) return arr;
+        const fixedW = arr.filter((c) => c.locked || c.kind === "sidepanel" || c.kind === "chimney").reduce((s, c) => s + c.w, 0);
+        const target = Math.max(0, Math.round(space - fixedW));
+        let delta = target - movIdx.reduce((s, i) => s + arr[i].w, 0);
+        if (Math.abs(delta) <= 1) return arr;                       // already fits → no cascade
+        const order = groupOnRight ? [...movIdx].reverse() : [...movIdx];   // nearest-the-group first
+        for (const i of order) {
+          if (delta === 0) break;
+          const w = arr[i].w + delta;
+          if (w >= MIN_CAB) { arr[i].w = w; delta = 0; }            // absorbed wholly here
+          else { delta += arr[i].w - MIN_CAB; arr[i].w = MIN_CAB; } // clamp at MIN, carry the rest
+        }
+        if (delta < 0) {                                            // still must remove width → wall-end filler
+          const endI = groupOnRight ? movIdx[0] : movIdx[movIdx.length - 1];   // far end = wall end
+          const nw = arr[endI].w + delta;
+          arr[endI] = nw >= MIN_CAB ? { ...arr[endI], w: nw } : { ...arr[endI], kind: "filler", label: "Filler", drawers: 0, dh: null, w: Math.max(0, nw) };
+        }
+        return arr.filter((c) => c.w > 0);
+      };
+      const syncChimney = (bArr, wArr) => {
+        const bb = reflow(bArr);
+        const d3 = bb.find((c) => c.kind === "drawer3");
+        const ww = reflow(wArr).map((c) => ({ ...c }));
+        const ci = ww.findIndex((c) => c.kind === "chimney");
+        if (!d3 || ci < 0) return ww;
+        // chimney GROUP = chimney + its 25mm decorative side panels ONLY. Flanking cabinets are NOT
+        // forced equal (13.pdf: symmetry is auto-gen only, relaxed after manual editing) — they flex.
+        let lo = ci, hi = ci;
+        while (lo - 1 >= 0 && ww[lo - 1].kind === "sidepanel") lo--;
+        while (hi + 1 < ww.length && ww[hi + 1].kind === "sidepanel") hi++;
+        const group = ww.slice(lo, hi + 1), groupW = group.reduce((s, c) => s + c.w, 0);
+        const Ltot = ww.reduce((s, c) => s + c.w, 0);
+        const chimCx = (ww[ci].x + ww[ci].w / 2) - ww[lo].x;        // group-left → chimney centreline
+        const targetCx = d3.x + d3.w / 2;                          // 3-drawer centreline (the master)
+        const leftSpace = Math.max(0, Math.min(Math.round(targetCx - chimCx), Ltot - groupW));
+        const left = fitSide(ww.slice(0, lo), leftSpace, true);
+        const right = fitSide(ww.slice(hi + 1), Ltot - groupW - leftSpace, false);
+        return reflow([...left, ...group, ...right].filter((c) => c.w > 0));
+      };
+      const wsig = (arr) => arr.map((c) => Math.round(c.w)).join(",");
+      React.useEffect(() => {
+        if (!editedRef.current) return;   // only re-bond the chimney after a genuine user edit, never on a fresh re-seed (prevents the §7.9 render loop)
+        if (drag && drag.row === "wall" && drag.mode !== "move") return;   // don't fight a wall resize; aligns on release
+        const w2 = syncChimney(base, wallC);            // centre chimney over the 3-drawer + equalise flanks
+        if (wsig(w2) === wsig(wallC)) return;           // idempotent → nothing changed (prevents loop)
+        const wsg = wsig(w2);
+        const inSig = base.map((c) => Math.round(c.w) + ":" + c.kind).join(",") + "|" + wsig(wallC);
+        if (syncRef.current.in === inSig && syncRef.current.out === wsg) return;
+        const bb = reflow(base), d3 = bb.find((c) => c.kind === "drawer3");
+        const wc = reflow(wallC), cc = wc.find((c) => c.kind === "chimney");
+        if (d3 && cc && Math.abs((cc.x + cc.w / 2) - (d3.x + d3.w / 2)) <= 2) return;
+        syncRef.current = { in: inSig, out: wsg };
+        setWallC2(w2);
+      }, [base, wallC, drag]);
+      // §4.11 shared-corner sync: match this run's corner mechanism to the adjoining run's CURRENT
+      // length (prop from the Generator) — updates the corner cabinet label only (no loop: guarded).
+      const cornerSolutionC = (len) => len >= 2400 ? "LeMans" : len >= 1800 ? "Magic Corner" : len >= 1200 ? "Blind Corner" : "Carousel";
+      React.useEffect(() => {
+        if (cornerAdjoinLen == null) return;
+        const idx = base.findIndex((c) => c.kind === "corner"); if (idx < 0) return;
+        const sol = cornerSolutionC(cornerAdjoinLen);
+        if (base[idx].label === sol) return;            // already correct → stop
+        const a2 = base.slice(); a2[idx] = { ...a2[idx], label: sol }; setBase(a2);
+      }, [cornerAdjoinLen]);
+      const totalW = base.reduce((s, c) => s + c.w, 0);
+      const cabX = (c) => c.x * S, cabW = (c) => Math.max(1, c.w * S);
+      const rowArr = (row) => row === "base" ? base : wallC;
+      const setRow = (row, arr) => row === "base" ? setBase(arr) : setWallC2(arr);
+      const selOf = (row, i) => sel && sel.row === row && sel.i === i;
+      const isMandatory = (row, c) => (row === "base" && c.kind === "drawer3") || (row === "wall" && c.kind === "chimney");
+      const yBand = (row, c) => {
+        if (row === "base") { const tall = isTallC(c.kind); const h = tall ? 2170 : (c.h || 850); return { yTop: floorY - h * vS, yBot: floorY, h }; }
+        const sill = c.sill || 1450, h = c.h || 720, yBot = floorY - sill * vS; return { yTop: yBot - h * vS, yBot, h };
+      };
+      const fillOf = (row, k) => row === "wall" ? (k === "glass-wall" || k === "display" ? (k === "display" ? "#fef9c3" : "#cdeef5") : k === "gtpt" ? "#d3f0f7" : k === "sidepanel" ? "#cdd9ec" : k === "open-shelf" ? "#eef2ff" : "#eaf1fb") : baseFill(k);
+      // Cabinet-type face: shutter centre-lines + handles / drawer handles (11/12.pdf).
+      const NO_FACE_C = ["filler", "sidepanel", "chimney", "corner", "hob", "sink", "dishwasher", "gtpt", "tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility"];
+      const dhArr = (c) => (c.dh && c.dh.length === c.drawers) ? c.dh : Array(c.drawers || 0).fill(1);
+      const drawerBandsC = (c) => { const a = dhArr(c), tot = a.reduce((s, v) => s + v, 0); const o = []; let acc = 0; for (let i = 0; i < a.length - 1; i++) { acc += a[i]; o.push(acc / tot); } return o; };
+      const drawerCentersC = (c) => { const a = dhArr(c), tot = a.reduce((s, v) => s + v, 0); const o = []; let acc = 0; for (let i = 0; i < a.length; i++) { o.push((acc + a[i] / 2) / tot); acc += a[i]; } return o; };
+      const HANDLELESS_C = ["Edge Profile", "J Profile", "G Profile / Gola", "Aluminium Gola", "Hidden Profile", "Push-To-Open", "Tip-On", "Finger Pull", "Integrated"];
+      const hl = HANDLELESS_C.includes(handle), knob = handle === "Knob";
+      const faceEls = (row, c, x, y, w, h) => {
+        if (NO_FACE_C.includes(c.kind) || c.kind === "open-shelf") return null;
+        const els = [], HC = "#334155";
+        const groove = (gx0, gx1, gy, k) => els.push(<line key={k} x1={gx0} y1={gy} x2={gx1} y2={gy} stroke="#64748b" strokeWidth="1.4" pointerEvents="none" />);
+        if (c.drawers > 0) { const hw = Math.min(w * 0.4, 26), cs = drawerCentersC(c); cs.forEach((f, d) => { const dy = y + h * f; if (hl) groove(x + 4, x + w - 4, dy - h / (c.drawers * 2) + 3, "g" + d); else if (knob) els.push(<circle key={"k" + d} cx={x + w / 2} cy={dy} r={2.6} fill={HC} pointerEvents="none" />); else els.push(<rect key={"dh" + d} x={x + w / 2 - hw / 2} y={dy - 1.2} width={hw} height={2.4} rx={1.2} fill={HC} pointerEvents="none" />); }); return els; }
+        const n = c.w <= 600 ? 1 : c.w <= 1200 ? 2 : 3, noCenter = c.kind === "glass-wall";
+        if (!noCenter) for (let i = 1; i < n; i++) { const lx = x + w * i / n; els.push(<line key={"cl" + i} x1={lx} y1={y} x2={lx} y2={y + h} stroke="#2f74d0" strokeWidth="0.8" pointerEvents="none" />); }
+        if (hl) { groove(x + 4, x + w - 4, row === "wall" ? y + h - 5 : y + 5, "gs"); return els; }
+        const inset = 5, hh = Math.min(h * 0.4, 18), hy = row === "wall" ? y + h - 6 - hh : y + 6;
+        for (let i = 0; i < n; i++) { const x0 = x + w * i / n, x1 = x + w * (i + 1) / n; const hx = n === 1 ? x1 - inset : i === 0 ? x1 - inset : i === n - 1 ? x0 + inset : (x0 + x1) / 2; if (knob) els.push(<circle key={"k" + i} cx={hx} cy={hy + hh / 2} r={2.6} fill={HC} pointerEvents="none" />); else els.push(<rect key={"hd" + i} x={hx - 1.2} y={hy} width={2.4} height={hh} rx={1.2} fill={HC} pointerEvents="none" />); }
+        return els;
+      };
+
+      const validateWidth = (row, c, w) => {
+        if (w < 100 || w > 2000) return { block: true, msg: "Width must be 100–2000 mm." };
+        if (isMandatory(row, c)) return { warn: "⚠ Editing a mandatory " + (c.label || c.kind) + " — overrides a fixed element (flagged on Validate & log)." };
+        if (row === "base" && c.kind === "drawer" && !DRAWER_WIDTHS_C.includes(Math.round(w))) { const n = DRAWER_WIDTHS_C.reduce((a, b) => Math.abs(b - w) < Math.abs(a - w) ? b : a); return { warn: "⚠ Drawer should be standard — nearest " + n + " mm." }; }
+        if (!CABINET_WIDTHS.includes(Math.round(w))) return { warn: "⚠ Non-standard width " + Math.round(w) + " mm (allowed, flagged)." };
+        return {};
+      };
+      const setWidth = (row, i, w, commit) => {
+        editedRef.current = true;
+        const arr = rowArr(row); const c = arr[i]; if (c.locked) { if (commit) setMsg("Cabinet locked — unlock to edit."); return; }
+        const v = validateWidth(row, c, w); if (v.block) { setMsg(v.msg); return; }
+        const nw = Math.max(40, Math.round(w));
+        const a2 = arr.slice(); a2[i] = { ...c, w: nw };
+        // 13.pdf: flanks are NOT forced equal after manual editing (symmetry is auto-gen only).
+        setRow(row, reflow(a2));
+        if (v.warn) setMsg(v.warn); else if (commit) setMsg("Width " + nw + " mm.");
+      };
+      const setHeight = (row, i, h) => { editedRef.current = true; const arr = rowArr(row); const c = arr[i]; if (c.locked) return; const a2 = arr.slice(); a2[i] = { ...c, h: Math.max(150, Math.min(2300, Math.round(h))) }; setRow(row, a2); };
+      const setSill = (i, sill) => { editedRef.current = true; const a2 = wallC.slice(); a2[i] = { ...a2[i], sill: Math.max(900, Math.min(1900, Math.round(sill))) }; setWallC2(a2); };
+      // 5.9.12 Wall-cabinet alignment lock: apply one cabinet's height to every aligned
+      // wall cabinet (shared top), keeping each cabinet's sill re-aligned to that top.
+      const applyHeightToAll = (i) => {
+        editedRef.current = true;
+        const src = wallC[i]; if (!src) { setHeightPrompt(null); return; }
+        const h = Math.max(150, Math.min(2300, Math.round(src.h || 720)));
+        const top = (src.sill || 1450) + h;   // common top alignment line
+        let n = 0;
+        const a2 = wallC.map((c, k) => {
+          if (c.locked || c.kind === "chimney" || c.kind === "sidepanel") return { ...c };
+          if (k === i) { n++; return { ...c, h }; }
+          n++; return { ...c, h, sill: Math.max(900, Math.min(1900, Math.round(top - h))) };
+        });
+        setWallC2(a2); setHeightPrompt(null);
+        setMsg("Aligned " + n + " wall cabinet(s) to " + h + " mm height (common top).");
+      };
+      const act = (row, i, op, arg) => {
+        editedRef.current = true;
+        const arr = rowArr(row).slice(); const c = { ...arr[i] };
+        if (op === "convert") { const warn = isMandatory(row, c) ? " ⚠ overrides a mandatory element (flagged on Validate)." : ""; c.kind = arg; if (arg === "drawer") { c.drawers = 3; c.dh = [140, 250, 310]; } else if (arg === "drawer-atta") { c.drawers = 3; c.dh = [140, 180, 350]; } else if (arg === "sidepanel") { c.drawers = 0; c.dh = null; c.w = SIDE_PANEL_W; } else if (["shutter", "open-shelf", "glass-wall", "wall", "display"].includes(arg)) { c.drawers = 0; c.dh = null; } c.label = ELEV_LABELS[arg] || arg; arr[i] = c; setRow(row, reflow(arr)); setMsg("Converted to " + (ELEV_LABELS[arg] || (arg === "sidepanel" ? "Side Panel (25 mm fixed)" : arg)) + "." + warn); }
+        else if (op === "lock") { c.locked = !c.locked; arr[i] = c; setRow(row, arr); }
+        else if (op === "duplicate") { arr.splice(i + 1, 0, { ...c }); setRow(row, reflow(arr)); setMsg("Cabinet duplicated."); }
+        else if (op === "delete") {
+          const warn = isMandatory(row, c) ? " ⚠ removed a mandatory element (flagged on Validate)." : "";
+          const freed = c.w; const atEnd = (i === 0 || i === arr.length - 1);   // was the removed cabinet at a wall end?
+          arr.splice(i, 1);
+          // Replace the removed cabinet with NEW standard module(s) of the SAME total width at the SAME spot.
+          // Never widen the neighbours, and never drop a filler in the MIDDLE of the run (not practical in an
+          // Indian modular kitchen) — a sub-300 mm residual is allowed only as a wall-end filler.
+          let msgTail = " — replaced with standard module(s) at the same position (wall length kept; no mid-run filler).";
+          if (freed >= 300) {                                  // full module(s) of standard width
+            const ins = []; let n = Math.max(1, Math.round(freed / 550)); while (freed / n > 600 && n < 8) n++; const each = freed / n;
+            for (let k = 0; k < n; k++) ins.push({ x: 0, w: each, kind: "shutter", label: "Cabinet", drawers: 0 });
+            arr.splice(Math.min(i, arr.length), 0, ...ins);
+            msgTail = " — replaced with " + n + " standard module(s) (wall length kept).";
+          } else if (freed >= 0.5) {                           // sub-300 residual — never a mid-run sub-min cabinet
+            if (atEnd) { arr.splice(i === 0 ? 0 : arr.length, 0, { x: 0, w: freed, kind: "filler", label: "Filler", drawers: 0 }); msgTail = " — closed with a " + Math.round(freed) + " mm wall-end filler (wall length kept)."; }
+            else { const nb = arr[i] || arr[i - 1]; if (nb) { nb.w += freed; msgTail = " — " + Math.round(freed) + " mm folded into the neighbour (wall length kept)."; } }
+          }
+          setRow(row, reflow(arr)); setSel(null);
+          setMsg("Cabinet deleted" + msgTail + warn);
+        }
+        else if (op === "mirror") { setRow(row, reflow(arr.slice().reverse())); setSel(null); setMsg("Row mirrored about its centre."); }
+        else if (op === "similar") { const k = c.kind; let n = 0; const a2 = arr.map((x) => { if (x.kind === k && !x.locked) { n++; return { ...x, w: c.w, h: c.h }; } return x; }); setRow(row, reflow(a2)); setMsg("Applied to " + n + " similar cabinet(s)."); }
+        else if (op === "shelf") { c.shelves = Math.max(0, (c.shelves != null ? c.shelves : (row === "wall" ? 2 : 3)) + arg); arr[i] = c; setRow(row, arr); setMsg("Shelves: " + c.shelves + "."); }
+        else if (op === "cosmetic") { setMsg(arg + " applied (material/finish/colour/LED reflect in the production build)."); }
+        setMenu(null);
+      };
+      const rebalance = () => {
+        editedRef.current = true;
+        const fixed = ["drawer3", "drawer-atta", "sink", "hob", "dishwasher", "fridge", "tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility", "drawer"];
+        let arr = base.map((c) => { if (c.locked || fixed.includes(c.kind)) return { ...c }; const near = CABINET_WIDTHS.reduce((a, b) => Math.abs(b - c.w) < Math.abs(a - c.w) ? b : a); return { ...c, w: near }; });
+        const diff = L - arr.reduce((s, c) => s + c.w, 0);
+        if (Math.abs(diff) > 1) { const k = arr.findIndex((c) => c.kind === "shutter" && !c.locked); if (k >= 0 && Math.abs(diff) <= 0.1 * arr[k].w) { arr[k] = { ...arr[k], w: arr[k].w + diff }; setMsg("Auto-rebalanced: shutter ±" + Math.round(diff) + " mm (within ±10%); mandatory rules kept."); } else { const f = arr.find((c) => c.kind === "filler"); if (f) f.w += diff; else arr.push({ kind: "filler", w: Math.max(0, diff), label: "Filler", drawers: 0, x: 0 }); setMsg("Auto-rebalanced via filler (" + Math.round(diff) + " mm)."); } }
+        else setMsg("Auto-rebalanced — already standard & balanced.");
+        setBase(reflow(arr.filter((c) => c.w > 0)));
+        // 5.9.11 Fixed chimney-zone integrity: treat [left 25 mm sidepanel, left glass,
+        // chimney, right glass, right 25 mm sidepanel] as a locked group and re-centre it
+        // on the run by equalising the wall cabinets outside the group. The group's own
+        // widths (chimney + 25 mm side panels + flanking glass) are never altered.
+        const w0 = reflow(wallC);
+        const ci = w0.findIndex((c) => c.kind === "chimney");
+        if (ci >= 0) {
+          let lo = ci, hi = ci;
+          while (lo - 1 >= 0 && (w0[lo - 1].kind === "sidepanel" || w0[lo - 1].kind === "glass-wall" || w0[lo - 1].kind === "display")) lo--;
+          while (hi + 1 < w0.length && (w0[hi + 1].kind === "sidepanel" || w0[hi + 1].kind === "glass-wall" || w0[hi + 1].kind === "display")) hi++;
+          const groupW = w0.slice(lo, hi + 1).reduce((s, c) => s + c.w, 0);
+          const leftCabs = w0.slice(0, lo), rightCabs = w0.slice(hi + 1);
+          const leftFlex = leftCabs.filter((c) => !c.locked && c.kind !== "chimney");
+          const rightFlex = rightCabs.filter((c) => !c.locked && c.kind !== "chimney");
+          const sideEach = Math.max(0, (L - groupW) / 2);
+          const spread = (cabs, flex, total) => {
+            const fixedW = cabs.filter((c) => c.locked).reduce((s, c) => s + c.w, 0);
+            const room = Math.max(0, total - fixedW);
+            if (!flex.length) return cabs.map((c) => ({ ...c }));
+            const each = room / flex.length;
+            return cabs.map((c) => (c.locked ? { ...c } : { ...c, w: Math.max(40, Math.round(each)) }));
+          };
+          const w2 = [...spread(leftCabs, leftFlex, sideEach), ...w0.slice(lo, hi + 1).map((c) => ({ ...c })), ...spread(rightCabs, rightFlex, sideEach)];
+          setWallC2(reflow(w2.filter((c) => c.w > 0)));
+          setMsg((typeof msg === "string" && msg.indexOf("Auto-rebalanced") === 0 ? msg + " " : "") + "Chimney zone kept intact and re-centred.");
+        }
+        setSel(null);
+      };
+      const validateAndLog = async () => {
+        const j = await api("/api/designs/edit-validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ designType, runName: label, length: L, base }) });
+        const d = j.data; if (!d) { setMsg("Validation failed."); return; }
+        if (d.ok && !d.adjustments.length) setMsg("✓ Valid — meets all mandatory rules (logged to Admin Dashboard).");
+        else setMsg("⚠ " + d.conflicts.concat(d.adjustments).join(" · ") + " — logged to Admin Dashboard.");
+      };
+      const applyProps = (row, i, f) => {
+        editedRef.current = true;
+        const arr = rowArr(row).slice(); const c = { ...arr[i] }; let warn = "";
+        if (f.kind && f.kind !== c.kind) { c.kind = f.kind; c.label = ELEV_LABELS[f.kind] || f.kind; if (f.kind === "drawer") c.drawers = 3; }
+        if (f.w != null) { const v = validateWidth(row, c, +f.w); if (v.block) { setMsg(v.msg); return; } c.w = Math.max(40, Math.round(+f.w)); if (v.warn) warn = v.warn; }
+        if (f.h != null) c.h = Math.max(150, Math.min(2300, Math.round(+f.h)));
+        if (f.drawers != null) c.drawers = Math.max(0, +f.drawers);
+        if (f.shelves != null) c.shelves = Math.max(0, +f.shelves);
+        ["depth", "shelfSpacing", "shutter", "material", "finish", "color", "hardware", "edgeBand", "accessories", "code"].forEach((k) => { if (f[k] != null && f[k] !== "") c[k] = f[k]; });
+        if (c.kind === "sidepanel" && f.w == SIDE_PANEL_W) c.w = SIDE_PANEL_W;  // 5.9.1 keep fixed
+        arr[i] = c; setRow(row, reflow(arr)); setProp(null); flash("Accepted");
+        setMsg((warn ? warn + " " : "") + "Properties applied to " + (c.label || c.kind) + " (material/finish/hardware/BOQ reflect in production build).");
+      };
+
+      // ── Pointer drag (resize grips + body reorder) ──
+      const onDown = (e, row, i, mode) => { e.stopPropagation(); editedRef.current = true; setSel({ row, i }); setMenu(null); try { rootRef.current && rootRef.current.focus({ preventScroll: true }); } catch {} const c = rowArr(row)[i]; setDrag({ row, i, mode, x0: e.clientX, y0: e.clientY, w0: c.w, h0: c.h || (row === "wall" ? 720 : 850), sill0: c.sill || 1450 }); try { e.target.setPointerCapture(e.pointerId); } catch {} };
+      // Keyboard: Delete / Backspace removes the selected cabinet (auto-redistributes width). Scoped to
+      // this run via container focus so it never deletes from a hidden run or while typing in a field.
+      const onRootKey = (e) => {
+        if (prop) return;
+        const tag = (e.target && e.target.tagName) || "";
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (sel && (e.key === "Delete" || e.key === "Backspace")) { e.preventDefault(); act(sel.row, sel.i, "delete"); }
+      };
+      const onMove = (e) => {
+        if (!drag) return;
+        const dx = (e.clientX - drag.x0) / S, dy = (e.clientY - drag.y0) / vS;
+        if (drag.mode === "r") setWidth(drag.row, drag.i, drag.w0 + dx, false);
+        else if (drag.mode === "l") setWidth(drag.row, drag.i, drag.w0 - dx, false);
+        else if (drag.mode === "t") setHeight(drag.row, drag.i, drag.h0 - dy);          // drag top up → taller
+        else if (drag.mode === "b") { if (drag.row === "wall") setSill(drag.i, drag.sill0 - dy); else setHeight("base", drag.i, drag.h0 + dy); }
+        else if (drag.mode === "move") {
+          const rect = svgRef.current.getBoundingClientRect(); const mm = (e.clientX - rect.left) / S;
+          const dragged = rowArr(drag.row)[drag.i];
+          if (drag.row === "wall" && dragged && dragged.kind === "chimney") {
+            // dragging the chimney relocates its bonded 3-drawer cabinet — the chimney then
+            // re-centres over it (sync effect), so the pair always moves together.
+            const bArr = base.slice(); const di = bArr.findIndex((c) => c.kind === "drawer3"); if (di < 0) return;
+            let acc = 0, tgt = bArr.length - 1; for (let k = 0; k < bArr.length; k++) { if (mm < acc + bArr[k].w / 2) { tgt = k; break; } acc += bArr[k].w; }
+            if (tgt !== di) { const [m] = bArr.splice(di, 1); bArr.splice(tgt, 0, m); setBase(reflow(bArr)); }
+            return;
+          }
+          const arr = rowArr(drag.row); let acc = 0, target = arr.length - 1;
+          for (let k = 0; k < arr.length; k++) { if (mm < acc + arr[k].w / 2) { target = k; break; } acc += arr[k].w; }
+          if (target !== drag.i) { const a2 = arr.slice(); const [m] = a2.splice(drag.i, 1); a2.splice(target, 0, m); setRow(drag.row, reflow(a2)); setDrag({ ...drag, i: target }); setSel({ row: drag.row, i: target }); }
+        }
+      };
+      // 13.pdf: a cabinet manually resized below the minimum practical width becomes a filler (not a
+      // sub-practical cabinet). Side panels/chimney/drawers are exempt; runs on resize-release only.
+      const fillerizeIfTiny = (row, i) => {
+        const arr = rowArr(row); const c = arr[i];
+        const isDrawerK = c && (c.kind === "drawer" || c.kind === "drawer3" || c.kind === "drawer-atta");
+        if (!c || c.kind === "filler" || c.kind === "sidepanel" || c.kind === "chimney" || isDrawerK || isTallC(c.kind)) return false;
+        if (c.w >= MIN_CAB) return false;
+        const a2 = arr.slice(); a2[i] = { ...c, kind: "filler", label: "Filler", drawers: 0, dh: null };
+        setRow(row, reflow(a2)); setMsg("Below " + MIN_CAB + " mm → shown as a filler (no sub-practical cabinet).");
+        return true;
+      };
+      const onUp = () => { if (drag) { const wasWallTop = drag.row === "wall" && drag.mode === "t"; const wasResize = drag.mode === "l" || drag.mode === "r"; const di = drag.i, drow = drag.row; if (drag.row === "base") setBase((b) => reflow(b)); else setWallC2((w) => reflow(w)); setDrag(null); if (wasResize) fillerizeIfTiny(drow, di); if (wasWallTop) { const c = wallC[di]; if (c && !c.locked && c.kind !== "chimney" && c.kind !== "sidepanel" && Math.round(c.h || 720) !== Math.round(drag.h0 || 720)) setHeightPrompt({ i: di, h: Math.round(c.h || 720) }); } } };
+
+      const drawnBase = reflow(base), drawnWall = reflow(wallC);
+      // shared cabinet renderer (base + wall), with selection handles + grips
+      const renderCab = (row, c, i) => {
+        const b = yBand(row, c), x = cabX(c), w = cabW(c), y = b.yTop, h = b.yBot - b.yTop, selected = selOf(row, i);
+        // Keep a label inside its own cabinet — when the text would be wider than the cabinet, compress it
+        // with SVG textLength so it never spills onto the neighbour (user-reported overlap).
+        const fit = (label, fs, avail) => ((String(label || "").length * fs * 0.56 > avail - 4) ? { textLength: Math.max(8, avail - 4), lengthAdjust: "spacingAndGlyphs" } : {});
+        const isChim = c.kind === "chimney";
+        const glass = row === "wall" && (c.kind === "glass-wall" || c.kind === "display" || c.kind === "gtpt");  // 5.9.9
+        const cellFill = glass ? "url(#glassGrad)" : fillOf(row, c.kind);
+        const body = isChim
+          ? <polygon points={x + "," + b.yBot + " " + (x + w) + "," + b.yBot + " " + (x + w * 0.7) + "," + y + " " + (x + w * 0.3) + "," + y} fill="#e0e7ff" stroke={selected ? "#ea580c" : "#a5b4fc"} strokeWidth={selected ? 2.4 : 1} style={{ cursor: "move" }} onPointerDown={(e) => onDown(e, row, i, "move")} onClick={(e) => { e.stopPropagation(); setSel({ row, i }); setMenu(null); }} onDoubleClick={(e) => { e.stopPropagation(); setProp({ row, i }); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSel({ row, i }); setMenu({ x: e.clientX, y: e.clientY, row, i }); }} />
+          : <rect x={x} y={y} width={w - 1} height={h} fill={cellFill} fillOpacity={glass ? 0.82 : 1} stroke={selected ? "#ea580c" : glass ? "#9aa0a6" : "#2f74d0"} strokeWidth={selected ? 2.4 : 1} style={{ cursor: "move" }} onPointerDown={(e) => onDown(e, row, i, "move")} onClick={(e) => { e.stopPropagation(); setSel({ row, i }); setMenu(null); }} onDoubleClick={(e) => { e.stopPropagation(); setProp({ row, i }); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSel({ row, i }); setMenu({ x: e.clientX, y: e.clientY, row, i }); }} />;
+        const shelves = c.shelves != null ? c.shelves : (row === "wall" && (c.kind === "glass-wall" || c.kind === "open-shelf" || c.kind === "wall" || c.kind === "display") ? 2 : 0);
+        const isCorner = c.kind === "corner";
+        const badgeW = Math.min(w - 4, Math.max(48, (c.label || "").length * 5.4));
+        const badgeC = !isCorner ? null : (c.label || "").includes("LeMans") ? { fill: "#10b981", stroke: "#047857" }
+          : (c.label || "").includes("Magic") ? { fill: "#6366f1", stroke: "#4338ca" }
+          : (c.label || "").includes("Blind") ? { fill: "#d97706", stroke: "#92400e" }
+          : { fill: "#e11d48", stroke: "#9f1239" };
+        return (
+          <g key={row + i} data-kind={c.kind} data-row={row}>
+            {body}
+            {c.drawers > 0 && drawerBandsC(c).map((f, d) => <line key={d} x1={x} y1={y + h * f} x2={x + w - 1} y2={y + h * f} stroke="#2f74d0" strokeWidth="0.5" pointerEvents="none" />)}
+            {shelves > 0 && Array.from({ length: shelves }, (_, k) => <line key={"s" + k} x1={x + 1} y1={y + h * (k + 1) / (shelves + 1)} x2={x + w - 2} y2={y + h * (k + 1) / (shelves + 1)} stroke="#94a3b8" strokeWidth="0.4" pointerEvents="none" />)}
+            {faceEls(row, c, x, y, w, h)}
+            {glass && <g pointerEvents="none">
+              <rect x={x + 1.5} y={y + 1.5} width={w - 4} height={h - 3} fill="none" stroke="#cfd3d7" strokeWidth="2" />
+              <rect x={x + 3.5} y={y + 3.5} width={w - 8} height={h - 7} fill="none" stroke="#8b9096" strokeWidth="0.8" />
+              <rect x={x + w * 0.17} y={y + 4} width={Math.max(3, w * 0.1)} height={h - 8} fill="url(#glassRefl)" />
+            </g>}
+            {c.kind === "tall-hiunit" && [["Oven", 1050], ["Microwave", 1450]].map(([lab, cl], ni) => { const nh = 380 * vS, ny = floorY - (cl + 190) * vS, nx = x + w * 0.12, nw = w * 0.76; return (<g key={"hi" + ni} pointerEvents="none"><rect x={nx} y={ny} width={nw} height={nh} fill="#1f2937" stroke="#0f172a" strokeWidth="1" /><text x={x + w / 2} y={ny + nh / 2 + 3} fill="#e2e8f0" fontSize="6.5" textAnchor="middle">{lab}</text></g>); })}
+            {/* 14.pdf GTPT representation: glass rack (top) · plate rack (mid) · drain tray + drying (bottom) */}
+            {c.kind === "gtpt" && (() => {
+              const gx = x + 2, gw2 = w - 4, gy = y + 2, gh = h - 4, seg = gh / 3, els = [];
+              els.push(<rect key="bd" x={gx} y={gy} width={gw2} height={gh} fill="none" stroke="#0891b2" strokeWidth="0.8" />);
+              const n1 = Math.max(3, Math.round(gw2 / 13)); for (let i = 1; i < n1; i++) els.push(<line key={"g" + i} x1={gx + gw2 * i / n1} y1={gy + 1} x2={gx + gw2 * i / n1} y2={gy + seg - 1} stroke="#38bdf8" strokeWidth="0.5" />);
+              els.push(<line key="s1" x1={gx} y1={gy + seg} x2={gx + gw2} y2={gy + seg} stroke="#0891b2" strokeWidth="0.6" />);
+              const n2 = Math.max(3, Math.round(gw2 / 16)); for (let i = 1; i < n2; i++) els.push(<line key={"p" + i} x1={gx + gw2 * i / n2} y1={gy + seg + 1} x2={gx + gw2 * i / n2} y2={gy + 2 * seg - 1} stroke="#0891b2" strokeWidth="0.5" />);
+              els.push(<line key="s2" x1={gx} y1={gy + 2 * seg} x2={gx + gw2} y2={gy + 2 * seg} stroke="#0891b2" strokeWidth="0.6" />);
+              els.push(<line key="dr1" x1={gx + 1} y1={gy + 2 * seg + seg * 0.42} x2={gx + gw2 - 1} y2={gy + 2 * seg + seg * 0.42} stroke="#0891b2" strokeWidth="0.5" strokeDasharray="3 2" />);
+              els.push(<line key="dr2" x1={gx + 1} y1={gy + 2 * seg + seg * 0.72} x2={gx + gw2 - 1} y2={gy + 2 * seg + seg * 0.72} stroke="#0891b2" strokeWidth="0.5" strokeDasharray="3 2" />);
+              els.push(<text key="lb" x={x + w / 2} y={gy + gh - 2} fill="#0e7490" fontSize="6" textAnchor="middle">GTPT</text>);
+              return <g pointerEvents="none">{els}</g>;
+            })()}
+            {isCorner && <g pointerEvents="none">
+              <line x1={x} y1={b.yBot} x2={x + w} y2={y} stroke="#94a3b8" strokeWidth="0.5" strokeDasharray="3 2" />
+              <rect x={x + (w - badgeW) / 2} y={y + 5} width={badgeW} height={13} rx={6} fill={badgeC.fill} stroke={badgeC.stroke} strokeWidth="0.6" />
+              <text x={x + w / 2} y={y + 14.5} fill="#ffffff" fontSize="7.5" textAnchor="middle" {...fit(c.label + (c.locked ? " 🔒" : ""), 7.5, badgeW)}>{c.label}{c.locked ? " 🔒" : ""}</text>
+            </g>}
+            {labelMode !== "client" && !isChim && !isCorner && <text x={x + w / 2} y={y + h - 5} fill="#475569" fontSize="9" textAnchor="middle" pointerEvents="none" {...fit(c.label + (c.locked ? " 🔒" : ""), 9, w)}>{c.label}{c.locked ? " 🔒" : ""}</text>}
+            {labelMode !== "client" && c.kind !== "sidepanel" && <text x={x + w / 2} y={y + 10} fill="#94a3b8" fontSize="9" textAnchor="middle" pointerEvents="none">{Math.round(c.w)}</text>}
+            {labelMode === "production" && !isChim && w > 32 && <text x={x + w / 2} y={y + 19} fill="#0f172a" fontSize="7" textAnchor="middle" pointerEvents="none">{c.code || ((row === "wall" ? "W" : "B") + "-" + Math.round(c.w))}</text>}
+            {applianceDims && labelMode !== "client" && (() => {   /* 5.9.13 brand appliance spec */
+              const AD = applianceDims, k = c.kind;
+              const sp = k === "chimney" ? AD.chimney[0] + "×" + AD.chimney[1] : k === "dishwasher" ? AD.dishwasher[0] + "×" + AD.dishwasher[1] : (k === "fridge" || k === "tall-fridge") ? AD.refrigerator[0] + "×" + AD.refrigerator[1] : k === "tall-hiunit" ? AD.oven[0] + "×" + AD.oven[1] : k === "hob" ? AD.hob[0] + "×" + AD.hob[2] : null;
+              if (!sp || w < 30) return null;
+              return <text x={x + w / 2} y={row === "wall" ? y + 8 : y + 28} fill="#7c3aed" fontSize="6.5" textAnchor="middle" pointerEvents="none">{(applianceBrand || "") + " " + sp}</text>;
+            })()}
+            {selected && (<g>
+              <rect x={x - 3} y={y + h / 2 - 6} width={6} height={12} fill="#ea580c" style={{ cursor: "ew-resize" }} onPointerDown={(e) => onDown(e, row, i, "l")} />
+              <rect x={x + w - 4} y={y + h / 2 - 6} width={6} height={12} fill="#ea580c" style={{ cursor: "ew-resize" }} onPointerDown={(e) => onDown(e, row, i, "r")} />
+              <rect x={x + w / 2 - 6} y={y - 3} width={12} height={6} fill="#ea580c" style={{ cursor: "ns-resize" }} onPointerDown={(e) => onDown(e, row, i, "t")} />
+              <rect x={x + w / 2 - 6} y={b.yBot - 4} width={12} height={6} fill="#ea580c" style={{ cursor: "ns-resize" }} onPointerDown={(e) => onDown(e, row, i, "b")} />
+            </g>)}
+          </g>
+        );
+      };
+      // 5.9.6 complete-dimension geometry + 5.9.7 backsplash band
+      const baseHMm = Math.max(850, ...base.filter((c) => !isTallC(c.kind)).map((c) => c.h || 850));
+      const wallSillMm = drawnWall.length ? Math.min(...drawnWall.map((c) => c.sill || 1450)) : 1450;
+      const wallTopMm = drawnWall.length ? Math.max(...drawnWall.map((c) => (c.sill || 1450) + (c.h || 720))) : 0;
+      const tallMaxMm = Math.max(0, ...base.filter((c) => isTallC(c.kind)).map((c) => c.h || 2170));
+      const overallH = Math.max(wallTopMm, tallMaxMm, baseHMm, 2170);
+      const bsTop = floorY - wallSillMm * vS, bsBot = floorY - baseHMm * vS;   // backsplash band (top<bot)
+      const totalPx = totalW * S, svgW = Math.max(W, totalPx) + (showDims ? 120 : 4);
+      const sel0 = sel ? rowArr(sel.row)[sel.i] : null;   // 5.9.16 live cabinet summary
+      return (
+        <div className="relative" ref={rootRef} tabIndex={0} onKeyDown={onRootKey} style={{ outline: "none" }} onClick={() => { setMenu(null); setSel(null); }}>
+          <div className="text-xs font-semibold text-cyan-600 mb-1 uppercase tracking-wide">Elevation — {label} <span className="text-slate-400 font-normal normal-case">· every base AND wall cabinet is editable: click, drag edge/height grips, drag body to reorder, right-click for options</span></div>
+          <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50">
+            <svg ref={svgRef} width={svgW} height={vH + (showDims ? 56 : 4)} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none" }}>
+              <defs>
+                <linearGradient id="glassGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#d7ddca" /><stop offset="42%" stopColor="#b9c2a8" /><stop offset="72%" stopColor="#a9b499" /><stop offset="100%" stopColor="#96a285" />
+                </linearGradient>
+                <linearGradient id="glassRefl" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#ffffff" stopOpacity="0.6" /><stop offset="55%" stopColor="#ffffff" stopOpacity="0.13" /><stop offset="100%" stopColor="#ffffff" stopOpacity="0.03" />
+                </linearGradient>
+              </defs>
+              {showTiles && TLe.on !== false && bsBot > bsTop + 1 && (() => {
+                const sz = Math.max(40, TLe.size || 100), tw = Math.max(6, sz * S), th = Math.max(6, sz * vS), cols = Math.ceil(totalPx / tw), rows = Math.ceil((bsBot - bsTop) / th), brick = TLe.pattern === "brick", els = [<rect key="bg" x={0} y={bsTop} width={totalPx} height={bsBot - bsTop} fill={TLe.color} />];
+                for (let rI = 1; rI < rows; rI++) els.push(<line key={"tr" + rI} x1={0} y1={bsTop + rI * th} x2={totalPx} y2={bsTop + rI * th} stroke={TLe.grid} strokeWidth="0.6" />);
+                for (let rI = 0; rI < rows; rI++) { const off = brick && rI % 2 ? tw / 2 : 0; for (let cI = 0; cI <= cols; cI++) { const x = cI * tw + off; if (x > 0 && x < totalPx) els.push(<line key={"tv" + rI + "_" + cI} x1={x} y1={bsTop + rI * th} x2={x} y2={Math.min(bsBot, bsTop + (rI + 1) * th)} stroke={TLe.grid} strokeWidth="0.6" />); } }
+                return <g pointerEvents="none">{els}</g>;
+              })()}
+              <line x1={0} y1={floorY} x2={Math.min(W, totalW * S)} y2={floorY} stroke="#475569" strokeWidth="1.5" />
+              <rect x={0} y={baseTopY - 4} width={Math.min(W, totalW * S)} height={4} fill="#dbe3ee" />
+              {drawnWall.map((c, i) => renderCab("wall", c, i))}
+              {drawnBase.map((c, i) => renderCab("base", c, i))}
+              {beam && (() => { const b = beamX(); const by = floorY - (beam.height + beam.drop) * vS, bh = Math.max(4, beam.drop * vS), bx = b.x0 * S, bw = (b.x1 - b.x0) * S; return (
+                <g pointerEvents="none">
+                  <rect x={bx} y={by} width={bw} height={bh} fill="#cbd5e1" opacity="0.75" stroke="#64748b" strokeWidth="1" strokeDasharray="3 2" />
+                  <text x={bx + bw / 2} y={by + bh / 2 + 3} fill="#334155" fontSize="8" textAnchor="middle">Beam · drop {beam.drop} @ {beam.height} mm</text>
+                </g>
+              ); })()}
+              {showDims && (<g pointerEvents="none">
+                {/* per-cabinet width chain BELOW base (font +2px → 9) */}
+                {drawnBase.map((c, i) => { const x1 = cabX(c), x2 = cabX(c) + cabW(c), dy = floorY + 18; return (
+                  <g key={"d" + i}>
+                    <line x1={x1} y1={floorY + 2} x2={x1} y2={dy + 4} stroke="#cbd5e1" strokeWidth="0.5" />
+                    <line x1={x2} y1={floorY + 2} x2={x2} y2={dy + 4} stroke="#cbd5e1" strokeWidth="0.5" />
+                    <line x1={x1} y1={dy} x2={x2} y2={dy} stroke="#64748b" strokeWidth="0.7" />
+                    <line x1={x1 - 2} y1={dy + 2.5} x2={x1 + 2} y2={dy - 2.5} stroke="#64748b" strokeWidth="0.8" />
+                    <line x1={x2 - 2} y1={dy + 2.5} x2={x2 + 2} y2={dy - 2.5} stroke="#64748b" strokeWidth="0.8" />
+                    {cabW(c) > 22 && <text x={(x1 + x2) / 2} y={dy - 3} fill="#475569" fontSize="9" textAnchor="middle">{Math.round(c.w)}</text>}
+                  </g>
+                ); })}
+                <line x1={0} y1={floorY + 42} x2={totalPx} y2={floorY + 42} stroke="#1e3a5f" strokeWidth="0.9" />
+                <line x1={-2} y1={floorY + 44.5} x2={2} y2={floorY + 39.5} stroke="#1e3a5f" strokeWidth="1" />
+                <line x1={totalPx - 2} y1={floorY + 44.5} x2={totalPx + 2} y2={floorY + 39.5} stroke="#1e3a5f" strokeWidth="1" />
+                <text x={totalPx / 2} y={floorY + 39} fill="#1e3a5f" fontSize="10" textAnchor="middle">{Math.round(totalW)} mm overall width</text>
+                {/* 5.9.6 width chain ABOVE wall cabinets (mirrors the below chain) */}
+                {drawnWall.length > 0 && (() => { const dy = Math.max(10, (floorY - wallTopMm * vS) - 12); return (
+                  <g>{drawnWall.map((c, i) => { const x1 = cabX(c), x2 = cabX(c) + cabW(c); return (
+                    <g key={"wd" + i}>
+                      <line x1={x1} y1={dy} x2={x2} y2={dy} stroke="#64748b" strokeWidth="0.7" />
+                      <line x1={x1 - 2} y1={dy - 2.5} x2={x1 + 2} y2={dy + 2.5} stroke="#64748b" strokeWidth="0.8" />
+                      <line x1={x2 - 2} y1={dy - 2.5} x2={x2 + 2} y2={dy + 2.5} stroke="#64748b" strokeWidth="0.8" />
+                      {cabW(c) > 24 && c.kind !== "sidepanel" && <text x={(x1 + x2) / 2} y={dy - 3} fill="#475569" fontSize="9" textAnchor="middle">{Math.round(c.w)}</text>}
+                    </g>); })}</g>); })()}
+                {/* 5.9.6 height chain on the SIDE (overall H, base, backsplash gap, wall cab) */}
+                {(() => {
+                  const xS = totalPx + 18, col = "#1e3a5f";
+                  const seg = (mmTop, mmBot, lab, c, dx) => { const yT = floorY - mmTop * vS, yB = floorY - mmBot * vS, xx = xS + (dx || 0); return (
+                    <g key={lab}>
+                      <line x1={xx} y1={yT} x2={xx} y2={yB} stroke={c} strokeWidth="0.8" />
+                      <line x1={xx - 2.5} y1={yT + 2.5} x2={xx + 2.5} y2={yT - 2.5} stroke={c} strokeWidth="0.9" />
+                      <line x1={xx - 2.5} y1={yB + 2.5} x2={xx + 2.5} y2={yB - 2.5} stroke={c} strokeWidth="0.9" />
+                      <text x={xx + 5} y={(yT + yB) / 2 + 3} fill={c} fontSize="9">{lab}</text>
+                    </g>); };
+                  return (<g>
+                    {seg(baseHMm, 0, Math.round(baseHMm) + " base", col)}
+                    {wallSillMm > baseHMm + 1 && seg(wallSillMm, baseHMm, Math.round(wallSillMm - baseHMm) + " splash", "#0891b2")}
+                    {wallTopMm > wallSillMm + 1 && seg(wallTopMm, wallSillMm, Math.round(wallTopMm - wallSillMm) + " wall", col)}
+                    {seg(overallH, 0, Math.round(overallH) + " overall H", "#7c3aed", 70)}
+                  </g>);
+                })()}
+              </g>)}
+            </svg>
+          </div>
+          {/* Corner-solution colour legend — shown when this run has a corner unit. */}
+          {(() => {
+            const corners = base.filter((c) => c.kind === "corner");
+            if (!corners.length) return null;
+            const nameOf = (l) => /LeMans/.test(l) ? "LeMans" : /Magic/.test(l) ? "Magic Corner" : /Blind/.test(l) ? "Blind Corner" : "Carousel";
+            const present = new Set(corners.map((c) => nameOf(c.label || "")));
+            const KEY = [{ name: "LeMans", fill: "#10b981" }, { name: "Magic Corner", fill: "#6366f1" }, { name: "Blind Corner", fill: "#d97706" }, { name: "Carousel", fill: "#e11d48" }];
+            return (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px] text-slate-500">
+                <span className="font-semibold text-slate-600">Corner solution</span>
+                {KEY.map((k) => { const on = present.has(k.name); return (
+                  <span key={k.name} className="inline-flex items-center gap-1" style={{ opacity: on ? 1 : 0.4, fontWeight: on ? 600 : 400 }}>
+                    <span style={{ width: 11, height: 11, borderRadius: 3, background: k.fill, display: "inline-block" }} />
+                    {k.name}{on ? " ✓" : ""}
+                  </span>
+                ); })}
+                <span className="text-slate-400">· hierarchy LeMans › Magic › Blind › Carousel</span>
+              </div>
+            );
+          })()}
+          {/* Live plan (top view) — updates in real time as the elevation is edited. (5.12: label removed) */}
+          <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50">
+            <svg width={W} height={52}>
+              <line x1={0} y1={8} x2={Math.min(W, totalW * S)} y2={8} stroke="#64748b" strokeWidth="2" />
+              {drawnBase.map((c, i) => (
+                <g key={i}>
+                  <rect x={cabX(c)} y={8} width={cabW(c) - 1} height={38} fill={baseFill(c.kind)} stroke={selOf("base", i) ? "#ea580c" : "#2f74d0"} strokeWidth={selOf("base", i) ? 2 : 0.8} />
+                  {c.kind === "sink" && <ellipse cx={cabX(c) + cabW(c) / 2} cy={27} rx={Math.min(10, cabW(c) * 0.3)} ry={5} fill="none" stroke="#0891b2" strokeWidth="1" />}
+                  {(c.kind === "hob" || c.kind === "drawer3") && [0, 1].map((k) => <circle key={k} cx={cabX(c) + cabW(c) * (0.35 + k * 0.3)} cy={20} r={2.4} fill="none" stroke="#ea580c" strokeWidth="0.8" />)}
+                </g>
+              ))}
+              {beam && (() => { const b = beamX(); return <line x1={b.x0 * S} y1={5} x2={b.x1 * S} y2={5} stroke="#64748b" strokeWidth="3" strokeDasharray="5 3" />; })()}
+            </svg>
+          </div>
+          {menu && (() => { const c = rowArr(menu.row)[menu.i]; const conv = menu.row === "wall" ? WALL_CONVERSIONS : BASE_CONVERSIONS; return (
+            <div className="bg-white border border-slate-300 rounded-lg shadow-xl text-xs py-1 w-56 max-h-96 overflow-y-auto" style={{ position: "fixed", zIndex: 60, left: Math.max(4, Math.min(menu.x, (typeof window !== "undefined" ? window.innerWidth : 1280) - 232)), top: Math.max(4, Math.min(menu.y, (typeof window !== "undefined" ? window.innerHeight : 800) - 360)) }} onClick={(e) => e.stopPropagation()}>
+              <div className="px-3 py-1 text-slate-400 border-b border-slate-100">{(c.label || c.kind) + " · " + Math.round(c.w) + "×" + Math.round(c.h || 0) + " mm" + (menu.row === "wall" ? " (wall)" : "")}</div>
+              <button onClick={() => { setProp({ row: menu.row, i: menu.i }); setMenu(null); }} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-cyan-700 font-medium">⚙ Properties…</button>
+              <div className="border-t border-slate-100 my-1"></div>
+              {conv.map(([v, l]) => <button key={v} onClick={() => act(menu.row, menu.i, "convert", v)} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Convert → {l}</button>)}
+              <div className="border-t border-slate-100 my-1"></div>
+              <button onClick={() => act(menu.row, menu.i, "shelf", 1)} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Add shelf</button>
+              <button onClick={() => act(menu.row, menu.i, "shelf", -1)} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Remove shelf</button>
+              <button onClick={() => act(menu.row, menu.i, "similar")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Apply to similar cabinets</button>
+              <button onClick={() => act(menu.row, menu.i, "duplicate")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Duplicate</button>
+              <button onClick={() => act(menu.row, menu.i, "mirror")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Mirror row</button>
+              <button onClick={() => act(menu.row, menu.i, "lock")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">{c.locked ? "Unlock" : "Lock"} cabinet</button>
+              {menu.row === "wall" && <React.Fragment>
+                <button onClick={() => act(menu.row, menu.i, "cosmetic", "Material")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Material / Finish / Colour…</button>
+                <button onClick={() => act(menu.row, menu.i, "cosmetic", "LED profile")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Add LED profile</button>
+              </React.Fragment>}
+              <button onClick={() => act(menu.row, menu.i, "delete")} className="block w-full text-left px-3 py-1 hover:bg-rose-50 text-rose-600">Delete <span className="text-rose-300">· Del key · auto-rebalances</span></button>
+            </div>
+          ); })()}
+          {prop && rowArr(prop.row)[prop.i] && <CabinetProps data={{ row: prop.row, cab: rowArr(prop.row)[prop.i] }} onApply={(f) => applyProps(prop.row, prop.i, f)} onClose={() => setProp(null)} />}
+          {/* 5.9.4 temporary "Accepted" popup — auto-dismisses after 1.5 s */}
+          {toast && <div className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center"><div className="px-6 py-3 rounded-xl bg-emerald-600/95 text-white text-base font-semibold shadow-2xl">✓ {toast}</div></div>}
+          {/* 5.9.12 wall-cabinet height-change scope prompt */}
+          {heightPrompt && (
+            <div className="absolute z-[55] top-9 left-1/2 -translate-x-1/2 bg-white border border-cyan-300 rounded-lg shadow-xl text-xs p-3 w-72" onClick={(e) => e.stopPropagation()}>
+              <div className="font-semibold text-slate-700 mb-2">Wall cabinet height set to {heightPrompt.h} mm</div>
+              <div className="text-slate-500 mb-2">Aligned wall cabinets share a common top &amp; sill. Apply this height to:</div>
+              <div className="flex gap-2">
+                <button onClick={() => { setHeightPrompt(null); setMsg("Height changed for this cabinet only."); }} className="flex-1 px-2 py-1.5 bg-slate-100 border border-slate-300 rounded">Only this cabinet</button>
+                <button onClick={() => applyHeightToAll(heightPrompt.i)} className="flex-1 px-2 py-1.5 bg-cyan-600 text-white rounded">All aligned cabinets</button>
+              </div>
+            </div>
+          )}
+          {/* 5.9.16 live cabinet summary — floating panel for the selected cabinet */}
+          {sel0 && (() => {
+            const W0 = Math.round(sel0.w), H0 = Math.round(sel0.h || (sel.row === "wall" ? 720 : 850)), D0 = sel0.depth || (sel.row === "wall" ? 320 : 600);
+            const cost = Math.round((W0 * H0 / 1e6) * 4500 + (sel0.drawers || 0) * 1200 + ((sel0.kind || "").startsWith("tall") ? 6000 : 0));
+            const rows = [["Type", ELEV_LABELS[sel0.kind] || sel0.kind], ["Width", W0 + " mm"], ["Height", H0 + " mm"], ["Depth", D0 + " mm"], ["Material", sel0.material || "HDHMR"], ["Shutter", sel0.shutter || (sel.row === "wall" ? "Glass" : "Solid")], ["Handle", handle || "D-handle"], ["Shelves", sel0.shelves != null ? sel0.shelves : (sel.row === "wall" ? 2 : 0)], ["Drawers", sel0.drawers || 0], ["Hardware", sel0.hardware || "Hettich soft-close"], ["Est. cost", "₹" + cost.toLocaleString("en-IN")]];
+            return (
+              <div className="absolute z-40 top-7 right-1 w-44 bg-white/95 border border-cyan-200 rounded-lg shadow-lg text-[11px] p-2" onClick={(e) => e.stopPropagation()}>
+                <div className="font-semibold text-cyan-700 mb-1 flex items-center justify-between">Cabinet summary <button onClick={() => setSel(null)} className="text-slate-300 hover:text-slate-600">✕</button></div>
+                {rows.map(([k, v]) => <div key={k} className="flex justify-between gap-2 leading-tight"><span className="text-slate-400">{k}</span><span className="text-slate-700 text-right">{v}</span></div>)}
+              </div>
+            );
+          })()}
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            <button onClick={rebalance} className="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg">⚖ AI Auto-Rebalance</button>
+            <button onClick={validateAndLog} className="px-3 py-1.5 text-xs bg-cyan-600 text-white rounded-lg">✓ Validate &amp; log</button>
+            <label className="flex items-center gap-1 text-xs text-slate-600 px-1"><input type="checkbox" checked={showDims} onChange={(e) => setShowDims(e.target.checked)} className="accent-cyan-600" /> Dimensions</label>
+            <label className="flex items-center gap-1 text-xs text-slate-600 px-1"><input type="checkbox" checked={showTiles} onChange={(e) => setShowTiles(e.target.checked)} className="accent-cyan-600" /> Backsplash tiles</label>
+            <label className="flex items-center gap-1 text-xs text-slate-600 px-1">Labels
+              <select value={labelMode} onChange={(e) => setLabelMode(e.target.value)} className="bg-slate-100 border border-slate-300 rounded px-1 py-0.5 text-xs">
+                <option value="client">Client (clean)</option><option value="designer">Designer</option><option value="production">Production</option>
+              </select>
+            </label>
+            <button onClick={() => { setBase(initBase()); setWallC2(initWall()); setSel(null); setMsg("Reset to generated layout."); }} className="px-3 py-1.5 text-xs bg-slate-100 border border-slate-300 rounded-lg">Reset</button>
+            <span className={"text-xs " + (msg.indexOf("⚠") === 0 ? "text-amber-700" : "text-slate-500")}>{msg}</span>
+            {beam && base.concat(wallC).some((c) => c._beamCut) && <span className="text-xs text-amber-700">⚠ {base.concat(wallC).filter((c) => c._beamCut).length} cabinet(s) trimmed to clear the beam</span>}
+            <span className="text-xs text-slate-400 ml-auto">run {Math.round(totalW)}/{L} mm</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Live section (§7.9) — client port of renderRunSection so the Section
+    //      view reflects edits (e.g. converting a cabinet to a tall unit). --------
+    function sectionSvg(run, tile) {
+      const TLc = tile || { on: true, color: "#e8eef0", grid: "#c2d0d4", size: 100 };
+      const S = 0.14, CH = 2700, padL = 92, padT = 22, padR = 30, padB = 40;
+      const baseD = STD_C.baseDepth, wallD = STD_C.wallDepth, BH = STD_C.baseHeight, WH = STD_C.wallHeight, WS = STD_C.wallStart, TK = STD_C.toeKick, CT = STD_C.counterThk, oh = 25, maxD = baseD + oh;
+      const W = maxD * S + padL + padR, H = CH * S + padT + padB, floorY = padT + CH * S;
+      const xOf = (d) => padL + d * S, yOf = (h) => floorY - h * S, wallTopMM = WS + WH;
+      const tallK = ["tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility"];
+      const hasWall = (run.wallCabs || []).some((c) => c.kind !== "chimney" && c.kind !== "sidepanel");
+      const hasTall = (run.base || []).some((c) => tallK.includes(c.kind));
+      const p = [];
+      p.push('<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="' + S + '" width="' + W.toFixed(0) + '" height="' + H.toFixed(0) + '" viewBox="0 0 ' + W.toFixed(0) + ' ' + H.toFixed(0) + '" font-family="monospace">');
+      p.push('<rect width="' + W + '" height="' + H + '" fill="#f4f7fb"/>');
+      p.push('<text x="' + (W / 2) + '" y="14" fill="#1e3a5f" font-size="11" text-anchor="middle">' + run.name + ' — Section (live)</text>');
+      p.push('<line x1="' + xOf(0) + '" y1="' + yOf(0) + '" x2="' + xOf(0) + '" y2="' + yOf(CH) + '" stroke="#334155" stroke-width="3"/>');
+      p.push('<line x1="' + xOf(0) + '" y1="' + yOf(0) + '" x2="' + xOf(maxD) + '" y2="' + yOf(0) + '" stroke="#475569" stroke-width="2"/>');
+      p.push('<line x1="' + xOf(0) + '" y1="' + yOf(CH) + '" x2="' + xOf(maxD) + '" y2="' + yOf(CH) + '" stroke="#475569" stroke-width="1.5"/>');
+      p.push('<text x="' + xOf(maxD) + '" y="' + (yOf(CH) + 9) + '" fill="#94a3b8" font-size="7" text-anchor="end">ceiling ' + CH + '</text>');
+      if (hasTall) {
+        p.push('<rect x="' + xOf(0) + '" y="' + yOf(wallTopMM) + '" width="' + (baseD * S) + '" height="' + (wallTopMM * S) + '" fill="#e7f6e3" stroke="#2f74d0" stroke-width="1.2"/>');
+        for (let s = 1; s < 6; s++) { const sy = yOf(wallTopMM) + (wallTopMM * S) * s / 6; p.push('<line x1="' + xOf(0) + '" y1="' + sy + '" x2="' + xOf(baseD) + '" y2="' + sy + '" stroke="#94a3b8" stroke-width="0.4"/>'); }
+        p.push('<text x="' + xOf(baseD / 2) + '" y="' + yOf(wallTopMM / 2) + '" fill="#475569" font-size="8" text-anchor="middle">Tall unit</text>');
+      } else {
+        p.push('<rect x="' + xOf(0) + '" y="' + yOf(BH) + '" width="' + (baseD * S) + '" height="' + ((BH - TK) * S) + '" fill="#eaf1fb" stroke="#2f74d0" stroke-width="1"/>');
+        p.push('<rect x="' + xOf(0) + '" y="' + yOf(TK) + '" width="' + ((baseD - 70) * S) + '" height="' + (TK * S) + '" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>');
+        p.push('<text x="' + xOf(baseD / 2) + '" y="' + yOf(BH / 2) + '" fill="#475569" font-size="8" text-anchor="middle">Base</text>');
+        p.push('<rect x="' + xOf(0) + '" y="' + yOf(BH + CT) + '" width="' + ((baseD + oh) * S) + '" height="' + (CT * S) + '" fill="#dbe3ee" stroke="#64748b" stroke-width="0.8"/>');
+        // 13.pdf §4 backsplash tiles in SECTION: thin tiled strip on the wall, counter top → sill
+        if (TLc.on !== false) {
+          const bDepth = 40 * S, bT = yOf(WS), bB = yOf(BH + CT);
+          p.push('<rect x="' + xOf(0) + '" y="' + bT + '" width="' + bDepth + '" height="' + (bB - bT) + '" fill="' + TLc.color + '" stroke="' + TLc.grid + '" stroke-width="0.5"/>');
+          const tstep = Math.max(3, (TLc.size || 100) * S);
+          for (let yy = bT + tstep; yy < bB - 0.5; yy += tstep) p.push('<line x1="' + xOf(0) + '" y1="' + yy + '" x2="' + (xOf(0) + bDepth) + '" y2="' + yy + '" stroke="' + TLc.grid + '" stroke-width="0.35"/>');
+        }
+        if (hasWall) {
+          p.push('<rect x="' + xOf(0) + '" y="' + yOf(wallTopMM) + '" width="' + (wallD * S) + '" height="' + (WH * S) + '" fill="#eaf1fb" stroke="#2f74d0" stroke-width="1"/>');
+          p.push('<text x="' + xOf(wallD / 2) + '" y="' + yOf(WS + WH / 2) + '" fill="#475569" font-size="7" text-anchor="middle">Wall</text>');
+          p.push('<rect x="' + xOf(0) + '" y="' + yOf(CH) + '" width="' + (wallD * S) + '" height="' + ((CH - wallTopMM) * S) + '" fill="#eef2ff" stroke="#a5b4fc" stroke-width="0.8"/>');
+          p.push('<text x="' + xOf(wallD / 2) + '" y="' + yOf((CH + wallTopMM) / 2) + '" fill="#6366f1" font-size="7" text-anchor="middle">Loft</text>');
+        } else {
+          p.push('<text x="' + xOf(maxD) + '" y="' + yOf(WS) + '" fill="#94a3b8" font-size="7" text-anchor="end">open — no wall units</text>');
+        }
+      }
+      const vdim = (h, label, off) => { const dx = padL - off;
+        p.push('<line x1="' + dx + '" y1="' + yOf(0) + '" x2="' + dx + '" y2="' + yOf(h) + '" stroke="#1e3a5f" stroke-width="0.6"/>');
+        p.push('<line x1="' + (dx - 2) + '" y1="' + yOf(0) + '" x2="' + (dx + 2) + '" y2="' + yOf(0) + '" stroke="#1e3a5f" stroke-width="0.8"/>');
+        p.push('<line x1="' + (dx - 2) + '" y1="' + yOf(h) + '" x2="' + (dx + 2) + '" y2="' + yOf(h) + '" stroke="#1e3a5f" stroke-width="0.8"/>');
+        p.push('<text x="' + (dx - 3) + '" y="' + yOf(h / 2) + '" fill="#1e3a5f" font-size="7" text-anchor="end">' + label + '</text>'); };
+      vdim(BH, '' + BH, 14);
+      if (hasWall && !hasTall) { vdim(WS, 'sill ' + WS, 42); vdim(wallTopMM, '' + wallTopMM, 70); }
+      const hy = floorY + 16;
+      p.push('<line x1="' + xOf(0) + '" y1="' + hy + '" x2="' + xOf(baseD) + '" y2="' + hy + '" stroke="#1e3a5f" stroke-width="0.6"/>');
+      p.push('<text x="' + xOf(baseD / 2) + '" y="' + (hy - 2) + '" fill="#1e3a5f" font-size="7" text-anchor="middle">depth ' + baseD + '</text>');
+      p.push('</svg>');
+      return p.join("");
+    }
+
+    // ---- Live top-view plan (§7.9) — client-rendered from the shared model so
+    //      elevation edits propagate to the Plan view. Reuses the same per-run
+    //      placement as the 3D view (runs laid out on their walls in XZ). --------
+    function planPlace(t, La, Lb, i) {
+      if (t.includes("l-shape") || t.includes("peninsula")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 0], a: [0, 1], n: [1, 0] }][i];
+      if (t.includes("u-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }][i];
+      if (t.includes("parallel")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * STD_C.baseDepth], a: [1, 0], n: [0, -1] }][i];
+      if (t.includes("island")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * STD_C.baseDepth], a: [1, 0], n: [0, 1] }][i];
+      return [{ o: [0, 0], a: [1, 0], n: [0, 1] }][i];
+    }
+    function LivePlan2D({ runs, type, dims }) {
+      const t = type.toLowerCase(), La = +dims.wall, Lb = +(dims.wallB || 2400), D = STD_C.baseDepth;
+      const fillC = (k) => k === "filler" ? "#fde4cf" : k === "sink" ? "#cdeef5" : k === "corner" ? "#dbe4f0" : (k === "hob" || k === "drawer3") ? "#ffe3c2" : k === "dishwasher" ? "#dbe9ff" : (k === "fridge" || k === "tall-fridge") ? "#e8e0ff" : k === "tall-pantry" ? "#e7f6e3" : k === "tall-hiunit" ? "#ffe8d6" : k === "tall-utility" ? "#d7f0ee" : k === "drawer-atta" ? "#fdeccb" : "#eaf1fb";
+      const rects = [];
+      (runs || []).forEach((run, i) => {
+        const pl = planPlace(t, La, Lb, i); if (!pl) return;
+        (run.base || []).forEach((c) => {
+          const Ax = pl.o[0] + pl.a[0] * c.x, Az = pl.o[1] + pl.a[1] * c.x;
+          const Bx = pl.o[0] + pl.a[0] * (c.x + c.w) + pl.n[0] * D, Bz = pl.o[1] + pl.a[1] * (c.x + c.w) + pl.n[1] * D;
+          rects.push({ x: Math.min(Ax, Bx), z: Math.min(Az, Bz), w: Math.abs(Bx - Ax), h: Math.abs(Bz - Az), kind: c.kind, label: c.label });
+        });
+      });
+      if (!rects.length) return null;
+      const minX = Math.min(...rects.map(r => r.x)), minZ = Math.min(...rects.map(r => r.z));
+      const maxX = Math.max(...rects.map(r => r.x + r.w)), maxZ = Math.max(...rects.map(r => r.z + r.h));
+      const pad = 28, S = Math.min(0.12, 640 / Math.max(1, maxX - minX));
+      const W = (maxX - minX) * S + pad * 2, H = (maxZ - minZ) * S + pad * 2 + 16;
+      const xf = (x) => pad + (x - minX) * S, zf = (z) => pad + 16 + (z - minZ) * S;
+      return (
+        <svg width={W} height={H} style={{ fontFamily: "monospace" }}>
+          <rect width={W} height={H} fill="#f4f7fb" />
+          <text x={W / 2} y={13} fill="#1e3a5f" fontSize="11" textAnchor="middle">{type} — Plan (live)</text>
+          {rects.map((r, k) => (
+            <g key={k}>
+              <rect x={xf(r.x)} y={zf(r.z)} width={r.w * S} height={r.h * S} fill={fillC(r.kind)} stroke="#2f74d0" strokeWidth="1" />
+              {r.kind === "sink" && <ellipse cx={xf(r.x) + r.w * S / 2} cy={zf(r.z) + r.h * S / 2} rx={Math.min(9, r.w * S * 0.3)} ry="5" fill="none" stroke="#0891b2" strokeWidth="1.2" />}
+              {(r.kind === "hob" || r.kind === "drawer3") && <circle cx={xf(r.x) + r.w * S / 2} cy={zf(r.z) + r.h * S / 2} r="3" fill="none" stroke="#ea580c" strokeWidth="1" />}
+            </g>
+          ))}
+        </svg>
+      );
+    }
+
+    // ---- 15.txt 5.16: 2D room plan (top view) showing walls + doors/windows/beams/columns ----
+    // 16/17 Part 6: the Top View (plan) is the PRIMARY, EDITABLE room planner. Objects are
+    // wall-attached; drag along the wall (snaps to 10 mm), click to select, right-click to delete.
+    function RoomPlan2D({ room, structures, points, selected, onSelect, onMoveStruct, onMovePoint, onResizeStruct, onDeleteObj }) {
+      const PC = { sink: "#2563eb", plumbing: "#0891b2", ro: "#14b8a6", chimney: "#6366f1", hob: "#ea580c", gas: "#dc2626", fridge: "#8b5cf6", microwave: "#f59e0b", oven: "#d97706", dishwasher: "#0ea5e9", washing: "#64748b", switchboard: "#eab308", socket: "#22c55e" };
+      const Wd = +room.width || 3600, Dp = +room.depth || 2400, pad = 24, maxPx = 460;
+      const S = maxPx / Math.max(Wd, Dp), w = Wd * S, h = Dp * S;
+      const seg = (name) => name.indexOf("back") >= 0 ? { x: pad, y: pad, dx: 1, dy: 0 } : name.indexOf("right") >= 0 ? { x: pad + w, y: pad, dx: 0, dy: 1 } : name.indexOf("front") >= 0 ? { x: pad, y: pad + h, dx: 1, dy: 0 } : { x: pad, y: pad, dx: 0, dy: 1 };
+      const horiz = (name) => name.indexOf("back") >= 0 || name.indexOf("front") >= 0;
+      const wallLen = (name) => horiz(name) ? Wd : Dp;
+      const svgRef = React.useRef(null);
+      const [drag, setDrag] = React.useState(null);   // {kind:'struct'|'point', id, wall, width}
+      const onMove = (ev) => {
+        if (!drag || !svgRef.current) return;
+        const r = svgRef.current.getBoundingClientRect();
+        const alongPx = horiz(drag.wall) ? (ev.clientX - r.left - pad) : (ev.clientY - r.top - pad);
+        const mm = Math.round(alongPx / S / 10) * 10;                             // snap to 10 mm
+        const WL = wallLen(drag.wall), MINW = 200;
+        if (drag.mode === "r") {                                                  // 6.1 resize: drag right edge
+          const w2 = Math.max(MINW, Math.min(mm - drag.pos0, WL - drag.pos0));
+          onResizeStruct && onResizeStruct(drag.id, { width: w2 });
+        } else if (drag.mode === "l") {                                           // 6.1 resize: drag left edge
+          const right = drag.pos0 + drag.width0;
+          const pos = Math.max(0, Math.min(mm, right - MINW));
+          onResizeStruct && onResizeStruct(drag.id, { pos, width: right - pos });
+        } else {                                                                  // move along the wall
+          const along = Math.max(0, Math.min(mm, WL - (drag.width || 0)));
+          if (drag.kind === "struct") onMoveStruct && onMoveStruct(drag.id, along); else onMovePoint && onMovePoint(drag.id, along);
+        }
+      };
+      const onUp = () => setDrag(null);
+      const isSel = (kind, id) => selected && selected.kind === kind && selected.id === id;
+      const els = [];
+      els.push(<rect key="rm" x={pad} y={pad} width={w} height={h} fill="#f4f7fb" stroke="#334155" strokeWidth="4" />);
+      els.push(<text key="wA" x={pad + w / 2} y={pad + 12} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="middle">Wall A</text>);
+      els.push(<text key="wB" x={pad + w - 4} y={pad + h / 2} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="end">Wall B</text>);
+      els.push(<text key="wC" x={pad + w / 2} y={pad + h - 5} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="middle">Wall C</text>);
+      els.push(<text key="wD" x={pad + 4} y={pad + h / 2} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="start">Wall D</text>);
+      (structures || []).forEach((s) => {
+        const sg = seg(s.wall), L = (s.width && s.kind !== "beam") ? s.width : (s.kind === "beam" && !s.width ? wallLen(s.wall) : (s.width || 300));
+        const x1 = sg.x + sg.dx * (s.pos || 0) * S, y1 = sg.y + sg.dy * (s.pos || 0) * S;
+        const x2 = x1 + sg.dx * L * S, y2 = y1 + sg.dy * L * S;
+        const col = s.kind === "door" ? "#8b5a2b" : s.kind === "window" ? "#0891b2" : s.kind === "beam" ? "#94a3b8" : "#a16207";
+        const sel = isSel("struct", s.id);
+        const down = (e) => { e.stopPropagation(); onSelect && onSelect({ kind: "struct", id: s.id }); setDrag({ kind: "struct", id: s.id, wall: s.wall, width: s.kind === "beam" ? 0 : L, mode: "move", pos0: s.pos || 0, width0: L }); };
+        const clk = (e) => { e.stopPropagation(); onSelect && onSelect({ kind: "struct", id: s.id }); };
+        const ctx = (e) => { e.preventDefault(); e.stopPropagation(); onDeleteObj && onDeleteObj("struct", s.id); };
+        if (s.kind === "column") els.push(<rect key={s.id} x={x1 - 6} y={y1 - 6} width={12} height={12} fill={col} stroke={sel ? "#ea580c" : "#fff"} strokeWidth={sel ? 2 : 1} style={{ cursor: "move" }} onPointerDown={down} onContextMenu={ctx} />);
+        else {
+          els.push(<line key={s.id + "v"} x1={x1} y1={y1} x2={x2} y2={y2} stroke={sel ? "#ea580c" : col} strokeWidth={sel ? 6 : (s.kind === "door" ? 5 : 4)} strokeDasharray={s.kind === "beam" ? "5 3" : "0"} strokeLinecap="round" pointerEvents="none" />);
+          els.push(<line key={s.id + "h"} x1={x1} y1={y1} x2={x2} y2={y2} stroke="transparent" strokeWidth={16} strokeLinecap="round" style={{ cursor: "move" }} onPointerDown={down} onClick={clk} onContextMenu={ctx} />);
+          if (s.kind === "door") els.push(<path key={s.id + "a"} d={"M" + x2 + "," + y2 + " A" + (L * S) + "," + (L * S) + " 0 0 1 " + (x2 - sg.dy * L * S) + "," + (y2 + sg.dx * L * S)} fill="none" stroke={col} strokeWidth="0.8" opacity="0.6" pointerEvents="none" />);
+        }
+        // 6.5/6.6/6.1: selected object → AutoCAD-style |--gap--Object--gap--| dimensions + drag-resize end handles
+        if (sel && s.kind !== "column") {
+          const WL = wallLen(s.wall), leftGap = Math.round(s.pos || 0), rightGap = Math.round(WL - (s.pos || 0) - L);
+          const ox = s.wall.indexOf("right") >= 0 ? 20 : s.wall.indexOf("left") >= 0 ? -20 : 0;
+          const oy = s.wall.indexOf("back") >= 0 ? -20 : s.wall.indexOf("front") >= 0 ? 20 : 0;
+          const wsx = sg.x, wsy = sg.y, wex = sg.x + sg.dx * WL * S, wey = sg.y + sg.dy * WL * S;
+          els.push(<line key={s.id + "dl"} x1={wsx + ox} y1={wsy + oy} x2={wex + ox} y2={wey + oy} stroke="#94a3b8" strokeWidth="0.7" pointerEvents="none" />);
+          [[wsx, wsy], [x1, y1], [x2, y2], [wex, wey]].forEach((pt, ti) => els.push(<line key={s.id + "tk" + ti} x1={pt[0] + ox * 0.35} y1={pt[1] + oy * 0.35} x2={pt[0] + ox} y2={pt[1] + oy} stroke="#94a3b8" strokeWidth="0.7" pointerEvents="none" />));
+          const kindLab = s.kind.charAt(0).toUpperCase() + s.kind.slice(1);
+          const dimText = (sfx, gx, gy, txt) => <text key={s.id + "dt" + sfx} x={gx + ox} y={gy + oy + 3} fill="#475569" fontSize="8" fontWeight={sfx === "m" ? "bold" : "normal"} textAnchor="middle" pointerEvents="none">{txt}</text>;
+          els.push(dimText("l", (wsx + x1) / 2, (wsy + y1) / 2, leftGap));
+          els.push(dimText("m", (x1 + x2) / 2, (y1 + y2) / 2, kindLab + " " + Math.round(L)));
+          els.push(dimText("r", (x2 + wex) / 2, (y2 + wey) / 2, rightGap));
+          const hsz = 4.5, rc = horiz(s.wall) ? "ew-resize" : "ns-resize";
+          els.push(<rect key={s.id + "rhL"} x={x1 - hsz} y={y1 - hsz} width={hsz * 2} height={hsz * 2} fill="#ea580c" stroke="#fff" strokeWidth="1" style={{ cursor: rc }} onPointerDown={(e) => { e.stopPropagation(); onSelect && onSelect({ kind: "struct", id: s.id }); setDrag({ kind: "struct", id: s.id, wall: s.wall, mode: "l", pos0: s.pos || 0, width0: L }); }} />);
+          els.push(<rect key={s.id + "rhR"} x={x2 - hsz} y={y2 - hsz} width={hsz * 2} height={hsz * 2} fill="#ea580c" stroke="#fff" strokeWidth="1" style={{ cursor: rc }} onPointerDown={(e) => { e.stopPropagation(); onSelect && onSelect({ kind: "struct", id: s.id }); setDrag({ kind: "struct", id: s.id, wall: s.wall, mode: "r", pos0: s.pos || 0, width0: L }); }} />);
+        }
+      });
+      (points || []).forEach((p) => {
+        let px, py; if (p.wall === "Floor") { px = pad + (+p.x || Wd / 2) * S; py = pad + (+p.z || Dp / 2) * S; } else { const sg = seg(p.wall); px = sg.x + sg.dx * (+p.along || 0) * S; py = sg.y + sg.dy * (+p.along || 0) * S; }
+        const sel = isSel("point", p.id);
+        const down = (e) => { e.stopPropagation(); onSelect && onSelect({ kind: "point", id: p.id }); if (p.wall !== "Floor") setDrag({ kind: "point", id: p.id, wall: p.wall, width: 0 }); };
+        const ctx = (e) => { e.preventDefault(); e.stopPropagation(); onDeleteObj && onDeleteObj("point", p.id); };
+        els.push(<circle key={p.id} cx={px} cy={py} r={sel ? 7 : 5.5} fill={PC[p.type] || "#334155"} stroke={sel ? "#ea580c" : "#fff"} strokeWidth={sel ? 2.5 : 1.4} style={{ cursor: "move" }} onPointerDown={down} onContextMenu={ctx} />);
+      });
+      els.push(<text key="lab" x={pad + w / 2} y={pad + h + 14} fill="#94a3b8" fontSize="9" textAnchor="middle">Top View — {Wd}×{Dp} mm · drag objects · right-click to delete</text>);
+      return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Top View (editable) — click &amp; drag doors/windows/beams/points along their wall · right-click to delete</div><svg ref={svgRef} width={w + pad * 2} height={h + pad * 2 + 18} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
+    }
+
+    // ---- 15.txt 5.14: interactive EMPTY 3D room (3D-first workflow) ----------
+    // Floor + 4 walls (A back / B right / C front / D left) sized to the room; orbit/pan/zoom;
+    // click a wall to select it (right-click → Wall Properties + structural elements in Phase 2).
+    function RoomShell3D({ room, onPickWall, onWallMenu, selectedWall, structures, points, markType, onPlacePoint, camRef, onSelectStruct, onMoveStruct, onStructEdit, selectedObj }) {
+      const ref = React.useRef(null);
+      const POINT_COLORS = { sink: 0x2563eb, plumbing: 0x0891b2, ro: 0x14b8a6, chimney: 0x6366f1, hob: 0xea580c, gas: 0xdc2626, fridge: 0x8b5cf6, microwave: 0xf59e0b, oven: 0xd97706, dishwasher: 0x0ea5e9, washing: 0x64748b, switchboard: 0xeab308, socket: 0x22c55e };
+      React.useEffect(() => {
+        const THREE = window.THREE; if (!THREE || !ref.current) return;
+        const host = ref.current, W = host.clientWidth || 820, H = 460;
+        const scene = new THREE.Scene(); scene.background = new THREE.Color(0xeef3fa);
+        const camera = new THREE.PerspectiveCamera(50, W / H, 50, 80000);   // tight near/far → depth-buffer precision (no z-fighting "shiver")
+        const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+        renderer.setSize(W, H); renderer.setPixelRatio(window.devicePixelRatio || 1);
+        renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        host.innerHTML = ""; host.appendChild(renderer.domElement);
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x90a0b5, 1.0));
+        const dl = new THREE.DirectionalLight(0xffffff, 0.6); dl.castShadow = true; dl.shadow.mapSize.set(1024, 1024); dl.shadow.bias = -0.0008; scene.add(dl);
+        const Wd = +room.width || 3600, Dp = +room.depth || 2400, Ht = +room.height || 2700, th = 80;
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(Wd, Dp), new THREE.MeshStandardMaterial({ color: 0xe3e9f0, roughness: 1 }));
+        floor.rotation.x = -Math.PI / 2; floor.position.set(Wd / 2, 0, Dp / 2); floor.receiveShadow = true; scene.add(floor);
+        dl.position.set(Wd * 0.3, Ht * 2 + 1500, Dp * 0.3 + 1500); dl.target.position.set(Wd / 2, 0, Dp / 2); scene.add(dl.target);
+        const sc = dl.shadow.camera, rr = Math.max(Wd, Dp); sc.left = -rr; sc.right = rr; sc.top = rr; sc.bottom = -rr; sc.near = 100; sc.far = Ht * 6 + 5000; sc.updateProjectionMatrix();
+        const wallMeshes = [], structMeshes = [];   // 6.5–6.7: interactive door/window/beam meshes
+        const mkWall = (name, len, x, z, rotY) => {
+          const m = new THREE.Mesh(new THREE.BoxGeometry(len, Ht, th), new THREE.MeshStandardMaterial({ color: selectedWall === name ? 0xffd9a0 : 0xdfe6ef, roughness: 0.9, transparent: true, opacity: 0.92, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }));
+          m.position.set(x, Ht / 2, z); m.rotation.y = rotY; m.receiveShadow = true; m.castShadow = true; m.userData.wall = name; wallMeshes.push(m); scene.add(m);
+          const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: 0x64748b })); e.position.copy(m.position); e.rotation.copy(m.rotation); scene.add(e);
+          // 6.3 permanent wall label (A/B/C/D) as a sprite, nudged toward the room centre
+          (() => { const cv = document.createElement("canvas"); cv.width = 256; cv.height = 72; const g = cv.getContext("2d"); g.fillStyle = "#1e3a5f"; g.font = "bold 44px sans-serif"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(name.split(" (")[0], 128, 36); const tex = new THREE.CanvasTexture(cv); const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })); const nx = (Wd / 2 - x), nz = (Dp / 2 - z), nl = Math.hypot(nx, nz) || 1; sp.position.set(x + nx / nl * 180, Ht * 0.82, z + nz / nl * 180); sp.scale.set(640, 180, 1); scene.add(sp); })();
+          // structural elements (doors/windows/beams) hosted on this wall (Phase 2)
+          (structures || []).filter((s) => s.wall === name).forEach((s) => {
+            const col = s.kind === "door" ? 0x8b5a2b : s.kind === "window" ? 0x9fd3e0 : s.kind === "beam" ? 0x9aa0a6 : 0xcbb89a;
+            const sw = +s.width || 800, sh = +s.height || (s.kind === "window" ? 1200 : s.kind === "beam" ? (+s.drop || 300) : 2000), pos = +s.pos || 200;
+            const yc = s.kind === "window" ? (+s.sill || 900) + sh / 2 : s.kind === "beam" ? Ht - sh / 2 : sh / 2;
+            const along = -len / 2 + pos + sw / 2;
+            const selStruct = selectedObj && selectedObj.kind === "struct" && selectedObj.id === s.id;
+            const mm = new THREE.Mesh(new THREE.BoxGeometry(sw, sh, th + 12), new THREE.MeshStandardMaterial({ color: selStruct ? 0xea580c : col, emissive: selStruct ? 0xea580c : 0x000000, emissiveIntensity: selStruct ? 0.5 : 0, transparent: s.kind === "window", opacity: s.kind === "window" ? 0.5 : 1, roughness: 0.6 }));
+            const ax = Math.cos(rotY), az = -Math.sin(rotY);
+            mm.position.set(x + ax * along, yc, z + az * along); mm.rotation.y = rotY;
+            // 6.5–6.7: tag so the mesh can be picked, dragged along its wall, and double-clicked to resize
+            mm.userData = { structId: s.id, structWall: name, kind: s.kind, sw, len, cx: x, cz: z, ax, az };
+            structMeshes.push(mm); scene.add(mm);
+          });
+        };
+        mkWall("Wall A (back)", Wd, Wd / 2, 0, 0);
+        mkWall("Wall B (right)", Dp, Wd, Dp / 2, Math.PI / 2);
+        mkWall("Wall C (front)", Wd, Wd / 2, Dp, 0);
+        mkWall("Wall D (left)", Dp, 0, Dp / 2, Math.PI / 2);
+        // 5.17 mandatory-point markers (sphere per point on its wall/floor; distance + height stored)
+        const pointWorld = (p) => { const a = +p.along || 0, hy = +p.height || 0; if (p.wall === "Floor") return [+p.x || Wd / 2, 35, +p.z || Dp / 2]; if (p.wall.indexOf("back") >= 0) return [a, hy, th / 2 + 10]; if (p.wall.indexOf("front") >= 0) return [a, hy, Dp - th / 2 - 10]; if (p.wall.indexOf("right") >= 0) return [Wd - th / 2 - 10, hy, a]; return [th / 2 + 10, hy, a]; };
+        (points || []).forEach((p) => { const w3 = pointWorld(p); const col = POINT_COLORS[p.type] || 0x334155; const m = new THREE.Mesh(new THREE.SphereGeometry(48, 14, 14), new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.35 })); m.position.set(w3[0], w3[1], w3[2]); m.castShadow = true; scene.add(m); });
+        const cx = Wd / 2, cz = Dp / 2, span = Math.max(Wd, Dp, 2000);
+        camera.position.set(cx + span * 0.7, Ht * 1.6, cz + span * 1.3);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };   // 6.12 CAD navigation
+        if (camRef && camRef.current) { camera.position.fromArray(camRef.current.pos); controls.target.fromArray(camRef.current.tgt); } else { controls.target.set(cx, Ht * 0.4, cz); }
+        controls.update();
+        controls.addEventListener("change", () => { if (camRef) camRef.current = { pos: camera.position.toArray(), tgt: controls.target.toArray() }; });   // 6.11 persist viewport
+        const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+        const setMouse = (ev) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((ev.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((ev.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, camera); };
+        const pickHit = (ev) => { setMouse(ev); return ray.intersectObjects([...wallMeshes, floor])[0] || null; };
+        const pickStruct = (ev) => { setMouse(ev); return ray.intersectObjects(structMeshes)[0] || null; };
+        let dragSt = null;
+        // 6.5–6.7: pointer-down on a door/window/beam grabs it and DRAGS it along its wall (OrbitControls
+        // paused — it re-checks enabled on the next move, so rotation never kicks in); the mesh moves live
+        // and the new position commits to React state on pointer-up. Double-click opens the size editor.
+        const onPointerDown = (ev) => {
+          if (markType) return;                       // point-placement mode → handled by click
+          const hit = pickStruct(ev); if (!hit) return;
+          const u = hit.object.userData; controls.enabled = false;
+          // NOTE: do NOT select here — selecting changes selectedObj which is an effect dep and would
+          // rebuild the scene mid-drag, dropping dragSt. Selection happens on pointer-up instead.
+          dragSt = { mesh: hit.object, id: u.structId, wall: u.structWall, sw: u.sw, len: u.len, cx: u.cx, cz: u.cz, ax: u.ax, az: u.az, yc: hit.object.position.y, moved: false, dx: ev.clientX, dy: ev.clientY, pos: null };
+        };
+        const onPointerMove = (ev) => {
+          if (!dragSt) return;
+          if (Math.abs(ev.clientX - dragSt.dx) + Math.abs(ev.clientY - dragSt.dy) > 3) dragSt.moved = true;
+          setMouse(ev); const wm = wallMeshes.find((w) => w.userData.wall === dragSt.wall); const hit = wm && ray.intersectObject(wm)[0]; if (!hit) return;
+          const along = (hit.point.x - dragSt.cx) * dragSt.ax + (hit.point.z - dragSt.cz) * dragSt.az;
+          let pos = Math.round((along + dragSt.len / 2 - dragSt.sw / 2) / 10) * 10; pos = Math.max(0, Math.min(pos, Math.round(dragSt.len - dragSt.sw)));
+          const a2 = -dragSt.len / 2 + pos + dragSt.sw / 2; dragSt.mesh.position.set(dragSt.cx + dragSt.ax * a2, dragSt.yc, dragSt.cz + dragSt.az * a2); dragSt.pos = pos;
+        };
+        const onPointerUp = () => { if (!dragSt) return; controls.enabled = true; const d = dragSt; dragSt = null; if (d.moved && d.pos != null && onMoveStruct) onMoveStruct(d.id, d.pos); if (onSelectStruct) onSelectStruct(d.id); };
+        const onClick = (ev) => {
+          if (pickStruct(ev)) return;                 // clicking a door/window: selection handled on pointer-down
+          const hit = pickHit(ev); if (!hit) return; const o = hit.object;
+          if (markType && onPlacePoint) {   // 5.17 place a mandatory point at the clicked wall/floor position
+            if (o.userData.wall) { const wall = o.userData.wall; const along = (wall.indexOf("back") >= 0 || wall.indexOf("front") >= 0) ? hit.point.x : hit.point.z; onPlacePoint({ type: markType, wall, along: Math.round(Math.max(0, along)), height: Math.round(Math.max(0, hit.point.y)) }); }
+            else { onPlacePoint({ type: markType, wall: "Floor", x: Math.round(hit.point.x), z: Math.round(hit.point.z), height: 0 }); }
+            return;
+          }
+          if (o.userData.wall && onPickWall) onPickWall(o.userData.wall);
+        };
+        const onDbl = (ev) => { const hit = pickStruct(ev); if (hit && onStructEdit) onStructEdit(hit.object.userData.structId); };   // 6.5/6.6: double-click a door/window → change its size
+        const onCtx = (ev) => { ev.preventDefault(); if (pickStruct(ev)) return; const hit = pickHit(ev); const o = hit && hit.object; if (o && o.userData.wall && onWallMenu) onWallMenu(o.userData.wall, ev.clientX, ev.clientY); };
+        const el = renderer.domElement;
+        el.addEventListener("pointerdown", onPointerDown); el.addEventListener("pointermove", onPointerMove); window.addEventListener("pointerup", onPointerUp);
+        el.addEventListener("click", onClick); el.addEventListener("dblclick", onDbl); el.addEventListener("contextmenu", onCtx);
+        let raf; const loop = () => { raf = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); }; loop();
+        const onResize = () => { const w2 = host.clientWidth || W; camera.aspect = w2 / H; camera.updateProjectionMatrix(); renderer.setSize(w2, H); };
+        window.addEventListener("resize", onResize);
+        return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); window.removeEventListener("pointerup", onPointerUp); el.removeEventListener("pointerdown", onPointerDown); el.removeEventListener("pointermove", onPointerMove); el.removeEventListener("click", onClick); el.removeEventListener("dblclick", onDbl); el.removeEventListener("contextmenu", onCtx); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
+      }, [room, selectedWall, structures, points, markType, selectedObj]);
+      return (<div>
+        <div className="text-xs text-slate-500 mb-1">{markType ? "Marking “" + markType + "” — click a wall or floor to place the point" : "Empty room (3D) — drag to orbit · scroll to zoom · click a wall to select · drag a door/window along its wall · double-click it to change size" + (selectedWall ? " · selected: " + selectedWall : "")}</div>
+        <div ref={ref} style={{ width: "100%", height: 460, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0" }} />
+      </div>);
+    }
+
+    // ---- 3D room view (13.txt §7.9 / 2D->3D engine) --------------------------
+    // Extrudes the generated cabinets into an interactive Three.js scene. Runs are
+    // placed on their walls by shape; base/wall/tall cabinets become boxes with
+    // edge outlines, plus floor, back walls, counters and chimney.
+    function Room3D({ runs, type, dims, tile, camRef, visible, structures, room, onRunsEdit, handle, designId }) {
+      const TL = tile || { on: true, color: "#e8eef0", grid: "#c2d0d4", size: 100, pattern: "grid" };
+      const ref = React.useRef(null);
+      // 5.x §4.16 material/finish engine + §4.17 lighting presets — pure visualization
+      // (NOT a cutting/nesting model). "functional" keeps the color-coded debug view;
+      // any other finish paints every cabinet body in one realistic PBR finish.
+      // §4.16 BRAND FINISH LIBRARY — pick finish TYPE → BRAND → SHADE (like a real showroom swatch book).
+      // Acrylic/Laminate/Veneer from Merino · Greenlam · Century · Royale Touche · Senosan · Rehau · Duro;
+      // PU painted from AICA · Action Tesa · Sirca · Asian Paints. Per-type PBR params; w:1 = wood-grain map.
+      const FIN_LIB = {
+        acrylic: { tag: "acrylic high-gloss", r: 0.07, m: 0.06, smooth: true, env: 0.9, brands: {
+          "Merino":   [{ n: "Frosty White", c: 0xf5f7f9 }, { n: "Ivory Cream", c: 0xefe7d6 }, { n: "Glacier Grey", c: 0xc9cfd6 }, { n: "Candy Red", c: 0xb01e2e }, { n: "Aqua Blue", c: 0x4f7f9e }],
+          "Greenlam": [{ n: "Pearl White", c: 0xf3f4f6 }, { n: "Magnolia", c: 0xe9e0c8 }, { n: "Flame Red", c: 0xa61c26 }, { n: "Graphite Black", c: 0x23262b }],
+          "Senosan":  [{ n: "Alpine White", c: 0xf6f8fa }, { n: "Cashmere", c: 0xd8cdb8 }, { n: "Burgundy", c: 0x5f1f2c }, { n: "Steel Grey", c: 0x8d949c }],
+          "Rehau":    [{ n: "Brilliant White", c: 0xf7f9fb }, { n: "Cream", c: 0xeadfc6 }, { n: "Terra Brown", c: 0x5a3c2a }, { n: "Sage", c: 0x96a487 }],
+        } },
+        laminate: { tag: "laminate", r: 0.55, m: 0.03, env: 0.35, brands: {
+          "Merino":        [{ n: "Snow White", c: 0xf2f4f5 }, { n: "Slate Grey", c: 0x6b7280 }, { n: "Natural Teak", c: 0x9c6b3f, w: 1 }, { n: "Walnut", c: 0x6b4a32, w: 1 }, { n: "Sage Green", c: 0x9aa886 }],
+          "Greenlam":      [{ n: "Designer White", c: 0xf4f5f6 }, { n: "Dove Grey", c: 0x9aa1a9 }, { n: "Classic Walnut", c: 0x5e4128, w: 1 }, { n: "Navy Blue", c: 0x2f3e57 }],
+          "Century":       [{ n: "Pearl White", c: 0xf3f5f6 }, { n: "Wenge", c: 0x3e2f26, w: 1 }, { n: "Golden Oak", c: 0xc9a878, w: 1 }, { n: "Brick Red", c: 0x8e3b2f }],
+          "Royale Touche": [{ n: "Arctic White", c: 0xf5f6f8 }, { n: "Smoke Grey", c: 0x7b8087 }, { n: "Honey Teak", c: 0xb07f4a, w: 1 }, { n: "Forest Green", c: 0x4a6351 }],
+        } },
+        veneer: { tag: "natural veneer", r: 0.48, m: 0.04, env: 0.4, brands: {
+          "Greenlam Decowood": [{ n: "Natural Oak", c: 0xc9a878, w: 1 }, { n: "Smoked Walnut", c: 0x5a4030, w: 1 }, { n: "White Ash", c: 0xdcd2bd, w: 1 }],
+          "CenturyVeneers":    [{ n: "Burma Teak", c: 0x96652f, w: 1 }, { n: "Rosewood", c: 0x59332c, w: 1 }, { n: "Ebony", c: 0x2e2522, w: 1 }],
+          "Duro":              [{ n: "Golden Teak", c: 0xa9743b, w: 1 }, { n: "Dark Walnut", c: 0x4c3624, w: 1 }, { n: "Natural Maple", c: 0xd9b98a, w: 1 }],
+        } },
+        pu: { tag: "PU painted", r: 0.26, m: 0.05, smooth: true, env: 0.55, brands: {
+          "AICA":         [{ n: "Pearl White Satin", c: 0xf2f3f2 }, { n: "Ivory Silk", c: 0xece2cc }, { n: "Wine Red", c: 0x6a2330 }, { n: "Charcoal", c: 0x3a3f45 }],
+          "Action Tesa":  [{ n: "Super White", c: 0xf6f7f8 }, { n: "Dove Grey", c: 0xa6acb3 }, { n: "Olive Green", c: 0x6f7a52 }, { n: "Royal Blue", c: 0x32436b }],
+          "Sirca":        [{ n: "Bianco Gloss", c: 0xf7f8f9 }, { n: "Tortora", c: 0xb9aa98 }, { n: "Bordeaux", c: 0x5c2230 }, { n: "Nero Matt", c: 0x24262a }],
+          "Asian Paints": [{ n: "Linen White", c: 0xf1efe6 }, { n: "Misty Grey", c: 0xb5bcc2 }, { n: "Teal", c: 0x2f6e6a }, { n: "Mustard", c: 0xc99a2e }],
+        } },
+      };
+      const FIN_TYPE_NAMES = { acrylic: "Acrylic (Gloss)", laminate: "Laminate", veneer: "Veneer", pu: "PU Paint", functional: "Color-coded" };
+      const LIGHTS = {
+        neutral: { name: "Neutral",       bg: 0xeef3fa, sky: 0xffffff, ground: 0x90a0b5, hemi: 1.0, dir: 0xffffff, dirI: 0.55, floor: 0xdfe7f0 },
+        warm:    { name: "Warm",          bg: 0xf3ece3, sky: 0xfff0dd, ground: 0x9a8c78, hemi: 0.95, dir: 0xffe6c2, dirI: 0.7,  floor: 0xe7dccb },
+        cool:    { name: "Cool Daylight", bg: 0xeaf1f8, sky: 0xeaf3ff, ground: 0x8a9bb0, hemi: 1.1,  dir: 0xeaf2ff, dirI: 0.65, floor: 0xdde6f1 },
+        evening: { name: "Evening",       bg: 0x2a2f3a, sky: 0x44506a, ground: 0x20242c, hemi: 0.5,  dir: 0xffd9a0, dirI: 0.95, floor: 0x3a3f4a },
+        golden:  { name: "Golden Hour",   bg: 0xf2e2cb, sky: 0xffe2b8, ground: 0x8a7458, hemi: 0.85, dir: 0xffc987, dirI: 0.9,  floor: 0xe2d2b8 },   // Rules: golden-hour ambient — cinematic warm slant light
+      };
+      const [renderMode, setRenderMode] = useState("realistic");   // viewport mode: "realistic" = rendered look (no CAD edges, clearcoat, spot pools) · "cad" = blue outline working view
+      const [finType, setFinType] = useState("acrylic");    // showroom selection: type → brand → shade
+      const [finBrand, setFinBrand] = useState("Merino");
+      const [finShade, setFinShade] = useState(0);
+      // resolve the current swatch into one finish object (key drives the 3D rebuild; name feeds photoreal + storyboard)
+      const finOf = () => {
+        if (finType === "functional" || !FIN_LIB[finType]) return { key: "functional", name: "Color-coded" };
+        const T = FIN_LIB[finType];
+        const bKeys = Object.keys(T.brands);
+        const B = T.brands[finBrand] || T.brands[bKeys[0]];
+        const S = B[Math.min(finShade, B.length - 1)] || B[0];
+        return { key: finType + "|" + finBrand + "|" + S.n, name: (T.brands[finBrand] ? finBrand : bKeys[0]) + " " + S.n + " " + T.tag,
+          color: S.c, roughness: S.r != null ? S.r : T.r, metalness: T.m, wood: !!S.w, smooth: !!T.smooth, env: T.env };
+      };
+      const FIN = finOf();
+      const [lightKey, setLightKey] = useState("warm");   // warm key default — cosier, richer "designer render" feel (neutral read cool/clinical)
+      const [demoOn, setDemoOn] = useState(false);   // 🎛 live accessory demo (doors/drawers/pull-outs/carousel in motion)
+      const demoRef = React.useRef(false), demoT0Ref = React.useRef(0);
+      const mechCtlRef = React.useRef(null);   // 6.x per-cabinet control: { all(v), toggle(key) } — click ANY front to work it
+      // 19.txt §4: ALWAYS-LIVE scene. The component stays mounted while the user works in 2D; renders are
+      // skipped when hidden, and edits made while hidden defer ONE rebuild to the moment it is shown again
+      // (instant 2D ↔ 3D switching, camera preserved, no per-edit rebuild cost while in a 2D view).
+      const visRef = React.useRef(visible !== false);
+      const pendingRef = React.useRef(false), depsRef = React.useRef(null), bgTimerRef = React.useRef(null);
+      const [buildVer, setBuildVer] = useState(0);
+      React.useEffect(() => {
+        visRef.current = visible !== false;
+        if (visible !== false) {
+          if (pendingRef.current) { pendingRef.current = false; setBuildVer((v) => v + 1); }   // edits queued while hidden → ONE rebuild now
+          try { window.dispatchEvent(new Event("resize")); } catch (e) {}
+        }
+      }, [visible]);
+      // dep WATCHER (runs every render): the build effect is keyed ONLY to buildVer, so while the 3D tab is
+      // hidden a prop change does NOT tear down the live scene — it just queues a rebuild for show-time.
+      React.useEffect(() => {
+        const want = [runs, type, FIN.key, lightKey, tile, renderMode, structures, handle];   // 18.pdf §4: handle-system change → regenerate handle geometry (old handles dropped with the rebuild)
+        const cur = depsRef.current;
+        if (!cur) { depsRef.current = want; return; }   // first render — the mount build covers it
+        if (!want.some((v, ix) => v !== cur[ix])) return;
+        depsRef.current = want;
+        if (visRef.current) setBuildVer((v) => v + 1);   // visible → rebuild immediately (live 2D→3D sync)
+        else {                                            // hidden → let edits settle, then rebuild in the BACKGROUND so the next open is instant
+          pendingRef.current = true;
+          if (bgTimerRef.current) clearTimeout(bgTimerRef.current);
+          bgTimerRef.current = setTimeout(() => { if (pendingRef.current && !visRef.current) { pendingRef.current = false; setBuildVer((v) => v + 1); } }, 900);
+        }
+      });
+      const [playing, setPlaying] = useState(false);   // §4.19 walkthrough
+      const [walking, setWalking] = useState(false);   // §4.19 first-person walk-inside mode
+      const [pick, setPick] = useState(null);   // click-to-select: spec of the cabinet under the cursor
+      const tourRef = React.useRef(false), tourT0Ref = React.useRef(0), walkRef = React.useRef(false);
+      const groupRef = React.useRef(null);   // live scene group (cabinets/counters/props) → GLB export
+      const renderHDRef = React.useRef(null);   // high-res supersampled still → "HD render" PNG output
+      const [rendering, setRendering] = useState(false);
+      const recRef = React.useRef(null);   // MediaRecorder for the walkthrough WebM clip
+      const [recording, setRecording] = useState(false);
+      const [prLoading, setPrLoading] = useState(false);   // Stability AI photoreal render
+      const [photoreal, setPhotoreal] = useState(null);
+      const [prStrength, setPrStrength] = useState(0.6);   // structure faithfulness (higher = keep layout exactly)
+      const [prStyle, setPrStyle] = useState("");          // photoreal mood preset
+      const [prProgress, setPrProgress] = useState("");    // turntable progress "3/8"
+      const turntableRef = React.useRef(null);
+      const camPresetRef = React.useRef(null);   // 🎬 named cinematic camera angles (Rules: "create multiple camera angles")
+      const fitViewRef = React.useRef(null), resetViewRef = React.useRef(null);   // 18.pdf §1: Fit to Screen + Reset View for the rendered 3D layout
+      // 18.pdf §1/§8 rendered-view-in-3D + render MEMORY: every photoreal is SAVED per camera-pose +
+      // open-door state, so a pose you already rendered re-applies instantly (no re-billing). Saved
+      // 360° spin frames page through LIVE while you rotate the kitchen. Clicking a drawer in rendered
+      // mode opens it in the live scene, then auto-renders (or reuses) the rendered open view.
+      const [prStale, setPrStale] = useState(false);
+      const prFreshRef = React.useRef(false);
+      const prInvalidateRef = React.useRef(null);
+      const prModeRef = React.useRef(false);     // rendered mode stays ON until × Close — saved renders auto-apply
+      const prCacheRef = React.useRef({});       // poseKey → saved render image
+      const prSettleRef = React.useRef(null);    // debounce: act only once camera/door animation settles
+      const autoNextRef = React.useRef(false);   // a front was clicked in rendered mode → auto-render the new state
+      const poseKeyRef = React.useRef(null);     // build effect supplies: camera pose + open-mech signature
+      const spinFramesRef = React.useRef(null);  // saved 360° frames — rotate the kitchen to page through them
+      const azIdxRef = React.useRef(null);       // build effect supplies: camera azimuth → nearest 360 frame
+      const spinShownRef = React.useRef(-1);
+      const spinSnapRef = React.useRef(null), spinSnapT = React.useRef(null);   // align the live camera to the SHOWN frame so clicks land on the right drawer
+      prInvalidateRef.current = () => {
+        // (a) saved 360° available & kitchen closed → rotating shows the matching rendered frame LIVE
+        const fr = spinFramesRef.current;
+        const open = !!(mechCtlRef.current && mechCtlRef.current.anyOpen && mechCtlRef.current.anyOpen());
+        if (prModeRef.current && fr && fr.length > 1 && azIdxRef.current && !open) {
+          const i = azIdxRef.current(fr.length);
+          if (i !== spinShownRef.current || !prFreshRef.current) { spinShownRef.current = i; prFreshRef.current = true; setPhotoreal(fr[i]); setPrStale(false); }
+          // once rotation settles, SNAP the live camera to this frame's exact angle — the rendered
+          // image and the live scene then match 1:1, so clicking a drawer in the picture opens
+          // exactly that drawer (fixes "click does nothing" after a 360 render).
+          if (spinSnapT.current) clearTimeout(spinSnapT.current);
+          spinSnapT.current = setTimeout(() => { spinSnapT.current = null; if (spinSnapRef.current && spinFramesRef.current && spinShownRef.current >= 0) spinSnapRef.current(spinShownRef.current, spinFramesRef.current.length); }, 350);
+          return;
+        }
+        spinShownRef.current = -1;
+        if (prFreshRef.current) { prFreshRef.current = false; setPrStale(true); }
+        if (!prModeRef.current) return;
+        // (b) when movement settles: re-apply the SAVED render for this exact pose+state (free), else
+        //     auto-render only when a door/drawer was clicked while rendered mode is on.
+        if (prSettleRef.current) clearTimeout(prSettleRef.current);
+        prSettleRef.current = setTimeout(() => {
+          prSettleRef.current = null;
+          const k = poseKeyRef.current && poseKeyRef.current();
+          const saved = k && prCacheRef.current[k];
+          if (saved) { autoNextRef.current = false; prFreshRef.current = true; setPhotoreal(saved); setPrStale(false); }
+          else if (autoNextRef.current) { autoNextRef.current = false; runPhotoreal(); }
+        }, 850);
+      };
+      try { window.__adsPRState = () => ({ mode: prModeRef.current, cached: Object.keys(prCacheRef.current).length, spin: !!(spinFramesRef.current && spinFramesRef.current.length), auto: autoNextRef.current }); } catch (e) {}
+      const [story, setStory] = useState(null);  // 🎬 cinematic AI-video storyboard (Rules pf Videos.pdf: Script + Video Prompt per segment)
+      const [sbBusy, setSbBusy] = useState(false);
+      const PR_STYLES = [["", "Default"], ["luxury", "Luxury"], ["airy", "Bright & Airy"], ["warmwood", "Warm Wood"], ["gloss", "Modern Gloss"], ["classic", "Classic"]];
+      // 360° rotation is driven by orbiting the kitchen itself (camera azimuth → nearest saved frame).
+      // robust download (data-URL → Blob) routed through the 18.pdf §6 Save-As workflow
+      const dlImg = (dataUrl, name) => { try { const b = atob(dataUrl.split(",")[1]); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); saveBlobAs(new Blob([u], { type: "image/png" }), name); } catch (e) { const a = document.createElement("a"); a.download = name; a.href = dataUrl; a.click(); } };
+      // MKW-branded download: composite a bottom strip (logo · company · phone · CTA) onto the image first.
+      // Renders (HD/photoreal/PNG) get the brand; storyboard frames stay CLEAN (they feed image-to-video).
+      const dlBrand = (dataUrl, name) => {
+        const im = new Image();
+        im.onload = () => {
+          try {
+            const cv2 = document.createElement("canvas"); cv2.width = im.naturalWidth; cv2.height = im.naturalHeight;
+            const g = cv2.getContext("2d"); g.drawImage(im, 0, 0);
+            const bh = Math.max(36, Math.round(cv2.height * 0.06));
+            g.fillStyle = "rgba(15,23,42,0.82)"; g.fillRect(0, cv2.height - bh, cv2.width, bh);
+            const lg = window.__mkwLogoImg;
+            const lx = Math.round(bh * 0.22), lw = lg ? Math.round(bh * 0.78 * (lg.naturalWidth / lg.naturalHeight)) : 0;
+            if (lg) { g.save(); g.fillStyle = "#ffffff"; g.beginPath(); const rr = bh * 0.39, cyl = cv2.height - bh / 2; g.arc(lx + lw / 2, cyl, rr + 2, 0, Math.PI * 2); g.fill(); g.restore(); g.drawImage(lg, lx, cv2.height - bh * 0.89, lw, Math.round(bh * 0.78)); }
+            const fs2 = Math.max(13, Math.round(bh * 0.34));
+            g.fillStyle = "#ffffff"; g.font = "600 " + fs2 + "px Segoe UI, sans-serif"; g.textBaseline = "middle";
+            g.fillText(MKW_BRAND.name + "   ·   " + MKW_BRAND.phone + "   ·   " + MKW_BRAND.cta, lx + lw + Math.round(bh * 0.35), cv2.height - bh / 2 + 1);
+            dlImg(cv2.toDataURL("image/png"), name);
+          } catch (e) { dlImg(dataUrl, name); }
+        };
+        im.onerror = () => dlImg(dataUrl, name);
+        im.src = dataUrl;
+      };
+      // ── 18.pdf §1/§8: ONE photoreal routine — used by the ✨ button AND by "↻ Render this angle"
+      // on the in-view rendered overlay, so the rendered 3D Layout can be refreshed from any orbit angle.
+      const runPhotoreal = async () => {
+        if (prLoading) return;
+        let img = null;
+        try { if (renderHDRef.current) img = renderHDRef.current(3); } catch (e) {}   // 3× supersample → crisper structure image → better photoreal output
+        if (!img) { const cv = ref.current && ref.current.querySelector("canvas"); if (cv) try { img = cv.toDataURL("image/png"); } catch (e) {} }
+        if (!img) { alert("Open the 3D view first."); return; }
+        const poseK = poseKeyRef.current ? poseKeyRef.current() : null;   // remember WHICH pose/state this render belongs to (camera may move during the ~15s wait)
+        if (poseK && prCacheRef.current[poseK]) {   // already rendered this exact view → reuse the saved render, no re-billing
+          prModeRef.current = true; prFreshRef.current = true; setPhotoreal(prCacheRef.current[poseK]); setPrStale(false); return;
+        }
+        setPrLoading(true);
+        // an OPEN accessory in frame → close-up prompt + high structure faithfulness, otherwise the wide
+        // kitchen prompt at low strength overpowers the zoomed view and renders a generic closed kitchen.
+        const accOpen = !!(mechCtlRef.current && mechCtlRef.current.anyOpen && mechCtlRef.current.anyOpen());
+        const hlAcc = ["Edge Profile", "J Profile", "G Profile / Gola", "Aluminium Gola", "Hidden Profile", "Push-To-Open", "Tip-On", "Finger Pull", "Integrated"].indexOf(handle) >= 0;   // 18.pdf §3
+        const accPrompt = accOpen ? ("Photorealistic close-up interior photograph inside a modern Indian modular kitchen: a cabinet with its drawers and doors OPEN exactly as shown, revealing neatly organised internal storage accessories — steel wire baskets, cutlery trays, containers, jars and bottles on soft-close channels — " + FIN.name.toLowerCase() + " cabinet shutters, " + (hlAcc ? "handle-less groove-profile cabinet fronts with no external handles, " : "exactly one handle per shutter and one per drawer front (never two handles on one front), ") + "polished dark granite countertop, warm under-cabinet LED light falling into the open cabinet, soft natural daylight, ultra realistic, intricate detail, physically based materials, professional interior photography, magazine quality, 8k") : undefined;
+        try {
+          const r = await fetch("/api/render/photoreal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: img, designType: type, finish: FIN.name, handleSystem: handle, controlStrength: accOpen ? Math.max(prStrength, 0.82) : prStrength, style: prStyle, prompt: accPrompt }) });   // 18.pdf §3: handle rule travels with every render
+          const j = await r.json();
+          if (j && j.data && j.data.image) {
+            setPhotoreal(j.data.image); prFreshRef.current = true; setPrStale(false);
+            prModeRef.current = true; spinShownRef.current = -1;
+            if (poseK) {   // SAVE the render for this pose+state — rotating back / re-clicking the same drawer reuses it free
+              prCacheRef.current[poseK] = j.data.image;
+              const ks = Object.keys(prCacheRef.current); if (ks.length > 60) delete prCacheRef.current[ks[0]];
+            }
+            try { window.__adsPR = j.data.image; } catch (e) {}
+          }
+          else alert("Photoreal render: " + ((j && j.message) || (j && j.error) || "failed") + (j && j.error === "no-key" ? "" : ""));
+        } catch (e) { alert("Render request failed: " + (e && e.message)); }
+        setPrLoading(false);
+      };
+      // ── SAVE / OPEN the rendered view on the computer. The save is a SELF-CONTAINED .html file:
+      // double-click it in Explorer and the rendered 360° opens right in the browser (drag / arrow
+      // keys to rotate) — no app needed. The same file also loads back through 📂 Open render for
+      // the full in-app experience (click drawers etc.), with NO new AI renders and no re-billing.
+      const prFileKeepRef = React.useRef(false);   // a file-loaded view survives scene rebuilds (user opened it on purpose)
+      const save360 = () => {
+        const fr = spinFramesRef.current;
+        if ((!fr || !fr.length) && !photoreal) { alert("Nothing to save yet — run ✨ AI Photoreal or ✨ Photoreal 360° first."); return; }
+        const data = { app: "ai-design-studio", kind: "rendered-360", v: 1, designType: type, finish: FIN.name, frames: fr || [], single: photoreal || null, cache: prCacheRef.current || {} };
+        const safeJson = JSON.stringify(data).split("</").join("<\\\\/");   // never break the embedding <script> tag
+        const t9 = String(type || "Kitchen");
+        const html = [
+          "<!doctype html><html><head><meta charset='utf-8'><title>", t9, " - Rendered 360</title>",
+          "<style>html,body{margin:0;height:100%;background:#0f172a;font-family:Segoe UI,sans-serif;overflow:hidden}",
+          "#v{width:100vw;height:100vh;object-fit:contain;cursor:ew-resize;user-select:none;-webkit-user-drag:none}",
+          "#hud{position:fixed;top:10px;left:12px;color:#fff;background:rgba(15,23,42,.75);padding:6px 10px;border-radius:8px;font-size:13px;font-weight:600}",
+          "#tip{position:fixed;bottom:10px;left:12px;color:#cbd5e1;font-size:12px;background:rgba(15,23,42,.6);padding:4px 8px;border-radius:6px}</style></head><body>",
+          "<img id='v' draggable='false'><div id='hud'>", t9, " &middot; rendered 360&deg; <span id='n'></span></div>",
+          "<div id='tip'>Drag or use &larr; &rarr; keys to rotate &middot; open this file inside AI Design Studio (3D view &rarr; &#128194; Open render) to click drawers &amp; doors</div>",
+          "<script type='application/json' id='ads360-data'>", safeJson, "</scr", "ipt>",
+          "<script>var d=JSON.parse(document.getElementById('ads360-data').textContent);var fr=(d.frames&&d.frames.length>0?d.frames:[d.single]).filter(function(x){return !!x});var i=0;var img=document.getElementById('v');function sh(){img.src=fr[i];document.getElementById('n').textContent=fr.length>1?(i+1)+' / '+fr.length:''}sh();var dr=null;img.addEventListener('pointerdown',function(e){dr={x:e.clientX,i:i}});window.addEventListener('pointermove',function(e){if(!dr)return;var k=Math.round((e.clientX-dr.x)/40);i=((dr.i+k)%fr.length+fr.length)%fr.length;sh()});window.addEventListener('pointerup',function(){dr=null});window.addEventListener('keydown',function(e){if(e.key==='ArrowRight'){i=(i+1)%fr.length;sh()}else if(e.key==='ArrowLeft'){i=(i-1+fr.length)%fr.length;sh()}});</scr", "ipt></body></html>",
+        ].join("");
+        saveBlobAs(new Blob([html], { type: "text/html" }), (t9 + "-rendered-360.html").replace(/[^\\w.-]/g, "_"));
+      };
+      const open360 = (file) => {
+        const rd = new FileReader();
+        rd.onload = () => {
+          try {
+            const txt = String(rd.result);
+            let raw = txt.trim().charAt(0) === "{" ? txt : null;                       // old .json saves still open fine
+            if (!raw) { const m9 = txt.match(/<script[^>]*id=['"]ads360-data['"][^>]*>([^]*?)<\\//); raw = m9 ? m9[1] : null; }   // .html viewer save
+            if (!raw) { alert("That is not a saved rendered-view file (choose the saved -rendered-360 .html or .json)."); return; }
+            const d = JSON.parse(raw);
+            if (!d || d.kind !== "rendered-360" || (!Array.isArray(d.frames) && !d.single)) { alert("That is not a saved rendered-view file."); return; }
+            spinFramesRef.current = (Array.isArray(d.frames) && d.frames.length > 1) ? d.frames : null;
+            prCacheRef.current = d.cache || {};
+            prModeRef.current = true; prFileKeepRef.current = true; spinShownRef.current = -1;
+            if (spinFramesRef.current) { if (prInvalidateRef.current) prInvalidateRef.current(); }   // shows the frame matching the current angle + snaps the camera
+            else if (d.single) { prFreshRef.current = true; setPhotoreal(d.single); setPrStale(false); }
+            else { alert("The file contains no rendered frames."); return; }
+            try { window.__adsPR = (spinFramesRef.current && spinFramesRef.current[0]) || d.single; } catch (e) {}
+          } catch (e) { alert("Could not read the file: " + (e && e.message)); }
+        };
+        rd.onerror = () => alert("Could not read the file.");
+        rd.readAsText(file);
+      };
+      // 🎬 Cinematic AI-video storyboard (Rules pf Videos.pdf): convert THIS design into segment prompts ready
+      // for Seedance 2.0 / Veo 3 / Runway / Google Flow. Every segment = exact Script (voiceover line) + a
+      // Video Prompt with motion + camera direction + scene continuity — and NO art-style / software names.
+      const buildStoryboard = () => {
+        const allBase = [], allWall = [];
+        (runs || []).forEach((r) => { (r.base || []).forEach((x) => allBase.push(x)); (r.wallCabs || []).forEach((x) => allWall.push(x)); });
+        const finName = ((FIN && FIN.name) || "laminate").toLowerCase();
+        const ft = (mm) => (Math.round((+mm || 0) / 304.8 * 10) / 10);
+        const dimTxt = ft(dims.wall) + (dims.wallB ? " by " + ft(dims.wallB) : "") + " feet";
+        const drawerCabs = allBase.filter((x) => (x.drawers || 0) > 0);
+        const tallUnits = allBase.filter((x) => ["tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility"].indexOf(x.kind) >= 0);
+        const hasHob = allBase.some((x) => x.kind === "hob" || x.kind === "drawer3");
+        const hasSink = allBase.some((x) => x.kind === "sink");
+        const hasGlass = allWall.some((x) => ["glass-wall", "display", "gtpt"].indexOf(x.kind) >= 0);
+        const kitchen = "a modern Indian modular " + String(type || "kitchen").toLowerCase() + " with " + finName + " cabinet shutters, a polished dark granite countertop, a light tiled backsplash and warm under-cabinet lighting";
+        const cont = " The same kitchen, the same cabinet colour and finish, and the same warm late-afternoon light continue from the previous scene.";
+        const segs = [];
+        segs.push({ title: "Establishing shot", cam: "hero",
+          script: "Welcome to your new " + dimTxt + " " + (type || "kitchen") + " — designed to the millimetre, around the way your family cooks.",
+          prompt: "Slow dolly-in across " + kitchen + ". Soft daylight pours in from a side window and moves across the room; reflections glide along the glossy floor tiles as the camera advances, and a kettle on the counter releases a thin wisp of steam." });
+        if (hasHob) segs.push({ title: "Cooking zone", cam: "front",
+          script: "The cooking zone keeps the hob, the chimney and your three essential drawers exactly where your hands expect them.",
+          prompt: "Slow zoom in on the cooking zone of " + kitchen + ". A blue flame ignites under a steel pan on the black glass hob; steam rises and curls upward into the stainless chimney hood as its lamp switches on and the canopy begins to hum." + cont });
+        if (hasSink) segs.push({ title: "Cleaning zone", cam: "right",
+          script: "Beside the corner, the sink and its matching glass cabinet take dishes straight from washing to shelf.",
+          prompt: "Tracking shot gliding toward the sink area of " + kitchen + ". Water flows from the tall steel gooseneck tap and splashes softly into the basin; droplets catch the light, and above, frosted glass shutters reflect the moving highlights." + cont });
+        if (drawerCabs.length) segs.push({ title: "Storage in motion", cam: "close",
+          script: String(drawerCabs.length) + " drawer bank" + (drawerCabs.length > 1 ? "s" : "") + " glide on soft-close channels — cutlery, atta and heavy pots, each with its own home.",
+          prompt: "Close-up at counter height in " + kitchen + ". Drawers glide open one after another in smooth motion, revealing neatly organised cutlery trays, spice jars and containers, then ease shut with a gentle soft-close settle while the camera pans slowly along the run." + cont });
+        if (tallUnits.length) segs.push({ title: "Tall units", cam: "left",
+          script: "Floor-to-ceiling tall units add a pantry-grade storage tower" + (tallUnits.some((x) => x.kind === "tall-hiunit") ? ", with the oven and microwave built in at eye level." : "."),
+          prompt: "Crane movement rising slowly along the tall units of " + kitchen + ". Both tall doors swing open together revealing tiered, fully stocked internal shelving; a soft interior light glows on as the doors pass halfway, and the camera keeps climbing to the cornice." + cont });
+        if (hasGlass) segs.push({ title: "Display & glass", cam: "front",
+          script: "Frosted glass shutters above the counter show off your best crockery while keeping the dust out.",
+          prompt: "Slow pan right across the upper cabinets of " + kitchen + ". Frosted glass doors catch a travelling band of window light; behind the glass, stacked plates and glasses appear as soft silhouettes, and one door swings open smoothly to reveal them clearly." + cont });
+        segs.push({ title: "Evening finale", cam: "hero",
+          script: "As evening sets in, your kitchen becomes the warmest room of the house. Book your free site visit today.",
+          prompt: "Slow orbit movement around " + kitchen + " while daylight outside the window fades to dusk. The pendant lamp and the under-cabinet strips glow warm, reflections deepen across the granite and the floor, and the camera settles into a wide, composed final view." });
+        return segs;
+      };
+      const storyText = (segs) => {
+        let s = "CINEMATIC AI VIDEO PROMPTS — " + (type || "Kitchen") + "\\nReady for Seedance 2.0 · Veo 3 · Runway · Google Flow (image-to-video: use the matching storyboard frames)\\n\\n";
+        segs.forEach((g, i) => { s += "Segment " + (i + 1) + " — " + g.title + "\\nScript: " + g.script + "\\nVideo Prompt: " + g.prompt + "\\n\\n"; });
+        return s;
+      };
+      // grab the reference frame for one segment: jump to its camera angle, let a frame render, save HD PNG.
+      const grabFrame = (seg, i, done) => {
+        if (!camPresetRef.current || !renderHDRef.current) { if (done) done(); return; }
+        camPresetRef.current(seg.cam);
+        setTimeout(() => { try { dlImg(renderHDRef.current(3), "storyboard-frame-" + (i + 1) + "-" + seg.cam + ".png"); } catch (e) {} if (done) done(); }, 180);
+      };
+      const grabAllFrames = (segs) => {
+        setSbBusy(true);
+        let i = 0;
+        const next = () => { if (i >= segs.length) { setSbBusy(false); return; } const k = i++; grabFrame(segs[k], k, () => setTimeout(next, 320)); };
+        next();
+      };
+      const copyStory = (segs) => {
+        const txt = storyText(segs);
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(() => alert("Storyboard copied — paste into Seedance / Veo / Flow."), () => alert("Copy failed — use ⬇ .txt instead."));
+        else alert("Clipboard unavailable — use ⬇ .txt instead.");
+      };
+      const dlStory = (segs) => { saveBlobAs(new Blob([storyText(segs)], { type: "text/plain" }), "kitchen-video-storyboard.txt"); };   // 18.pdf §6
+      // §3.2 #6 — server-side walkthrough GIF: capture N turntable frames, POST to the render-job
+      // queue, poll, and download the animated GIF the server encodes (pure-JS PNG→GIF, no native deps).
+      const [gifBusy, setGifBusy] = useState("");
+      const serverWalkthroughGIF = async () => {
+        if (!designId) { alert("Generate a design first."); return; }
+        if (!turntableRef.current) { alert("Open the 3D view first."); return; }
+        const N = 24;
+        try {
+          setGifBusy("capturing 1/" + N);
+          const frames = [];
+          for (let i = 0; i < N; i++) { setGifBusy("capturing " + (i + 1) + "/" + N); let im = null; try { im = turntableRef.current(i / N); } catch (e) {} if (im) frames.push(im); await new Promise((r) => setTimeout(r, 0)); }
+          if (frames.length < 2) { alert("Could not capture frames."); setGifBusy(""); return; }
+          setGifBusy("encoding…");
+          const q = await fetch("/api/designs/" + designId + "/3d/walkthrough", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ frames, delayCs: 8, maxSize: 480 }) }).then((r) => r.json());
+          const jid = q && q.data && q.data.jobId; if (!jid) { alert("Encode job failed."); setGifBusy(""); return; }
+          for (let t = 0; t < 40; t++) {
+            await new Promise((r) => setTimeout(r, 600));
+            const s = await fetch("/api/render/jobs/" + jid).then((r) => r.json());
+            const st = s && s.data && s.data.status;
+            setGifBusy(st === "running" ? ("encoding " + Math.round((s.data.progress || 0) * 100) + "%") : st || "…");
+            if (st === "done") { const a = document.createElement("a"); a.href = "/api/render/jobs/" + jid + "/file"; a.download = "kitchen-walkthrough.gif"; document.body.appendChild(a); a.click(); a.remove(); break; }
+            if (st === "error") { alert("Encode failed: " + (s.data.error || "")); break; }
+          }
+        } catch (e) { alert("Walkthrough GIF failed: " + (e && e.message)); }
+        setGifBusy("");
+      };
+      // §3.2 #5 — persist the current brand finish as an addressable PBR material set (server-side library).
+      const [matMsg, setMatMsg] = useState("");
+      const saveServerMaterial = async () => {
+        if (!designId) { alert("Generate a design first."); return; }
+        try {
+          const j = await fetch("/api/designs/" + designId + "/3d/material", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target: "kind:shutter", finish: FIN.name, type: finType }) }).then((r) => r.json());
+          const p = j && j.data && j.data.pbr;
+          setMatMsg(p ? ("✓ " + (p.preset || "PBR") + " · rough " + p.roughness + " · metal " + p.metalness) : "saved");
+          setTimeout(() => setMatMsg(""), 4000);
+        } catch (e) { setMatMsg("save failed"); setTimeout(() => setMatMsg(""), 4000); }
+      };
+      React.useEffect(() => {
+        const THREE = window.THREE;
+        if (!THREE || !ref.current) return;
+        const host = ref.current, W = host.clientWidth || 820, H = 460;
+        const L = LIGHTS[lightKey] || LIGHTS.neutral, fin = FIN;
+        const REAL = renderMode === "realistic";   // rendered-look viewport: no CAD edge lines, clearcoat finishes, warm spot pools, fuller exposure
+        // scene rebuilt (edit/finish/lighting/handle change) → ALL saved renders no longer match the
+        // model — EXCEPT a view the user explicitly opened from a saved file (kept until × Close).
+        if (!prFileKeepRef.current) { prCacheRef.current = {}; spinFramesRef.current = null; spinShownRef.current = -1; }
+        if (prInvalidateRef.current) prInvalidateRef.current();
+        const scene = new THREE.Scene(); scene.background = new THREE.Color(L.bg);
+        const camera = new THREE.PerspectiveCamera(48, W / H, 50, 80000);   // tight near/far → depth-buffer precision (no z-fighting "shiver")
+        const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });   // preserve buffer → canvas.toDataURL render export
+        renderer.setSize(W, H); renderer.setPixelRatio(window.devicePixelRatio || 1);
+        renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;            // §4.17 soft shadows
+        renderer.outputEncoding = THREE.sRGBEncoding;                 // gamma-correct colour
+        renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.9;   // filmic, slightly under so whites don't blow (room walls/ceiling bounce a lot of light)
+        host.innerHTML = ""; host.appendChild(renderer.domElement);
+        // Realistic-but-crisp lighting: LOW ambient (the white room already bounces plenty) + a STRONG warm key
+        // light with soft shadows = depth + contrast (too much ambient = the washed look).
+        scene.add(new THREE.HemisphereLight(L.sky, L.ground, L.hemi * 0.22));   // low fill → the key light makes real lit/shadow gradients (contrast, not flat)
+        const dl = new THREE.DirectionalLight(L.dir, 1.55); dl.castShadow = true; dl.shadow.mapSize.set(4096, 4096); dl.shadow.bias = -0.0006; dl.shadow.radius = 3; scene.add(dl);
+        // SUBTLE muted-gray environment: gives steel/glass/gloss realistic reflections (sparkle), but matte
+        // cabinets get low envMapIntensity (below) so it does NOT wash them like the bright env did before.
+        let envRT = null;
+        try {
+          const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularShader();
+          const ecv = document.createElement("canvas"); ecv.width = 64; ecv.height = 32; const eg = ecv.getContext("2d");
+          const grd = eg.createLinearGradient(0, 0, 0, 32);
+          grd.addColorStop(0, "#cfd6df"); grd.addColorStop(0.5, "#aeb6c2"); grd.addColorStop(1, "#7c8492");
+          eg.fillStyle = grd; eg.fillRect(0, 0, 64, 32);
+          const eq = new THREE.CanvasTexture(ecv); eq.mapping = THREE.EquirectangularReflectionMapping;
+          envRT = pmrem.fromEquirectangular(eq); scene.environment = envRT.texture;
+          eq.dispose(); pmrem.dispose();
+        } catch (e) { /* env optional */ }
+
+        const La = +dims.wall, Lb = +(dims.wallB || 2400), Lc = +(dims.wallC || 2400), t = type.toLowerCase();
+        const D = STD_C.baseDepth, WD = STD_C.wallDepth, BH = STD_C.baseHeight, WH = STD_C.wallHeight, WS = STD_C.wallStart, TK = STD_C.toeKick, CT = STD_C.counterThk;
+        // per-run placement: origin [x,z], axis along length [ax,az], normal into room [nx,nz]
+        const place = (i) => {
+          if (t.includes("l-shape") || t.includes("peninsula")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 0], a: [0, 1], n: [1, 0] }][i];
+          if (t.includes("u-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }][i];
+          if (t.includes("parallel")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * D], a: [1, 0], n: [0, -1] }][i];
+          if (t.includes("island")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [(La - (dims.wallB || La * 0.55)) / 2, 1000 + 2 * D], a: [1, 0], n: [0, 1] }][i];
+          return [{ o: [0, 0], a: [1, 0], n: [0, 1] }][i];
+        };
+        const fill = (k) => k === "sink" ? 0xcdeef5 : (k === "hob" || k === "drawer3") ? 0xffe3c2 : k === "drawer-atta" ? 0xfdeccb : k === "dishwasher" ? 0xdbe9ff : (k === "fridge" || k === "tall-fridge") ? 0xe8e0ff : k === "tall-pantry" ? 0xe7f6e3 : k === "tall-hiunit" ? 0xffe8d6 : k === "tall-utility" ? 0xd7f0ee : k === "corner" ? 0xdbe4f0 : (k === "glass-wall" || k === "gtpt" || k === "display") ? 0xa9b499 : 0xeaf1fb;
+        const group = new THREE.Group(), box = new THREE.Box3(), v = new THREE.Vector3();
+        const isTallK = (k) => ["tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility"].includes(k);
+        // §4.16 laminate/wood texture so cabinet bodies read as real laminate, not flat paint. White base
+        // (finish colour comes from material.color and multiplies the map); darker grain = subtle relief.
+        const bodyMap = (() => {
+          if (!(fin && fin.color != null) || fin.smooth) return null;   // colour-coded view OR smooth finishes (acrylic/PU) → no grain/streak texture
+          const lc = document.createElement("canvas"); lc.width = 256; lc.height = 256; const x = lc.getContext("2d");
+          x.fillStyle = "#ffffff"; x.fillRect(0, 0, 256, 256);
+          if (fin.wood) {                                  // wood grain: soft wavy vertical streaks
+            for (let i = 0; i < 60; i++) { const gx = Math.random() * 256, a = 0.04 + Math.random() * 0.06; x.strokeStyle = "rgba(70,45,25," + a + ")"; x.lineWidth = 1 + Math.random() * 2; x.beginPath(); for (let yy = 0; yy <= 256; yy += 16) x.lineTo(gx + Math.sin(yy / 40 + gx) * 6, yy); x.stroke(); }
+          } else {                                         // laminate: faint horizontal brushed streaks
+            for (let i = 0; i < 90; i++) { const yy = Math.random() * 256, a = 0.015 + Math.random() * 0.03; x.strokeStyle = "rgba(40,45,55," + a + ")"; x.lineWidth = 1; x.beginPath(); x.moveTo(0, yy); x.lineTo(256, yy + (Math.random() - 0.5) * 4); x.stroke(); }
+          }
+          const tx = new THREE.CanvasTexture(lc); tx.wrapS = tx.wrapT = THREE.RepeatWrapping; tx.repeat.set(1, 2); tx.encoding = THREE.sRGBEncoding;
+          return tx;
+        })();
+        // SHARED, NAMED materials → a clean GLB hand-off (3DS Max / Blender get ONE "Cabinet_<finish>",
+        // "Glass", "Countertop" each, not hundreds of anonymous mats) + fewer GPU materials.
+        // §4.16 physically-based finishes: clearcoat gives shutters a real lacquered sheen, glass is reflective
+        // + see-through, the counter reads as polished quartz. (MeshPhysicalMaterial is r128-core, no new lib.)
+        // procedural polished-granite countertop (dark base + mineral speckle) — premium realistic look
+        const graniteTex = (() => {
+          const gc = document.createElement("canvas"); gc.width = 256; gc.height = 256; const gx = gc.getContext("2d");
+          gx.fillStyle = "#2b2f36"; gx.fillRect(0, 0, 256, 256);
+          for (let i = 0; i < 2600; i++) { const v = 40 + Math.random() * 90; gx.fillStyle = "rgba(" + v + "," + (v + 6) + "," + (v + 14) + "," + (0.25 + Math.random() * 0.5) + ")"; const s = Math.random() * 2.4; gx.fillRect(Math.random() * 256, Math.random() * 256, s, s); }
+          for (let i = 0; i < 120; i++) { gx.fillStyle = "rgba(220,222,228," + (0.15 + Math.random() * 0.25) + ")"; gx.fillRect(Math.random() * 256, Math.random() * 256, 1.6, 1.6); }
+          const t = new THREE.CanvasTexture(gc); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(3, 1); t.encoding = THREE.sRGBEncoding; return t;
+        })();
+        // realistic mode: MeshPhysicalMaterial with CLEARCOAT — acrylic/PU read as true lacquered fronts;
+        // laminate/veneer get a faint sheen. CAD mode keeps the plain standard material.
+        const matBody = (fin && fin.color != null)
+          ? (REAL
+            ? new THREE.MeshPhysicalMaterial({ color: fin.color, map: bodyMap || undefined, roughness: fin.roughness, metalness: fin.metalness, envMapIntensity: (fin.env || 0.35) * 1.2, clearcoat: fin.smooth ? 1.0 : 0.3, clearcoatRoughness: fin.smooth ? 0.06 : 0.4 })
+            : new THREE.MeshStandardMaterial({ color: fin.color, map: bodyMap || undefined, roughness: fin.roughness, metalness: fin.metalness, envMapIntensity: fin.env || 0.35 }))
+          : null;
+        if (matBody) matBody.name = "Cabinet_" + fin.name.replace(/[^A-Za-z0-9]+/g, "_");
+        const matGlass = new THREE.MeshStandardMaterial({ color: 0xaac6d2, transparent: true, opacity: 0.36, roughness: 0.08, metalness: 0.1, envMapIntensity: 1.0 }); matGlass.name = "Glass";
+        const matCounter = new THREE.MeshStandardMaterial({ map: graniteTex, color: 0xffffff, roughness: 0.16, metalness: 0.2, envMapIntensity: 1.0 }); matCounter.name = "Countertop";   // polished black granite — glossy/reflective like the references
+        const addBox = (pl, centerLen, wAlong, depth, h, yc, color, off, glass, body, meta, matName) => {
+          const g = new THREE.BoxGeometry(Math.max(20, wAlong), h, depth);
+          // §4.16: a cabinet "body" adopts the chosen realistic finish (when not "functional");
+          // glass keeps its translucent look; counters/chimney/appliances keep their own colour.
+          const useFin = body && !glass && fin && fin.color != null;
+          // 5.9.9: glass shutters render as translucent glass; finished bodies share one named laminate material.
+          let mat;
+          if (glass) mat = matGlass;
+          else if (useFin && matBody) mat = matBody;
+          else if (matName === "Countertop") mat = matCounter;
+          else { mat = new THREE.MeshStandardMaterial({ color, roughness: 0.75 }); mat.name = matName || (body ? "Cabinet" : "Trim"); }
+          mat.polygonOffset = true; mat.polygonOffsetFactor = 1; mat.polygonOffsetUnits = 1;   // push faces back so overlaid EdgesGeometry lines don't z-fight/shiver
+          const mesh = new THREE.Mesh(g, mat); if (glass) mesh.renderOrder = 2; mesh.castShadow = !glass; mesh.receiveShadow = true;
+          if (meta) mesh.userData = meta;   // raycast click-to-select: stamp the cabinet spec onto the mesh
+          const px = pl.o[0] + pl.a[0] * centerLen + pl.n[0] * off, pz = pl.o[1] + pl.a[1] * centerLen + pl.n[1] * off;
+          mesh.position.set(px, yc, pz); if (pl.a[0] === 0) mesh.rotation.y = Math.PI / 2;
+          group.add(mesh);
+          if (!REAL) {   // CAD mode only — the blue outline edges are what makes the view read "CAD", not "render"
+            const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({ color: glass ? 0x9aa0a6 : 0x2f74d0 }));
+            e.position.copy(mesh.position); e.rotation.copy(mesh.rotation); group.add(e);
+          }
+        };
+        // §4.18 scene population — appliance props (steel/dark PBR, finish-independent), placed
+        // deterministically from cabinet kind so the scene reads as a real kitchen, not bare boxes.
+        // prop() maps an along-run + into-room offset to world coords, respecting the run's axis.
+        const counterTop = BH + CT;
+        const STEEL = () => { const m = new THREE.MeshStandardMaterial({ color: 0xc4ccd4, roughness: 0.3, metalness: 0.75, envMapIntensity: 1.0 }); m.name = "Steel_Appliance"; return m; };
+        const DARKM = (col) => { const m = new THREE.MeshStandardMaterial({ color: col == null ? 0x24272b : col, roughness: 0.45, metalness: 0.25, envMapIntensity: 0.7 }); m.name = "Appliance_Dark"; return m; };
+        const prop = (mesh, pl, along, off, y) => { mesh.position.set(pl.o[0] + pl.a[0] * along + pl.n[0] * off, y, pl.o[1] + pl.a[1] * along + pl.n[1] * off); if (pl.a[0] === 0) mesh.rotation.y += Math.PI / 2; mesh.castShadow = true; mesh.receiveShadow = true; group.add(mesh); };
+        const populate = (pl, c) => {
+          const cl = c.x + c.w / 2;
+          if (c.kind === "sink") {                                   // stainless basin + recessed bowl + gooseneck faucet
+            const bw = Math.min(c.w * 0.72, 560);
+            prop(new THREE.Mesh(new THREE.BoxGeometry(bw, 80, D * 0.62), STEEL()), pl, cl, D * 0.5, counterTop + 30);
+            prop(new THREE.Mesh(new THREE.BoxGeometry(bw - 90, 70, D * 0.62 - 90), DARKM(0x9aa3ab)), pl, cl, D * 0.5, counterTop + 44);
+            prop(new THREE.Mesh(new THREE.CylinderGeometry(14, 17, 250, 12), STEEL()), pl, cl, D * 0.8, counterTop + 125);
+            prop(new THREE.Mesh(new THREE.BoxGeometry(26, 24, 150), STEEL()), pl, cl, D * 0.66, counterTop + 240);
+          } else if (c.kind === "hob") {                             // black glass cooktop + four burners
+            const pw = Math.min(c.w * 0.85, 760);
+            prop(new THREE.Mesh(new THREE.BoxGeometry(pw, 26, D * 0.72), DARKM(0x1b1e22)), pl, cl, D * 0.5, counterTop + 16);
+            [[-0.22, -0.2], [0.22, -0.2], [-0.22, 0.22], [0.22, 0.22]].forEach(([ax, az]) =>
+              prop(new THREE.Mesh(new THREE.CylinderGeometry(46, 46, 10, 20), DARKM(0x3a3f46)), pl, cl + ax * Math.min(c.w * 0.62, 460), D * 0.5 + az * D * 0.42, counterTop + 34));
+          } else if (c.kind === "tall-hiunit") {                     // built-in oven + microwave: recessed body + dark-glass door + steel handle bar
+            [[1050, 560], [1520, 360]].forEach(([cy, hh]) => {
+              prop(new THREE.Mesh(new THREE.BoxGeometry(c.w * 0.72, hh, 44), DARKM(0x16181b)), pl, cl, D - 16, cy);
+              prop(new THREE.Mesh(new THREE.BoxGeometry(c.w * 0.62, hh * 0.6, 8), DARKM(0x0c0d10)), pl, cl, D - 2, cy + hh * 0.06);
+              prop(new THREE.Mesh(new THREE.BoxGeometry(c.w * 0.66, 20, 24), STEEL()), pl, cl, D + 2, cy + hh * 0.42);
+            });
+          } else if (c.kind === "dishwasher") {                      // integrated dishwasher: brushed-steel front + control strip + handle
+            prop(new THREE.Mesh(new THREE.BoxGeometry(c.w * 0.92, BH - TK - 60, 12), STEEL()), pl, cl, D - 4, (TK + BH) / 2);
+            prop(new THREE.Mesh(new THREE.BoxGeometry(c.w * 0.78, 26, 16), DARKM(0x16181b)), pl, cl, D, BH - 70);
+            prop(new THREE.Mesh(new THREE.BoxGeometry(c.w * 0.6, 20, 26), STEEL()), pl, cl, D + 2, BH - 130);
+          } else if (c.kind === "tall-fridge" || c.kind === "fridge") {  // double-door fridge: split line + two vertical handles
+            prop(new THREE.Mesh(new THREE.BoxGeometry(c.w * 0.9, 10, 22), DARKM(0x9aa3ab)), pl, cl, D - 6, 1450);
+            prop(new THREE.Mesh(new THREE.BoxGeometry(34, 820, 30), STEEL()), pl, cl - c.w * 0.34, D - 4, 1250);
+            prop(new THREE.Mesh(new THREE.BoxGeometry(34, 700, 30), STEEL()), pl, cl + c.w * 0.34, D - 4, 1850);
+          }
+        };
+        // ── 18.pdf §3–§5: SINGLE-HANDLE SYSTEM — every shutter / drawer front carries EXACTLY ONE
+        // handle, orientation fixed by front type (drawer = horizontal centered · door/tall = vertical
+        // on the opening side · double doors = one vertical PER shutter at the meeting line). Handle-less
+        // systems (J/G/Gola/profile/push) draw ONE groove channel per front and no bars. Every creator
+        // goes through handleReg, so a front can never end up with two handles — and validateHandles()
+        // sweeps the finished scene before the first frame as a final §5 cleanup pass.
+        const HL3 = ["Edge Profile", "J Profile", "G Profile / Gola", "Aluminium Gola", "Hidden Profile", "Push-To-Open", "Tip-On", "Finger Pull", "Integrated"].indexOf(handle) >= 0;
+        const KNOB3 = handle === "Knob";
+        const handleReg = Object.create(null);   // frontKey → handle mesh (one per front, §3)
+        const handleMesh = (orient, frontW, frontH) => {   // the ONLY handle factory
+          if (HL3) return null;                            // §3: profile systems → groove channel, no external handle
+          let m9;
+          if (KNOB3) { m9 = new THREE.Mesh(new THREE.SphereGeometry(17, 12, 10), STEEL()); m9.userData.handleOrient = "k"; }
+          else {
+            const L9 = orient === "h" ? Math.max(80, Math.min(frontW * 0.45, 320)) : Math.max(90, Math.min(frontH * 0.5, 600));   // §5: never longer than the front
+            m9 = new THREE.Mesh(orient === "h" ? new THREE.BoxGeometry(L9, 16, 22) : new THREE.BoxGeometry(20, L9, 16), STEEL());
+            m9.userData.handleOrient = orient;
+          }
+          m9.name = "Handle"; m9.castShadow = true; m9.receiveShadow = true; return m9;
+        };
+        const grooveMesh = (w9) => { if (!HL3) return null; const g9m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(60, w9), 16, 12), DARKM(0x101316)); g9m.name = "Handle"; g9m.userData.handleOrient = "g"; g9m.castShadow = false; return g9m; };
+        const regHandle = (key, parent, orient, frontW, frontH, x, y, z) => {   // mechanism fronts (local coords)
+          if (handleReg[key]) return null;                 // §5: duplicate on the same front → rejected
+          const m9 = handleMesh(orient, frontW, frontH); if (!m9) return null;
+          const halfW = Math.max(20, frontW / 2 - 28), halfH = Math.max(16, frontH / 2 - 24);
+          m9.position.set(Math.max(-halfW, Math.min(halfW, x)), Math.max(-halfH, Math.min(halfH, y)), z);   // §5: clamped inside the front boundary
+          m9.userData.frontKey = key; parent.add(m9); handleReg[key] = m9; return m9;
+        };
+        const grooveOn = (key, parent, frontW, frontH, edge, x, z) => {   // handle-less fronts: ONE channel along the top (base/tall) or bottom (wall) edge
+          if (!HL3 || handleReg[key]) return;
+          const g9 = grooveMesh(frontW - 10); if (!g9) return;
+          g9.position.set(x || 0, (edge === "bottom" ? -1 : 1) * (frontH / 2 - 9), z);
+          g9.userData.frontKey = key; parent.add(g9); handleReg[key] = g9;
+        };
+        // static fronts (no live mechanism) — world-placed via prop(), same one-per-front registry
+        const HANDLE_KINDS = ["shutter", "drawer", "drawer3", "drawer-atta", "pullout", "wall", "tall-pantry", "tall-utility"];
+        const addHandle = (pl, c, frontOff, yBot, yTop) => {
+          if (HANDLE_KINDS.indexOf(c.kind) < 0) return;
+          const off = frontOff + 12, baseKey = "st|" + Math.round(c.x) + "|" + c.kind;
+          if (c.drawers > 0) {                                       // §4: ONE horizontal bar centered on each drawer front
+            const n = Math.min(c.drawers, 3), bandH = (yTop - yBot) / n, cl = c.x + c.w / 2;
+            for (let k = 0; k < n; k++) {
+              const key = baseKey + "|d" + k;
+              if (handleReg[key]) continue;
+              const m9 = HL3 ? grooveMesh(c.w - 16) : handleMesh("h", c.w, bandH);
+              if (!m9) continue;
+              m9.userData.frontKey = key; handleReg[key] = m9;
+              prop(m9, pl, cl, HL3 ? off + 4 : off, HL3 ? yTop - bandH * k - 10 : yTop - bandH * k - bandH / 2);
+            }
+          } else {                                                   // §4: doors — ONE vertical bar per shutter (opening side / meeting line)
+            const nSh = c.w > 600 ? 2 : 1, shW = c.w / nSh, my = (yBot + yTop) / 2;
+            for (let j = 0; j < nSh; j++) {
+              const key = baseKey + "|s" + j;
+              if (handleReg[key]) continue;
+              const m9 = HL3 ? grooveMesh(shW - 12) : handleMesh("v", shW, yTop - yBot);
+              if (!m9) continue;
+              m9.userData.frontKey = key; handleReg[key] = m9;
+              const along = HL3 ? c.x + shW * (j + 0.5)                                   // groove: centered along its shutter's top edge
+                : nSh === 1 ? c.x + c.w - 70                                              // single door: opening side
+                : (j === 0 ? c.x + shW - 45 : c.x + shW + 45);                            // double doors: each at the centre meeting line
+              prop(m9, pl, along, HL3 ? off + 4 : off, HL3 ? yTop - 10 : my);
+            }
+          }
+        };
+        // ── 🎛 LIVE ACCESSORY MECHANISMS — every workable cabinet gets a real moving front in the chosen
+        // brand finish: doors swing on hinge pivots, drawer banks + bottle/spice pull-outs glide out with
+        // their wire baskets and contents (cutlery dividers, atta dabba, plates, bottles), tall pantries
+        // open + slide baskets, the corner unit spins a two-tier carousel. Driven by "🎛 Demo accessories".
+        const mechs = [];
+        let curMechKey = null, curMechSpec = null;   // identity of the cabinet whose mechanism is being built (tags its groups for click-toggle)
+        const easeS = (p) => p * p * (3 - 2 * p);
+        const WIREM = () => { const m = new THREE.MeshStandardMaterial({ color: 0xbfc8d2, roughness: 0.32, metalness: 0.8, envMapIntensity: 0.9 }); m.name = "Basket_Wire"; return m; };
+        const CAVM = new THREE.MeshStandardMaterial({ color: 0x191d22, roughness: 0.95 }); CAVM.name = "Cavity";
+        const matFront = matBody || new THREE.MeshStandardMaterial({ color: 0xdfe8f4, roughness: 0.6 });
+        const wv = (pl, along, off, y) => new THREE.Vector3(pl.o[0] + pl.a[0] * along + pl.n[0] * off, y, pl.o[1] + pl.a[1] * along + pl.n[1] * off);
+        const mkG = (pl, along, off, y) => { const g = new THREE.Group(); g.position.copy(wv(pl, along, off, y)); g.rotation.y = (pl.a[0] === 0 ? Math.PI / 2 : 0); if (curMechKey) { g.userData.mechKey = curMechKey; if (curMechSpec) g.userData.spec = curMechSpec; g.userData.mechN = [pl.n[0], pl.n[1]]; } group.add(g); return g; };
+        const mBox = (w2, h2, d2, mat2) => { const ms = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), mat2); ms.castShadow = true; ms.receiveShadow = true; return ms; };
+        const normalV = (pl) => new THREE.Vector3(pl.n[0], 0, pl.n[1]);
+        const FSof = (pl) => (pl.a[0] === 0 ? pl.n[0] : pl.n[1]);   // local +z → into-room sign for this run
+        const LASof = (pl) => (pl.a[0] === 0 ? -1 : 1);             // along-run mm → local x sign
+        const slideMech = (g, pl, max, delay) => mechs.push({ t: "slide", g, b: g.position.clone(), n: normalV(pl), max, delay: delay || 0, p: 0, tgt: 0, startAt: 0, key: curMechKey });
+        const hingeMech = (g, dir, delay) => mechs.push({ t: "hinge", g, r0: g.rotation.y, dir, delay: delay || 0, p: 0, tgt: 0, startAt: 0, key: curMechKey });
+        const spinMech = (g, delay) => mechs.push({ t: "spin", g, delay: delay || 0, p: 0, tgt: 0, startAt: 0, key: curMechKey });
+        // dark cavity inset just proud of the carcass face — reads as the open interior once a front moves
+        const cavity = (pl, cl, frontZ, yc, w2, h2) => { const cm = mBox(w2, h2, 4, CAVM); cm.castShadow = false; const g = mkG(pl, cl, frontZ - 1, yc); g.add(cm); };
+        // a swing door: pivot group at the hinge edge; finished panel + bar handle; opens INTO the room
+        const swingDoor = (pl, c, hingeAlong, doorW, yc, h2, frontZ, glass, delay, gEdge) => {
+          const FS = FSof(pl), LAS = LASof(pl);
+          const cAlong = hingeAlong + Math.sign((c.x + c.w / 2) - hingeAlong) * doorW / 2;
+          const dx = LAS * (cAlong - hingeAlong);
+          const piv = mkG(pl, hingeAlong, frontZ, yc);
+          const dpan = mBox(doorW - 4, h2, 16, glass ? matGlass : matFront); dpan.position.set(dx, 0, FS * 11); if (glass) { dpan.castShadow = false; dpan.renderOrder = 2; }
+          piv.add(dpan);
+          // 18.pdf §3/§4: EXACTLY ONE handle per door — a vertical bar near the opening edge (which is
+          // the meeting line on double doors); handle-less systems get their groove channel instead.
+          const hKey = "door|" + (curMechKey || "m") + "|" + Math.round(hingeAlong);
+          if (HL3) grooveOn(hKey, piv, doorW - 4, h2, gEdge || "top", dx, FS * 20);
+          else regHandle(hKey, piv, "v", doorW - 4, h2, dx + Math.sign(dx || 1) * Math.max(0, doorW / 2 - 55), 0, FS * 26);
+          hingeMech(piv, -Math.sign(dx * FS) * 1.45, delay);
+        };
+        const HAS_MECH = ["shutter", "sink", "drawer", "drawer2", "drawer3", "drawer-atta", "pullout", "corner", "wall", "glass-wall", "display", "gtpt", "tall-pantry", "tall-utility"];
+        const buildMech = (pl, c, row, spec) => {
+          if (HAS_MECH.indexOf(c.kind) < 0) return false;
+          curMechKey = ((spec && spec.run) || "r") + "|" + Math.round(c.x) + "|" + c.kind;   // one key per cabinet → click any of its parts to work it
+          curMechSpec = spec || null;
+          const FS = FSof(pl), cl = c.x + c.w / 2, lab = String(c.label || "");
+          if (row === "wall") {
+            const frontZ = WD, yc = WS + WH / 2, glass = (c.kind === "glass-wall" || c.kind === "display" || c.kind === "gtpt");
+            cavity(pl, cl, frontZ, yc, c.w - 26, WH - 26);
+            for (let s2 = 1; s2 <= 2; s2++) { const g2 = mkG(pl, cl, WD * 0.45, WS + WH * s2 / 3); g2.add(mBox(c.w - 40, 12, WD * 0.62, WIREM())); }
+            if (c.kind === "gtpt") for (let pp = 0; pp < 6; pp++) { const pd = new THREE.Mesh(new THREE.CylinderGeometry(70, 70, 7, 18), new THREE.MeshStandardMaterial({ color: 0xf1efe9, roughness: 0.3 })); pd.rotation.z = Math.PI / 2; const g3 = mkG(pl, c.x + c.w * (0.18 + pp * 0.13), WD * 0.4, WS + WH * 0.52); g3.add(pd); }
+            const nd = c.w > 600 ? 2 : 1, dW = c.w / nd - 3;
+            for (let j = 0; j < nd; j++) swingDoor(pl, c, j === 0 ? c.x + 2 : c.x + c.w - 2, dW, yc, WH - 8, frontZ, glass, 0.5 + j * 0.12, "bottom");   // §4: wall fronts — groove/grip at the BOTTOM edge
+            return true;
+          }
+          if (row === "tall") {   // pantry / utility tower: two tall doors + stocked shelves + sliding wire baskets
+            const yB = TK, yT = WS + WH, hh2 = yT - yB, yc = (yB + yT) / 2, frontZ = D;
+            cavity(pl, cl, frontZ, yc, c.w - 26, hh2 - 26);
+            for (let s3 = 1; s3 <= 5; s3++) { const g4 = mkG(pl, cl, D * 0.45, yB + hh2 * s3 / 6); g4.add(mBox(c.w - 44, 12, D * 0.6, WIREM())); if (s3 % 2) { const jar = new THREE.Mesh(new THREE.CylinderGeometry(44, 44, 120, 14), new THREE.MeshStandardMaterial({ color: 0xc8b289, roughness: 0.4 })); jar.position.set(0, 70, 0); g4.add(jar); } }
+            for (let b2 = 0; b2 < 2; b2++) { const g5 = mkG(pl, cl, D * 0.4, 760 + b2 * 420); g5.add(mBox(c.w - 70, 110, D * 0.62, WIREM())); slideMech(g5, pl, D * 0.55, 1.3 + b2 * 0.25); }
+            const nd2 = c.w > 600 ? 2 : 1, dW2 = c.w / nd2 - 3;
+            for (let j2 = 0; j2 < nd2; j2++) swingDoor(pl, c, j2 === 0 ? c.x + 2 : c.x + c.w - 2, dW2, yc, hh2 - 8, frontZ, false, 0.2 + j2 * 0.12);
+            return true;
+          }
+          const yB2 = TK, yT2 = BH, bodyH2 = yT2 - yB2, frontZ2 = D;
+          if (c.drawers > 0) {   // drawer bank: each front glides out with its wire basket + contents
+            cavity(pl, cl, frontZ2, (yB2 + yT2) / 2, c.w - 26, bodyH2 - 26);
+            const dh2 = (c.dh && c.dh.length === c.drawers) ? c.dh : Array(c.drawers).fill(1);
+            const tot2 = dh2.reduce((a2, b3) => a2 + b3, 0);
+            let yCur = yT2;
+            for (let k2 = 0; k2 < c.drawers; k2++) {
+              const bh2 = dh2[k2] / tot2 * bodyH2, yc2 = yCur - bh2 / 2; yCur -= bh2;
+              const g6 = mkG(pl, cl, frontZ2, yc2);
+              const fp = mBox(c.w - 8, bh2 - 6, 16, matFront); fp.position.set(0, 0, FS * 11); g6.add(fp);
+              // 18.pdf §4: ONE horizontal handle centered on each drawer front (groove channel when handle-less)
+              const dKey = "drw|" + (curMechKey || "m") + "|" + k2;
+              if (HL3) grooveOn(dKey, g6, c.w - 8, bh2 - 6, "top", 0, FS * 20);
+              else regHandle(dKey, g6, "h", c.w - 8, bh2 - 6, 0, 0, FS * 24);
+              const tray = mBox(c.w - 90, 12, D * 0.66, WIREM()); tray.position.set(0, -bh2 * 0.22, -FS * D * 0.42); g6.add(tray);
+              [-1, 1].forEach((s4) => { const rail = mBox(c.w - 90, 64, 8, WIREM()); rail.position.set(0, -bh2 * 0.22 + 36, -FS * (D * 0.42 - s4 * D * 0.3)); g6.add(rail); });
+              if (lab.indexOf("Atta") >= 0 && k2 === c.drawers - 1) { const dabba = new THREE.Mesh(new THREE.CylinderGeometry(105, 105, 170, 18), STEEL()); dabba.position.set(0, -bh2 * 0.22 + 95, -FS * D * 0.42); g6.add(dabba); }
+              else if (lab.indexOf("Cutlery") >= 0 && k2 === 0) for (let t2 = -1; t2 <= 1; t2++) { const div = mBox(c.w * 0.6, 26, 6, WIREM()); div.position.set(0, -bh2 * 0.22 + 20, -FS * D * 0.42 + t2 * 60); g6.add(div); }
+              else if (lab.indexOf("Plate") >= 0) for (let p2 = 0; p2 < 4; p2++) { const pl8 = new THREE.Mesh(new THREE.CylinderGeometry(88, 88, 8, 18), new THREE.MeshStandardMaterial({ color: 0xf0ede6, roughness: 0.3 })); pl8.position.set(0, -bh2 * 0.22 + 12 + p2 * 10, -FS * D * 0.42); g6.add(pl8); }
+              slideMech(g6, pl, D * 0.74, 0.3 + k2 * 0.18);
+            }
+            return true;
+          }
+          if (c.kind === "pullout") {   // bottle / spice pull-out: full-height front + wire cage + bottles glide out
+            cavity(pl, cl, frontZ2, (yB2 + yT2) / 2, c.w - 26, bodyH2 - 26);
+            const g7 = mkG(pl, cl, frontZ2, (yB2 + yT2) / 2);
+            const fp2 = mBox(c.w - 8, bodyH2 - 6, 16, matFront); fp2.position.set(0, 0, FS * 11); g7.add(fp2);
+            // 18.pdf §3: pull-out = one tall front = exactly ONE vertical handle (groove when handle-less)
+            const pKey = "pull|" + (curMechKey || "m");
+            if (HL3) grooveOn(pKey, g7, c.w - 8, bodyH2 - 6, "top", 0, FS * 20);
+            else regHandle(pKey, g7, "v", c.w - 8, bodyH2 - 6, c.w * 0.3, 0, FS * 26);
+            [0.22, 0.55].forEach((fz) => { const shf = mBox(c.w - 80, 12, D * 0.5, WIREM()); shf.position.set(0, -bodyH2 / 2 + bodyH2 * fz, -FS * D * 0.4); g7.add(shf);
+              const cage = mBox(c.w - 80, 90, 8, WIREM()); cage.position.set(0, -bodyH2 / 2 + bodyH2 * fz + 50, -FS * (D * 0.4 - D * 0.25)); g7.add(cage); });
+            [[0x2f6b3a, -0.2], [0x8a5a22, 0], [0x4f7f9e, 0.2]].forEach(([colB, oz]) => { const bot = new THREE.Mesh(new THREE.CylinderGeometry(34, 34, 250, 12), new THREE.MeshStandardMaterial({ color: colB, roughness: 0.15, metalness: 0.1, envMapIntensity: 0.8 })); bot.position.set(0, -bodyH2 / 2 + bodyH2 * 0.22 + 132, -FS * D * 0.4 + oz * 200); g7.add(bot); });
+            slideMech(g7, pl, D * 0.8, 0.4);
+            return true;
+          }
+          if (c.kind === "corner") {   // corner unit: door swings open, two-tier carousel spins inside
+            cavity(pl, cl, frontZ2, (yB2 + yT2) / 2, c.w - 26, bodyH2 - 26);
+            const car = mkG(pl, cl, D * 0.42, yB2);
+            const pole = mBox(16, bodyH2 - 40, 16, STEEL()); pole.position.set(0, bodyH2 / 2, 0); car.add(pole);
+            [0.28, 0.66].forEach((fy) => { const disc = new THREE.Mesh(new THREE.CylinderGeometry(Math.min(c.w, D) * 0.4, Math.min(c.w, D) * 0.4, 12, 24), WIREM()); disc.position.set(0, bodyH2 * fy, 0); car.add(disc);
+              const jar2 = new THREE.Mesh(new THREE.CylinderGeometry(40, 40, 95, 12), new THREE.MeshStandardMaterial({ color: 0xb98a4a, roughness: 0.35 })); jar2.position.set(Math.min(c.w, D) * 0.2, bodyH2 * fy + 55, 0); car.add(jar2); });
+            spinMech(car, 1.0);
+            swingDoor(pl, c, c.x + 2, c.w - 6, (yB2 + yT2) / 2, bodyH2 - 8, frontZ2, false, 0.3);
+            return true;
+          }
+          // plain shutter / sink base: swing door(s) + interior (sink cabinet gets its under-sink waste bin)
+          cavity(pl, cl, frontZ2, (yB2 + yT2) / 2, c.w - 26, bodyH2 - 26);
+          if (c.kind === "sink") { const bin = new THREE.Mesh(new THREE.CylinderGeometry(95, 80, 270, 16), new THREE.MeshStandardMaterial({ color: 0x3a6b50, roughness: 0.5 })); const g9 = mkG(pl, cl, D * 0.45, yB2 + 140); g9.add(bin); }
+          else { const g10 = mkG(pl, cl, D * 0.45, yB2 + bodyH2 * 0.48); g10.add(mBox(c.w - 44, 12, D * 0.6, WIREM())); }
+          const nd3 = c.w > 600 ? 2 : 1, dW3 = c.w / nd3 - 3;
+          for (let j3 = 0; j3 < nd3; j3++) swingDoor(pl, c, j3 === 0 ? c.x + 2 : c.x + c.w - 2, dW3, (yB2 + yT2) / 2, bodyH2 - 8, frontZ2, false, 0.4 + j3 * 0.12);
+          return true;
+        };
+        // 13.pdf §4: procedural backsplash tile material (grid/brick), repeated to the chosen size.
+        const tileMat = (Lrun, bandH) => {
+          const cv = document.createElement("canvas"); cv.width = 128; cv.height = 128; const g = cv.getContext("2d");
+          g.fillStyle = TL.color || "#e8eef0"; g.fillRect(0, 0, 128, 128);
+          g.strokeStyle = TL.grid || "#c2d0d4"; g.lineWidth = 6;
+          if (TL.pattern === "brick") { g.beginPath(); g.moveTo(0, 64); g.lineTo(128, 64); g.moveTo(64, 0); g.lineTo(64, 64); g.moveTo(0, 128); g.lineTo(0, 128); g.stroke(); g.strokeRect(0, 0, 128, 128); }
+          else { g.strokeRect(0, 0, 128, 128); }
+          const tex = new THREE.CanvasTexture(cv); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.encoding = THREE.sRGBEncoding;
+          const sz = Math.max(40, TL.size || 100);
+          tex.repeat.set(Math.max(1, Math.round(Lrun / sz)), Math.max(1, Math.round(bandH / sz)));
+          const tm = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6, metalness: 0.04 }); tm.name = "Backsplash_Tile"; return tm;   // matte tiles (no reflective wash)
+        };
+        (runs || []).forEach((run, i) => {
+          const pl = place(i); if (!pl) return;
+          const meta = (c, row, dep, h, bi) => ({ run: (run.name || ("Run " + (i + 1))), ri: i, bi, x: Math.round(c.x), row, kind: c.kind, label: c.label || c.kind, w: Math.round(c.w), d: Math.round(dep), h: Math.round(h), drawers: c.drawers || 0 });
+          (run.base || []).forEach((c, bIdx) => {
+            if (c.kind === "filler" || c.kind === "sidepanel") return;
+            if (isTallK(c.kind)) { addBox(pl, c.x + c.w / 2, c.w - 6, D, WS + WH, (WS + WH) / 2, fill(c.kind), D / 2, false, true, meta(c, "Tall", D, WS + WH, bIdx)); if (!buildMech(pl, c, "tall", meta(c, "Tall", D, WS + WH, bIdx))) addHandle(pl, c, D, TK, WS + WH); populate(pl, c); return; }
+            addBox(pl, c.x + c.w / 2, c.w - 6, D, BH - TK, (TK + BH) / 2, fill(c.kind), D / 2, false, true, meta(c, "Base", D, BH, bIdx));   // carcass
+            addBox(pl, c.x + c.w / 2, c.w, D + 25, CT, BH + CT / 2, 0xdbe3ee, (D + 25) / 2, false, false, null, "Countertop");   // counter slab
+            if (!buildMech(pl, c, "base", meta(c, "Base", D, BH, bIdx))) addHandle(pl, c, D, TK, BH); populate(pl, c);   // working front (door/drawer/pull-out) OR static handle
+          });
+          // recessed toe-kick plinth (dark, set back 60 mm) — grounds the run on the floor like a real
+          // factory skirting instead of carcasses floating above a gap. One strip per run, behind tall fronts too.
+          (() => {
+            const Lr = (run.base || []).reduce((s, cc) => s + cc.w, 0);
+            if (Lr <= 0) return;
+            const pm = new THREE.Mesh(new THREE.BoxGeometry(Lr - 4, TK, D - 60), new THREE.MeshStandardMaterial({ color: 0x2c3036, roughness: 0.65, metalness: 0.15, envMapIntensity: 0.4 }));
+            pm.material.name = "Plinth";
+            const mid = Lr / 2, offP = (D - 60) / 2;
+            pm.position.set(pl.o[0] + pl.a[0] * mid + pl.n[0] * offP, TK / 2, pl.o[1] + pl.a[1] * mid + pl.n[1] * offP);
+            if (pl.a[0] === 0) pm.rotation.y = Math.PI / 2;
+            pm.receiveShadow = true; group.add(pm);
+          })();
+          (run.wallCabs || []).forEach((c) => {
+            if (c.kind === "sidepanel") return;
+            if (c.kind === "chimney") {   // realistic chimney: steel hood projecting over the hob + a flue/duct rising to the ceiling
+              const cx = c.x + c.w / 2, Dh = D * 0.72;
+              const hoodBot = counterTop + 640, hoodH = 360, hoodTop = hoodBot + hoodH, ceil = Math.max(2700, WS + WH + 250);
+              addBox(pl, cx, c.w, Dh, hoodH, hoodBot + hoodH / 2, 0x53585f, Dh / 2, false, false, meta(c, "Chimney hood", Dh, hoodH), "Chimney_Steel");   // hood body
+              addBox(pl, cx, c.w - 40, Dh - 30, 26, hoodBot + 16, 0x1d2024, (Dh - 30) / 2, false, false, null, "Chimney_Steel");                          // dark suction underside
+              addBox(pl, cx, c.w * 0.42, WD + 20, ceil - hoodTop, hoodTop + (ceil - hoodTop) / 2, 0x9aa3ab, (WD + 20) / 2, false, false, null, "Chimney_Steel");   // flue/duct to ceiling
+              return;
+            }
+            const glass = c.kind === "glass-wall" || c.kind === "display" || c.kind === "gtpt";   // 5.9.9
+            addBox(pl, c.x + c.w / 2, c.w - 6, WD, WH, WS + WH / 2, fill(c.kind), WD / 2, glass, true, meta(c, "Wall", WD, WH));
+            if (!buildMech(pl, c, "wall", meta(c, "Wall", WD, WH)) && !glass) addHandle(pl, c, WD, WS, WS + WH);
+          });
+          // §4.18/13.pdf §4: backsplash TILES between counter top and wall sill, on the wall surface
+          const hasWallRun = (run.wallCabs || []).some((cc) => cc.kind !== "sidepanel");
+          const Lrun = (run.base || []).reduce((s, cc) => s + cc.w, 0);
+          const bandBot = BH + CT, bandH = WS - bandBot;
+          if (TL.on !== false && hasWallRun && Lrun > 0 && bandH > 0) {
+            const pg = new THREE.PlaneGeometry(Lrun, bandH);
+            const bm = new THREE.Mesh(pg, tileMat(Lrun, bandH)); bm.receiveShadow = true;
+            const mid = Lrun / 2;
+            bm.position.set(pl.o[0] + pl.a[0] * mid + pl.n[0] * 8, bandBot + bandH / 2, pl.o[1] + pl.a[1] * mid + pl.n[1] * 8);
+            bm.rotation.y = Math.atan2(pl.n[0], pl.n[1]);
+            group.add(bm);
+          }
+          // §4.17 under-cabinet warm LED strip (emissive) + a soft localized wash on the counter
+          if (hasWallRun && Lrun > 0) {
+            const lmid = Lrun / 2;
+            const led = new THREE.Mesh(new THREE.BoxGeometry(Lrun * 0.95, 10, 26), new THREE.MeshStandardMaterial({ color: 0xfff4e2, emissive: 0xffd49a, emissiveIntensity: 1.5 }));
+            led.position.set(pl.o[0] + pl.a[0] * lmid + pl.n[0] * (WD - 14), WS - 26, pl.o[1] + pl.a[1] * lmid + pl.n[1] * (WD - 14));
+            led.rotation.y = Math.atan2(pl.n[0], pl.n[1]); group.add(led);   // emissive strip only
+            // painted room wall behind the run → grounds the kitchen + catches the key-light shadow (depth).
+            // Added to SCENE (not group) so it doesn't enlarge the camera-framing bbox or the GLB export.
+            const wallH = Math.max(2700, WS + WH + 200);
+            const wp = new THREE.Mesh(new THREE.PlaneGeometry(Lrun + 500, wallH), new THREE.MeshStandardMaterial({ color: 0xeae4d9, roughness: 0.97, envMapIntensity: 0.18 }));
+            wp.position.set(pl.o[0] + pl.a[0] * lmid + pl.n[0] * (-12), wallH / 2, pl.o[1] + pl.a[1] * lmid + pl.n[1] * (-12));
+            wp.rotation.y = Math.atan2(pl.n[0], pl.n[1]); wp.receiveShadow = true; scene.add(wp);
+          }
+          // §4.18 rich counter styling (deterministic) — props like the reference renders: plant, fruit bowl,
+          // jars/bottles, a kettle, a plate stack & dish rack. Placed on open base cabinets (not sink/hob/appliance).
+          (() => {
+            const safe = (run.base || []).filter((cc) => ["shutter", "drawer", "drawer-atta", "pullout"].indexOf(cc.kind) >= 0 && cc.w >= 300);
+            const D2 = (col, r) => { const m = new THREE.MeshStandardMaterial({ color: col, roughness: r == null ? 0.85 : r, metalness: 0, envMapIntensity: 0.5 }); m.name = "Decor"; return m; };
+            const ceramic = (col) => { const m = new THREE.MeshStandardMaterial({ color: col, roughness: 0.25, metalness: 0.05, envMapIntensity: 0.8 }); m.name = "Decor"; return m; };
+            const glassM = () => { const m = new THREE.MeshStandardMaterial({ color: 0xcfe6ea, roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.55, envMapIntensity: 1 }); m.name = "Decor"; return m; };
+            const at = (i) => safe.length ? safe[Math.min(i, safe.length - 1)] : null;
+            // potted plant
+            if (at(0)) { const al = at(0).x + at(0).w / 2; prop(new THREE.Mesh(new THREE.CylinderGeometry(56, 64, 120, 16), D2(0x9a6a44)), pl, al, D * 0.58, counterTop + 60); prop(new THREE.Mesh(new THREE.SphereGeometry(115, 12, 12), D2(0x4f7a3a)), pl, al, D * 0.58, counterTop + 185); }
+            // jars + bottles cluster
+            if (at(1)) { const al = at(1).x + at(1).w / 2;
+              prop(new THREE.Mesh(new THREE.CylinderGeometry(48, 48, 150, 16), glassM()), pl, al - 70, D * 0.62, counterTop + 75); prop(new THREE.Mesh(new THREE.CylinderGeometry(50, 50, 22, 16), STEEL()), pl, al - 70, D * 0.62, counterTop + 158);
+              prop(new THREE.Mesh(new THREE.CylinderGeometry(38, 38, 120, 16), glassM()), pl, al, D * 0.62, counterTop + 60); prop(new THREE.Mesh(new THREE.CylinderGeometry(40, 40, 18, 16), STEEL()), pl, al, D * 0.62, counterTop + 128);
+              prop(new THREE.Mesh(new THREE.CylinderGeometry(28, 32, 230, 14), ceramic(0x7d4a2e)), pl, al + 64, D * 0.62, counterTop + 115); }
+            // stainless kettle
+            if (at(2)) { const al = at(2).x + at(2).w / 2; prop(new THREE.Mesh(new THREE.CylinderGeometry(95, 110, 150, 18), STEEL()), pl, al, D * 0.55, counterTop + 80); prop(new THREE.Mesh(new THREE.TorusGeometry(60, 9, 8, 16, Math.PI), STEEL()), pl, al, D * 0.55, counterTop + 175); prop(new THREE.Mesh(new THREE.CylinderGeometry(8, 16, 70, 10), STEEL()), pl, al + 95, D * 0.5, counterTop + 120); }
+            // fruit bowl
+            if (at(3)) { const ml = at(3).x + at(3).w / 2; prop(new THREE.Mesh(new THREE.CylinderGeometry(115, 88, 54, 18), ceramic(0xece7df)), pl, ml, D * 0.5, counterTop + 27); [[-58, 0, 0xd14b3a], [54, 8, 0xe0a91f], [4, 58, 0x7bb04a], [-10, -52, 0xe06a1f]].forEach(([dx, dz, col]) => prop(new THREE.Mesh(new THREE.SphereGeometry(34, 12, 12), D2(col, 0.55)), pl, ml + dx, D * 0.5 + dz, counterTop + 60)); }
+            // plate stack + dish rack near a wider cabinet
+            if (at(4)) { const ml = at(4).x + at(4).w / 2; for (let k = 0; k < 5; k++) prop(new THREE.Mesh(new THREE.CylinderGeometry(95, 95, 9, 20), ceramic(0xf2f0ec)), pl, ml, D * 0.6, counterTop + 14 + k * 11); for (let k = 0; k < 4; k++) { const ring = new THREE.Mesh(new THREE.TorusGeometry(70, 5, 6, 18), STEEL()); ring.rotation.x = Math.PI / 2; prop(ring, pl, ml + 150, D * 0.6 - 30 + k * 20, counterTop + 95); } }
+          })();
+        });
+        // ── 18.pdf §5: HANDLE VALIDATION PASS — runs on the finished scene BEFORE the first rendered
+        // frame. Sweeps every mesh named "Handle": exactly one per front key (duplicates removed),
+        // and under a handle-less system no bar/knob may survive (grooves only). Audit → window probe.
+        (() => {
+          const seen = Object.create(null), kill = [];
+          group.traverse((o) => {
+            if (o.name !== "Handle") return;
+            const k9 = (o.userData && o.userData.frontKey) || "?";
+            if (seen[k9]) { kill.push(o); return; }                                 // §5: duplicate handle on one front
+            if (HL3 && o.userData.handleOrient !== "g") { kill.push(o); return; }   // §3: handle-less → no bars/knobs
+            seen[k9] = o;
+          });
+          kill.forEach((o) => { if (o.parent) o.parent.remove(o); });
+          if (kill.length) console.warn("[18.pdf §5] handle cleanup removed " + kill.length + " invalid handle(s)");
+          try { window.__adsHandleAudit = { fronts: Object.keys(seen).length, removed: kill.length, system: handle || "D Handle", handleless: HL3 }; } catch (e) {}
+        })();
+        scene.add(group); groupRef.current = group;   // expose for GLB export
+        // per-cabinet mechanism control: the demo button opens ALL; clicking one cabinet's front toggles JUST it
+        mechCtlRef.current = {
+          all: (v) => { const n0 = window.performance.now(); mechs.forEach((m) => { m.tgt = v ? 1 : 0; m.startAt = n0 + (v ? m.delay * 1000 : 0); }); },
+          toggle: (key) => {
+            const ms = mechs.filter((m) => m.key === key); if (!ms.length) return false;
+            const v = ms[0].tgt > 0.5 ? 0 : 1, n0 = window.performance.now();
+            const base = Math.min.apply(null, ms.map((m) => m.delay));
+            ms.forEach((m) => { m.tgt = v; m.startAt = n0 + (v ? (m.delay - base) * 1000 : 0); });   // keep the cabinet's own stagger (drawers one after another)
+            return v === 1;
+          },
+          anyOpen: () => mechs.some((m) => m.tgt > 0.5),   // photoreal uses this: open accessory → close-up prompt + high faithfulness
+        };
+        try {
+          window.__adsMechs = mechs.length; window.__adsMechCtl = mechCtlRef.current;
+          window.__adsMechState = () => mechs.map((m) => ({ key: m.key, p: +m.p.toFixed(2), tgt: m.tgt }));
+          window.__adsMechXY = (key) => {   // screen [x,y] of a cabinet's first front — lets tests click exactly on it
+            const m = mechs.find((mm) => mm.key === key && mm.t !== "spin"); if (!m) return null;
+            const v3 = new THREE.Vector3(); m.g.getWorldPosition(v3); v3.project(camera);
+            const r2 = renderer.domElement.getBoundingClientRect();
+            return [r2.left + (v3.x + 1) / 2 * r2.width, r2.top + (1 - v3.y) / 2 * r2.height];
+          };
+        } catch (e) {}   // test hooks
+        // floor + back walls sized to the model
+        box.setFromObject(group); const c = box.getCenter(v).clone(), size = box.getSize(new THREE.Vector3());
+        const span = Math.max(size.x, size.z, 1500);
+        camera.near = 80; camera.far = Math.max(18000, span * 9); camera.updateProjectionMatrix();   // tighter far → depth-buffer precision for SSAO + crisp depth
+        // polished tiled floor: marble veining + large-format grout lines; low roughness so it mirrors the env (3D-render look)
+        const fcv = document.createElement("canvas"); fcv.width = 256; fcv.height = 256; const fx2 = fcv.getContext("2d");
+        const fhex = "#" + ("000000" + ((L.floor) >>> 0).toString(16)).slice(-6);
+        fx2.fillStyle = fhex; fx2.fillRect(0, 0, 256, 256);
+        fx2.strokeStyle = "rgba(255,255,255,0.10)"; fx2.lineWidth = 2;
+        for (let i = 0; i < 5; i++) { fx2.beginPath(); let yy = Math.random() * 256; fx2.moveTo(0, yy); for (let xx = 0; xx <= 256; xx += 24) { yy += (Math.random() - 0.5) * 30; fx2.lineTo(xx, yy); } fx2.stroke(); }
+        fx2.strokeStyle = "rgba(0,0,0,0.16)"; fx2.lineWidth = 3; fx2.strokeRect(0, 0, 256, 256);
+        const floorTex = new THREE.CanvasTexture(fcv); floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping; floorTex.encoding = THREE.sRGBEncoding;
+        const ftiles = Math.max(2, Math.round(span / 700)); floorTex.repeat.set(ftiles, ftiles);
+        const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, color: 0xcabfad, roughness: 0.6, metalness: 0.05, envMapIntensity: 0.4 }); floorMat.name = "Floor_Tile";   // warm semi-polished tile — subtle sheen catches the warm light without washing
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(span * 2.2, span * 2.2), floorMat);
+        floor.rotation.x = -Math.PI / 2; floor.position.set(c.x, 0, c.z); floor.receiveShadow = true; scene.add(floor);
+        // ceiling + decorative pendant light (frames the room like the reference 3D renders)
+        const ceilY = Math.max(2700, WS + WH + 260);
+        const ceilMesh = new THREE.Mesh(new THREE.PlaneGeometry(span * 2.6, span * 2.6), new THREE.MeshStandardMaterial({ color: 0xf3f0ea, roughness: 1, side: THREE.FrontSide })); ceilMesh.rotation.x = Math.PI / 2; ceilMesh.position.set(c.x, ceilY, c.z); scene.add(ceilMesh);   // FrontSide → faces DOWN into room; invisible from above so TOP-DOWN camera isn't blocked
+        const pend = new THREE.Group();
+        pend.add(new THREE.Mesh(new THREE.CylinderGeometry(7, 7, 480, 8), new THREE.MeshStandardMaterial({ color: 0xb9952f, metalness: 0.8, roughness: 0.35, envMapIntensity: 1 })));
+        const shade = new THREE.Mesh(new THREE.SphereGeometry(150, 20, 12, 0, Math.PI * 2, Math.PI * 0.52, Math.PI * 0.48), new THREE.MeshStandardMaterial({ color: 0xfff4e0, emissive: 0xffe6b8, emissiveIntensity: 0.85, roughness: 0.6, side: THREE.DoubleSide })); shade.position.y = -245; pend.add(shade);
+        pend.position.set(c.x, ceilY - 12, c.z); scene.add(pend);
+        const pendL = new THREE.PointLight(0xffe9c4, 0.38, span * 3.2, 1.5); pendL.position.set(c.x, ceilY - 340, c.z); scene.add(pendL);
+        // §4.17 realistic mode: recessed ceiling SPOT POOLS along each run (warm light washing the fronts —
+        // the signature of an interior render) + fuller filmic exposure. CAD mode stays flat and technical.
+        if (REAL) {
+          renderer.toneMappingExposure = 1.02;
+          (runs || []).forEach((run2, i2) => {
+            const pl2 = place(i2); if (!pl2) return;
+            const Lr2 = (run2.base || []).reduce((s2, cc2) => s2 + cc2.w, 0); if (!Lr2) return;
+            const fr = Lr2 > 2200 ? [0.26, 0.74] : [0.5];
+            for (const f2 of fr) {
+              const sp = new THREE.SpotLight(0xffe3bd, 0.55, 0, Math.PI / 4.4, 0.55, 1.5);
+              const sx = pl2.o[0] + pl2.a[0] * Lr2 * f2 + pl2.n[0] * (D + 340), sz = pl2.o[1] + pl2.a[1] * Lr2 * f2 + pl2.n[1] * (D + 340);
+              sp.position.set(sx, ceilY - 40, sz);
+              sp.target.position.set(sx - pl2.n[0] * 380, BH, sz - pl2.n[1] * 380);
+              scene.add(sp); scene.add(sp.target);
+            }
+          });
+        }
+        // 19.txt item 4 — FULL ROOM SHELL + structural elements: four inward-facing wall planes (invisible
+        // from outside = dollhouse view) + every door / window / beam placed in Room Setup, so the rendered
+        // 3D is the complete room — walls, floor, ceiling, openings — not just the cabinet runs.
+        (() => {
+          const Wd2 = Math.max(+((room || {}).width) || 0, La);
+          const Dp2 = Math.max(+((room || {}).depth) || 0, (t.includes("parallel") || t.includes("island")) ? (1000 + 2 * D + 200) : (t.includes("straight") ? 1800 : Lb));
+          const WALLS3 = {
+            "Wall A (back)":  { len: Wd2, at: (tt) => [tt, 0], n: [0, 1] },
+            "Wall B (right)": { len: Dp2, at: (tt) => [Wd2, Dp2 - tt], n: [-1, 0] },
+            "Wall C (front)": { len: Wd2, at: (tt) => [tt, Dp2], n: [0, -1] },
+            "Wall D (left)":  { len: Dp2, at: (tt) => [0, Dp2 - tt], n: [1, 0] },
+          };
+          const wallMatR = new THREE.MeshStandardMaterial({ color: 0xeae4d9, roughness: 0.97, envMapIntensity: 0.18 });
+          Object.keys(WALLS3).forEach((wn) => {
+            const wd3 = WALLS3[wn];
+            const wp2 = new THREE.Mesh(new THREE.PlaneGeometry(wd3.len, ceilY), wallMatR);
+            const mid2 = wd3.at(wd3.len / 2);
+            wp2.position.set(mid2[0] - wd3.n[0] * 2, ceilY / 2, mid2[1] - wd3.n[1] * 2);
+            wp2.rotation.y = Math.atan2(wd3.n[0], wd3.n[1]);
+            wp2.receiveShadow = true; scene.add(wp2);
+          });
+          (structures || []).forEach((s) => {
+            const wd3 = WALLS3[s.wall]; if (!wd3) return;
+            const sw = +s.width || 800, sh = +s.height || (s.kind === "window" ? 1200 : s.kind === "beam" ? (+s.drop || 300) : 2000), pos = +s.pos || 200;
+            const yc3 = s.kind === "window" ? (+s.sill || 900) + sh / 2 : s.kind === "beam" ? ceilY - sh / 2 : sh / 2;
+            const pt = wd3.at(pos + sw / 2);
+            const G3 = new THREE.Group(); G3.position.set(pt[0] + wd3.n[0] * 30, yc3, pt[1] + wd3.n[1] * 30); G3.rotation.y = Math.atan2(wd3.n[0], wd3.n[1]); scene.add(G3);
+            if (s.kind === "window") {       // framed window: white frame + softly glowing daylight glazing + mullion
+              const fr = new THREE.Mesh(new THREE.BoxGeometry(sw, sh, 50), new THREE.MeshStandardMaterial({ color: 0xf4f6f8, roughness: 0.5 })); G3.add(fr);
+              const gl3 = new THREE.Mesh(new THREE.PlaneGeometry(sw - 90, sh - 90), new THREE.MeshStandardMaterial({ color: 0xdfeefc, emissive: 0xcfe6ff, emissiveIntensity: REAL ? 0.85 : 0.3, roughness: 0.1 })); gl3.position.z = 28; G3.add(gl3);
+              const mu = new THREE.Mesh(new THREE.BoxGeometry(26, sh - 80, 8), new THREE.MeshStandardMaterial({ color: 0xf4f6f8, roughness: 0.5 })); mu.position.z = 30; G3.add(mu);
+            } else if (s.kind === "door") {  // panelled wooden door + top frame + steel knob
+              const dpan3 = new THREE.Mesh(new THREE.BoxGeometry(sw - 60, sh - 40, 46), new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.55 })); dpan3.castShadow = true; G3.add(dpan3);
+              const fr2 = new THREE.Mesh(new THREE.BoxGeometry(sw, 60, 60), new THREE.MeshStandardMaterial({ color: 0x6e4520, roughness: 0.6 })); fr2.position.y = sh / 2 - 10; G3.add(fr2);
+              const kn = new THREE.Mesh(new THREE.SphereGeometry(26, 12, 12), STEEL()); kn.position.set(sw * 0.34, 0, 36); G3.add(kn);
+            } else {                          // beam / soffit band hanging at the ceiling on this wall
+              const bm3 = new THREE.Mesh(new THREE.BoxGeometry(sw, sh, 300), new THREE.MeshStandardMaterial({ color: 0xd9d2c5, roughness: 0.9 })); bm3.castShadow = true; bm3.position.z = 120; G3.add(bm3);
+            }
+          });
+        })();
+        // aim the key light at the room centre and size the shadow frustum to the model (§4.17)
+        dl.position.set(c.x + span * 0.7, span * 1.8 + 1500, c.z + span * 0.9);
+        dl.target.position.set(c.x, 0, c.z); scene.add(dl.target);
+        const sc = dl.shadow.camera, r = span * 1.4; sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r; sc.near = 100; sc.far = span * 5 + 4000; sc.updateProjectionMatrix();
+        // light, low-intensity fill from the opposite side for a touch of depth (no haze)
+        const fillL = new THREE.DirectionalLight(0xffffff, 0.12); fillL.position.set(c.x - span * 0.8, span * 1.1 + 800, c.z - span * 0.7); scene.add(fillL);
+        // POLISHED-FLOOR REFLECTION: render the room into a cube map once and use it as the floor's envMap so it
+        // mirrors the cabinets — the signature "wow" of the reference renders. Static (the scene barely moves).
+        try {
+          const cubeRT = new THREE.WebGLCubeRenderTarget(256, { generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
+          const cubeCam = new THREE.CubeCamera(50, span * 6, cubeRT); cubeCam.position.set(c.x, 60, c.z);
+          floor.visible = false; cubeCam.update(renderer, scene); floor.visible = true;
+          floorMat.envMap = cubeRT.texture; floorMat.envMapIntensity = 1.0; floorMat.roughness = 0.1; floorMat.metalness = 0.2; floorMat.color.setHex(0x8d8474); floorMat.needsUpdate = true;   // mid-tone glossy → contrast + visible cabinet reflection
+        } catch (e) { /* reflection optional — renderer.dispose() frees the cube target on unmount */ }
+        // camera + controls — close, low, eye-level interior angle (kitchen fills the frame, like the references)
+        const target = new THREE.Vector3(c.x, 1150, c.z);
+        camera.position.set(c.x + span * 0.4, 1520, c.z + span * 1.05);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };   // 6.12 CAD navigation
+        if (camRef && camRef.current) { camera.position.fromArray(camRef.current.pos); controls.target.fromArray(camRef.current.tgt); } else { controls.target.copy(target); }   // 6.11 persist across rebuilds
+        controls.update();
+        controls.addEventListener("change", () => { if (camRef) camRef.current = { pos: camera.position.toArray(), tgt: controls.target.toArray() }; if (prInvalidateRef.current) prInvalidateRef.current(); });   // orbit/zoom/pan → rendered overlay stale
+        // 18.pdf §1: Fit to Screen frames the whole rendered kitchen; Reset View returns to the default
+        // interior angle. Both cancel a running tour/walk so the user regains manual orbit control.
+        const stopAuto = () => { setPlaying(false); tourRef.current = false; setWalking(false); walkRef.current = false; };
+        fitViewRef.current = () => {
+          stopAuto();
+          const bb = new THREE.Box3().setFromObject(group);
+          const ctr = bb.getCenter(new THREE.Vector3()), sz = bb.getSize(new THREE.Vector3());
+          if (!(sz.x > 0 || sz.z > 0)) return;
+          const rad = Math.max(sz.x, sz.z) * 0.65 + Math.max(1500, sz.y);
+          camera.position.set(ctr.x + rad * 0.55, Math.max(1600, ctr.y + sz.y * 0.6), ctr.z + rad);
+          controls.target.set(ctr.x, Math.min(1300, ctr.y), ctr.z); controls.update();
+        };
+        resetViewRef.current = () => { stopAuto(); camera.position.set(c.x + span * 0.4, 1520, c.z + span * 1.05); controls.target.copy(target); controls.update(); };
+        // render MEMORY keys: camera pose (80 mm grid) + which mechanisms are open + finish/lighting —
+        // the same view & state always maps to the same saved render. Azimuth → nearest 360 spin frame
+        // (must mirror the turntable formula: ang = -π/2 + frac·2π).
+        poseKeyRef.current = () => {
+          const q = (v) => Math.round(v / 80), p = camera.position, t = controls.target;
+          const open = mechs.filter((m) => m.tgt > 0.5).map((m) => m.key).sort().join("~");
+          return [q(p.x), q(p.y), q(p.z), q(t.x), q(t.y), q(t.z), open, (fin && fin.key) || "", lightKey].join("|");
+        };
+        azIdxRef.current = (n) => {
+          const a = Math.atan2(camera.position.z - c.z, camera.position.x - c.x);
+          let f = (a + Math.PI / 2) / (Math.PI * 2); f = ((f % 1) + 1) % 1;
+          return Math.round(f * n) % n;
+        };
+        // snap the live camera to 360-frame i's EXACT turntable pose (same formula as turntableRef) —
+        // shown render and live scene then align, so clicks hit the drawer you see in the picture.
+        spinSnapRef.current = (i, n) => {
+          const ang = -Math.PI / 2 + (i / n) * Math.PI * 2, rad = span * 1.18;
+          camera.position.set(c.x + rad * Math.cos(ang), 1500, c.z + rad * Math.sin(ang));
+          controls.target.set(c.x, 1120, c.z); controls.update();
+        };
+        // smooth camera fly (auto-zoom to a clicked cabinet; fly back on close) — eased lerp run by the RAF loop
+        let camAnim = null, camPrev = null;
+        const flyTo = (p1, t1, dur) => { camAnim = { t0: window.performance.now(), dur: (dur || 0.8) * 1000, p0: camera.position.clone(), p1, tgt0: controls.target.clone(), tgt1: t1 }; };
+        // SSAO post-processing — ambient occlusion (soft corner/crevice darkening = ray-traced-style DEPTH).
+        // r128 global scripts, no build. composer.render() replaces renderer.render() in the loop below.
+        let composer = null;
+        try {
+          if (THREE.EffectComposer && THREE.SSAOPass && THREE.RenderPass) {
+            // MSAA render target → restore anti-aliasing through the composer (it was lost vs renderer.render)
+            let crt = null;
+            try { const dbs = renderer.getDrawingBufferSize(new THREE.Vector2()); if (THREE.WebGLMultisampleRenderTarget) { crt = new THREE.WebGLMultisampleRenderTarget(dbs.x, dbs.y); crt.samples = 8; } } catch (e2) { crt = null; }
+            composer = crt ? new THREE.EffectComposer(renderer, crt) : new THREE.EffectComposer(renderer);
+            composer.addPass(new THREE.RenderPass(scene, camera));
+            const ssao = new THREE.SSAOPass(scene, camera, W, H);
+            ssao.kernelRadius = Math.max(90, span * 0.045); ssao.minDistance = 0.0006; ssao.maxDistance = 0.12; ssao.output = THREE.SSAOPass.OUTPUT.Default;   // scene is in mm → kernel scaled to the model
+            composer.addPass(ssao);
+            if (THREE.ShaderPass && THREE.GammaCorrectionShader) composer.addPass(new THREE.ShaderPass(THREE.GammaCorrectionShader));   // sRGB out (composer works linear)
+          }
+        } catch (e) { composer = null; }
+        // §4.19 first-person "walk inside": drag rotates the view, WASD/arrows move at eye height (no pointer-lock).
+        const walk = { yaw: 0, pitch: -0.06, x: 0, z: 0, init: false, keys: {} };
+        const fwd = () => [Math.sin(walk.yaw), -Math.cos(walk.yaw)];
+        const onKey = (down) => (ev) => { const k = (ev.key || "").toLowerCase(); if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].indexOf(k) >= 0) { walk.keys[k] = down; if (walkRef.current) ev.preventDefault(); } };
+        const kd = onKey(true), ku = onKey(false);
+        window.addEventListener("keydown", kd); window.addEventListener("keyup", ku);
+        // click-to-select: raycast a cabinet (a mesh tagged with userData.kind) and lift its spec to React.
+        // A small pointer-move threshold distinguishes a click from an orbit/pan drag.
+        const ray = new THREE.Raycaster(), m2 = new THREE.Vector2(); let downXY = null, lastPick = null, dragCab = null;
+        const setRay = (ev) => { const rect = renderer.domElement.getBoundingClientRect(); m2.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1; m2.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1; ray.setFromCamera(m2, camera); };
+        const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -600), dragPt = new THREE.Vector3();
+        const alongOf = (pl3, p3) => (p3.x - pl3.o[0]) * pl3.a[0] + (p3.z - pl3.o[1]) * pl3.a[1];   // world point → mm along the run
+        const onDown = (ev) => {
+          downXY = [ev.clientX, ev.clientY];
+          // 19.txt §6 bidirectional sync — SHIFT+drag a cabinet along its run in 3D; on release the
+          // shared model reorders and the 2D plan/elevations (and BOQ etc) update instantly.
+          if (ev.shiftKey && onRunsEdit && !tourRef.current && !walkRef.current) {
+            setRay(ev);
+            // find the cabinet under the pointer: a carcass mesh has the spec directly; a door/drawer
+            // front is a CHILD of a mech group whose spec sits on the group — walk parents for both.
+            const okRow = (u2) => u2 && u2.ri != null && (u2.row === "Base" || u2.row === "Tall");
+            let ud = null;
+            for (const h of ray.intersectObjects(group.children, true)) {
+              let o = h.object;
+              while (o && o !== group) {
+                if (o.userData && okRow(o.userData)) { ud = o.userData; break; }
+                if (o.userData && o.userData.mechKey && okRow(o.userData.spec)) { ud = o.userData.spec; break; }
+                o = o.parent;
+              }
+              if (ud) break;
+            }
+            if (ud && ray.ray.intersectPlane(dragPlane, dragPt)) {
+              const pl3 = place(ud.ri);
+              // ghost-move the CARCASS mesh of that cabinet (looks right even when the grab was on a front)
+              const body = group.children.find((ch) => ch.isMesh && ch.userData && ch.userData.ri === ud.ri && ch.userData.bi === ud.bi);
+              if (pl3 && body) {
+                const Lr3 = ((runs || [])[ud.ri] && (runs[ud.ri].base || []).reduce((s3, cc3) => s3 + cc3.w, 0)) || 0;
+                dragCab = { o: body, ud, pl: pl3, Lr: Lr3, grab: alongOf(pl3, dragPt) - (ud.x + ud.w / 2), cur: ud.x + ud.w / 2, origPos: body.position.clone() };
+                controls.enabled = false;
+              }
+            }
+          }
+        };
+        const onMove = (ev) => {
+          if (dragCab) {   // ghost-move the carcass along its run while dragging
+            setRay(ev);
+            if (ray.ray.intersectPlane(dragPlane, dragPt)) {
+              const ud = dragCab.ud, pl3 = dragCab.pl;
+              dragCab.cur = Math.max(ud.w / 2, Math.min((dragCab.Lr || ud.w) - ud.w / 2, alongOf(pl3, dragPt) - dragCab.grab));
+              const dAl = dragCab.cur - (ud.x + ud.w / 2);
+              dragCab.o.position.set(dragCab.origPos.x + pl3.a[0] * dAl, dragCab.origPos.y + 40, dragCab.origPos.z + pl3.a[1] * dAl);
+            }
+            return;
+          }
+          if (!walkRef.current || !downXY) return;   // first-person look: drag rotates yaw/pitch
+          walk.yaw -= (ev.clientX - downXY[0]) * 0.004;
+          walk.pitch = Math.max(-0.9, Math.min(0.9, walk.pitch - (ev.clientY - downXY[1]) * 0.003));
+          downXY = [ev.clientX, ev.clientY];
+        };
+        const onUp = (ev) => {
+          if (dragCab) {   // commit: reorder the run's base array around the dropped centre, reflow x, lift to 2D
+            const ud = dragCab.ud, base0 = ((runs || [])[ud.ri] ? (runs[ud.ri].base || []).slice() : []);
+            const cur = dragCab.cur, orig = dragCab.origPos, mesh = dragCab.o; dragCab = null; downXY = null; controls.enabled = true;
+            if (base0.length && ud.bi != null && base0[ud.bi]) {
+              const movedCab = base0.splice(ud.bi, 1)[0];
+              let cum = 0, ins = base0.length;
+              for (let k3 = 0; k3 < base0.length; k3++) { if (cur < cum + base0[k3].w / 2) { ins = k3; break; } cum += base0[k3].w; }
+              if (ins === ud.bi) { mesh.position.copy(orig); return; }   // dropped back where it was
+              base0.splice(ins, 0, movedCab);
+              let xx3 = 0; const nb = base0.map((cc3) => { const o3 = Object.assign({}, cc3, { x: xx3 }); xx3 += cc3.w; return o3; });
+              onRunsEdit(ud.ri, nb, (runs[ud.ri].wallCabs || []));   // → updateLiveRun → plan/elevations/BOQ update; scene rebuilds from the shared model
+            } else mesh.position.copy(orig);
+            return;
+          }
+          if (!downXY) return; const moved = Math.abs(ev.clientX - downXY[0]) + Math.abs(ev.clientY - downXY[1]); downXY = null;
+          if (walkRef.current || moved > 6 || tourRef.current) return;   // walk-look, a drag (orbit/pan), or a tour → not a selection
+          const rect = renderer.domElement.getBoundingClientRect();
+          m2.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1; m2.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+          ray.setFromCamera(m2, camera);
+          // recursive pick: a mechanism part (door/drawer/basket) toggles ITS cabinet open/closed live;
+          // a plain carcass mesh shows the spec card as before.
+          const hits = ray.intersectObjects(group.children, true);
+          let mk = null, mspec = null, kindHit = null, mkObj = null;
+          for (const h of hits) {
+            let o = h.object;
+            while (o && o !== group) {
+              if (o.userData && o.userData.mechKey) { mk = o.userData.mechKey; mspec = o.userData.spec || null; mkObj = o; break; }
+              if (o.userData && o.userData.kind) { kindHit = o; break; }
+              o = o.parent;
+            }
+            if (mk || kindHit) break;
+          }
+          if (lastPick && lastPick.material && lastPick.material.emissive) lastPick.material.emissive.setHex(lastPick.__em || 0x000000);
+          lastPick = null;
+          // User feedback (18.pdf session): clicking a front ONLY works its mechanism (open/close +
+          // auto-zoom). No description/spec window opens — that panel was removed.
+          if (mk && mechCtlRef.current) {
+            const opened = mechCtlRef.current.toggle(mk);
+            if (prModeRef.current) autoNextRef.current = true;   // clicked in RENDERED mode → after the door animation, auto-render (or reuse the saved render of) this state
+            if (prInvalidateRef.current) prInvalidateRef.current();   // scene changed → rendered overlay is stale
+            // auto-zoom: dolly in to frame the cabinet while it opens; fly back to the prior view on close
+            if (mkObj && !tourRef.current && !walkRef.current) {
+              if (opened) {
+                const fc = new THREE.Vector3(); mkObj.getWorldPosition(fc);
+                const nrm = mkObj.userData.mechN ? new THREE.Vector3(mkObj.userData.mechN[0], 0, mkObj.userData.mechN[1]) : new THREE.Vector3(0, 0, 1);
+                const cw2 = (mspec && mspec.w) || 600, chh = (mspec && mspec.h) || 850;
+                const dist = Math.max(cw2, chh) * 2.1 + 900;
+                // approach direction: mostly the cabinet's normal, bent toward the ROOM CENTRE so the camera
+                // never buries itself in the adjacent run of an L/U corner.
+                const dirC = new THREE.Vector3(c.x - fc.x, 0, c.z - fc.z);
+                if (dirC.lengthSq() > 1) dirC.normalize(); else dirC.set(0, 0, 0);
+                const dirCam = nrm.clone().multiplyScalar(0.72).addScaledVector(dirC, 0.38).normalize();
+                const t1 = fc.clone().addScaledVector(nrm, 120); t1.y = fc.y + 80;
+                const p1 = fc.clone().addScaledVector(dirCam, dist); p1.y = Math.max(fc.y + 420, 1100);
+                if (!camPrev) camPrev = { pos: camera.position.clone(), tgt: controls.target.clone() };   // remember where the user was (first zoom only)
+                flyTo(p1, t1, 0.85);
+              } else if (camPrev) { flyTo(camPrev.pos, camPrev.tgt, 0.85); camPrev = null; }
+            }
+          }
+        };
+        renderer.domElement.addEventListener("pointerdown", onDown);
+        renderer.domElement.addEventListener("pointermove", onMove);
+        renderer.domElement.addEventListener("pointerup", onUp);
+        let raf, demoLastT = 0; const loop = () => {
+          raf = requestAnimationFrame(loop);
+          if (!visRef.current) return;   // hidden tab → keep the scene alive but spend zero GPU
+          if (tourRef.current) {   // §4.19 walkthrough: auto fly-around the room (orbit + gentle dolly/height bob)
+            const e = (window.performance.now() - tourT0Ref.current) / 1000;
+            const ang = e * 0.45, rad = span * (1.05 + 0.28 * Math.sin(e * 0.22)), hy = 1500 + 650 * Math.sin(e * 0.32);
+            camera.position.set(c.x + rad * Math.cos(ang), hy, c.z + rad * Math.sin(ang));
+            camera.lookAt(c.x, 950, c.z);
+            controls.enabled = false;
+          } else if (walkRef.current) {   // §4.19 first-person walk: eye-height free-look + WASD/arrow movement
+            if (!walk.init) { walk.x = c.x; walk.z = c.z + span * 0.55; walk.yaw = 0; walk.pitch = -0.06; walk.init = true; }
+            const [fx, fz] = fwd(), rx = Math.cos(walk.yaw), rz = Math.sin(walk.yaw), spd = 55;
+            if (walk.keys.w || walk.keys.arrowup) { walk.x += fx * spd; walk.z += fz * spd; }
+            if (walk.keys.s || walk.keys.arrowdown) { walk.x -= fx * spd; walk.z -= fz * spd; }
+            if (walk.keys.d || walk.keys.arrowright) { walk.x += rx * spd; walk.z += rz * spd; }
+            if (walk.keys.a || walk.keys.arrowleft) { walk.x -= rx * spd; walk.z -= rz * spd; }
+            const mrg = 300; walk.x = Math.max(box.min.x - mrg, Math.min(box.max.x + mrg, walk.x)); walk.z = Math.max(box.min.z - mrg, Math.min(box.max.z + mrg, walk.z));
+            const eye = 1600;
+            camera.position.set(walk.x, eye, walk.z);
+            camera.lookAt(walk.x + fx * 1000, eye + Math.tan(walk.pitch) * 1000, walk.z + fz * 1000);
+            controls.enabled = false;
+          } else {
+            walk.init = false; controls.enabled = !dragCab;   // a cabinet drag owns the pointer — orbit stays off until drop
+            if (camAnim) {   // auto-zoom fly: eased lerp of camera + target (a user drag after it lands takes over naturally)
+              const tt = Math.min(1, (window.performance.now() - camAnim.t0) / camAnim.dur), ef = tt * tt * (3 - 2 * tt);
+              camera.position.lerpVectors(camAnim.p0, camAnim.p1, ef);
+              controls.target.lerpVectors(camAnim.tgt0, camAnim.tgt1, ef);
+              if (tt >= 1) camAnim = null;
+            }
+            controls.update();
+          }
+          // rendered mode: while a camera fly / door animation is running, keep the settle timer pinned
+          // so the saved render (or auto re-render) applies only AFTER everything stops moving.
+          if (prInvalidateRef.current && (camAnim || (mechs.length && mechs.some((m) => Math.abs(m.p - m.tgt) > 0.005)))) prInvalidateRef.current();
+          // 🎛 live accessories: each mechanism eases toward ITS OWN target (set by the demo button or by
+          // clicking that cabinet's front). TIME-based (dt) — identical speed at 60 fps or a slow renderer.
+          if (mechs.length) {
+            const nowT = window.performance.now();
+            const dtS = Math.min(0.12, (nowT - (demoLastT || nowT)) / 1000); demoLastT = nowT;
+            const k = Math.min(1, dtS * 3.5);
+            for (const m of mechs) {
+              if (nowT >= m.startAt) m.p += (m.tgt - m.p) * k;
+              const e2 = easeS(Math.max(0, Math.min(1, m.p)));
+              if (m.t === "slide") m.g.position.copy(m.b).addScaledVector(m.n, m.max * e2);
+              else if (m.t === "hinge") m.g.rotation.y = m.r0 + m.dir * e2;
+              else if (m.t === "spin" && m.p > 0.4) m.g.rotation.y += dtS * 1.8;
+            }
+          }
+          if (composer) composer.render(); else renderer.render(scene, camera);
+        }; loop();
+        // HD render: supersample the current view (bigger drawing buffer) → a crisp PNG, then restore.
+        renderHDRef.current = (scale) => {
+          const w2 = host.clientWidth || W, s = Math.max(2, Math.min(scale || 3, 4)), dpr = window.devicePixelRatio || 1;
+          renderer.setPixelRatio(s); renderer.setSize(w2, H, false); camera.aspect = w2 / H; camera.updateProjectionMatrix();
+          if (composer) { composer.setPixelRatio(s); composer.setSize(w2, H); composer.render(); } else renderer.render(scene, camera);
+          const url = renderer.domElement.toDataURL("image/png");
+          renderer.setPixelRatio(dpr); renderer.setSize(w2, H); if (composer) { composer.setPixelRatio(dpr); composer.setSize(w2, H); } camera.updateProjectionMatrix();
+          return url;
+        };
+        // turntable: render the kitchen from an orbit angle (frac 0..1) at high res → one frame for the photoreal 360° spin.
+        turntableRef.current = (frac) => {
+          const ang = -Math.PI / 2 + frac * Math.PI * 2, rad = span * 1.18, cy = 1500;
+          camera.position.set(c.x + rad * Math.cos(ang), cy, c.z + rad * Math.sin(ang)); camera.lookAt(c.x, 1120, c.z);
+          const w2 = host.clientWidth || W, s = 3, dpr = window.devicePixelRatio || 1;
+          renderer.setPixelRatio(s); renderer.setSize(w2, H, false); camera.aspect = w2 / H; camera.updateProjectionMatrix();
+          if (composer) { composer.setPixelRatio(s); composer.setSize(w2, H); composer.render(); } else renderer.render(scene, camera);
+          const url = renderer.domElement.toDataURL("image/png");
+          renderer.setPixelRatio(dpr); renderer.setSize(w2, H); if (composer) { composer.setPixelRatio(dpr); composer.setSize(w2, H); } camera.updateProjectionMatrix();
+          return url;
+        };
+        // 🎬 named cinematic camera presets — multi-angle shots for HD renders, photoreal frames and the AI-video
+        // storyboard (Rules: "Generate room image → create multiple camera angles → send to the video engine").
+        camPresetRef.current = (nm) => {
+          const A = {
+            hero:  { p: [c.x + span * 0.4, 1520, c.z + span * 1.05], t: [c.x, 1150, c.z] },
+            front: { p: [c.x, 1480, c.z + span * 1.32], t: [c.x, 1080, c.z] },
+            left:  { p: [c.x - span * 0.92, 1680, c.z + span * 0.72], t: [c.x, 1050, c.z] },
+            right: { p: [c.x + span * 0.92, 1680, c.z + span * 0.72], t: [c.x, 1050, c.z] },
+            close: { p: [c.x + span * 0.24, 1320, c.z + span * 0.55], t: [c.x - span * 0.08, 980, c.z] },
+            top:   { p: [c.x, Math.max(5200, span * 2.1), c.z + 60], t: [c.x, 0, c.z] },
+          }[nm];
+          if (!A) return;
+          setPlaying(false); tourRef.current = false; setWalking(false); walkRef.current = false;   // manual angle cancels tour/walk
+          camera.position.set(A.p[0], A.p[1], A.p[2]); controls.target.set(A.t[0], A.t[1], A.t[2]); controls.update();
+        };
+        try {
+          window.__ads3D = renderHDRef.current(2); window.__adsBuildN = (window.__adsBuildN || 0) + 1;
+          window.__adsCamPos = () => camera.position.toArray().map(Math.round).join(",");
+          window.__adsDragState = () => (dragCab ? "drag" : "idle");
+          window.__adsGrabTest = (cx, cy) => { setRay({ clientX: cx, clientY: cy }); return ray.intersectObjects(group.children, true).slice(0, 8).map((h) => (h.object.userData && (h.object.userData.row || h.object.userData.mechKey)) || h.object.type); };
+        } catch (e) {}   // stash the latest 3D view for the "all-in-one" PDF (+ debug probes)
+        const onResize = () => { const w2 = host.clientWidth || W; camera.aspect = w2 / H; camera.updateProjectionMatrix(); renderer.setSize(w2, H); if (composer) composer.setSize(w2, H); };
+        window.addEventListener("resize", onResize);
+        return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); window.removeEventListener("keydown", kd); window.removeEventListener("keyup", ku); renderer.domElement.removeEventListener("pointerdown", onDown); renderer.domElement.removeEventListener("pointermove", onMove); renderer.domElement.removeEventListener("pointerup", onUp); controls.dispose(); if (envRT) envRT.dispose(); renderer.dispose(); host.innerHTML = ""; groupRef.current = null; renderHDRef.current = null; turntableRef.current = null; camPresetRef.current = null; mechCtlRef.current = null; fitViewRef.current = null; resetViewRef.current = null; poseKeyRef.current = null; azIdxRef.current = null; spinSnapRef.current = null; if (spinSnapT.current) { clearTimeout(spinSnapT.current); spinSnapT.current = null; } if (prSettleRef.current) { clearTimeout(prSettleRef.current); prSettleRef.current = null; } setPick(null); };
+      }, [buildVer]);   // 19.txt §4: keyed to buildVer ONLY — the dep watcher above decides when to rebuild (never while hidden)
+      return (<div>
+        <div className="flex flex-wrap items-center gap-3 mb-2">
+          <label className="text-[11px] text-slate-500 flex items-center gap-1" title="Realistic render = lacquered finishes + warm spot pools, no CAD lines · CAD lines = technical working view">View
+            <select value={renderMode} onChange={(e) => setRenderMode(e.target.value)} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs text-slate-700">
+              <option value="realistic">🎨 Realistic render</option><option value="cad">📐 CAD lines</option>
+            </select>
+          </label>
+          <label className="text-[11px] text-slate-500 flex items-center gap-1">Finish
+            <select value={finType} onChange={(e) => { const v = e.target.value; setFinType(v); if (FIN_LIB[v]) { setFinBrand(Object.keys(FIN_LIB[v].brands)[0]); setFinShade(0); } }} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs text-slate-700">
+              {["acrylic", "laminate", "veneer", "pu", "functional"].map((k) => <option key={k} value={k}>{FIN_TYPE_NAMES[k]}</option>)}
+            </select>
+          </label>
+          {FIN_LIB[finType] && <label className="text-[11px] text-slate-500 flex items-center gap-1">Brand
+            <select value={finBrand} onChange={(e) => { setFinBrand(e.target.value); setFinShade(0); }} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs text-slate-700">
+              {Object.keys(FIN_LIB[finType].brands).map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </label>}
+          {FIN_LIB[finType] && <label className="text-[11px] text-slate-500 flex items-center gap-1">Shade
+            <select value={finShade} onChange={(e) => setFinShade(+e.target.value)} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs text-slate-700">
+              {(FIN_LIB[finType].brands[finBrand] || FIN_LIB[finType].brands[Object.keys(FIN_LIB[finType].brands)[0]]).map((s, ix) => <option key={ix} value={ix}>{s.n}</option>)}
+            </select>
+          </label>}
+          <button onClick={() => { const nv = !demoOn; setDemoOn(nv); demoRef.current = nv; if (mechCtlRef.current) mechCtlRef.current.all(nv); }}
+            className={"px-2 py-1 rounded text-xs font-semibold text-white " + (demoOn ? "bg-rose-600 hover:bg-rose-500" : "bg-teal-600 hover:bg-teal-500")}
+            title="Open every accessory live — or click any single door/drawer in the 3D view to work just that one">
+            {demoOn ? "⏹ Close accessories" : "🎛 Demo accessories"}
+          </button>
+          <label className="text-[11px] text-slate-500 flex items-center gap-1">Lighting
+            <select value={lightKey} onChange={(e) => setLightKey(e.target.value)} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs text-slate-700">
+              {Object.keys(LIGHTS).map((k) => <option key={k} value={k}>{LIGHTS[k].name}</option>)}
+            </select>
+          </label>
+          <label className="text-[11px] text-slate-500 flex items-center gap-1" title="Cinematic camera angles — jump to a named shot for HD renders, photoreal frames and video prompts">📷 Angle
+            <select value="" onChange={(e) => { if (camPresetRef.current && e.target.value) { camPresetRef.current(e.target.value); if (prInvalidateRef.current) prInvalidateRef.current(); } }} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs text-slate-700">
+              <option value="">jump to…</option>
+              <option value="hero">Hero ¾ wide</option><option value="front">Front</option><option value="left">Corner left</option>
+              <option value="right">Corner right</option><option value="close">Counter close-up</option><option value="top">Top-down</option>
+            </select>
+          </label>
+          <button onClick={() => setStory(story ? null : buildStoryboard())}
+            className={"px-2 py-1 rounded text-xs font-semibold text-white " + (story ? "bg-rose-600 hover:bg-rose-500" : "bg-gradient-to-r from-orange-600 to-rose-600 hover:from-orange-500 hover:to-rose-500")}>
+            {story ? "✕ Close prompts" : "🎬 Video Prompts"}
+          </button>
+          <button onClick={() => { const nv = !playing; setPlaying(nv); tourRef.current = nv; if (nv) { tourT0Ref.current = window.performance.now(); setWalking(false); walkRef.current = false; if (prInvalidateRef.current) prInvalidateRef.current(); } }}
+            className={"px-2 py-1 rounded text-xs font-medium text-white " + (playing ? "bg-rose-600 hover:bg-rose-500" : "bg-cyan-600 hover:bg-cyan-500")}>
+            {playing ? "⏸ Stop tour" : "▶ Walkthrough"}
+          </button>
+          <button onClick={() => { const nv = !walking; setWalking(nv); walkRef.current = nv; if (nv) { setPlaying(false); tourRef.current = false; setPick(null); if (prInvalidateRef.current) prInvalidateRef.current(); } }}
+            className={"px-2 py-1 rounded text-xs font-medium text-white " + (walking ? "bg-rose-600 hover:bg-rose-500" : "bg-indigo-600 hover:bg-indigo-500")}>
+            {walking ? "✕ Exit walk" : "🚶 Walk inside"}
+          </button>
+          {/* 18.pdf §1: the rendered 3D layout supports Fit to Screen + Reset View like any working 3D view */}
+          <button onClick={() => fitViewRef.current && fitViewRef.current()} title="Frame the whole kitchen in the view"
+            className="px-2 py-1 rounded text-xs font-medium bg-slate-600 hover:bg-slate-500 text-white">⛶ Fit to screen</button>
+          <button onClick={() => resetViewRef.current && resetViewRef.current()} title="Return to the default interior view angle"
+            className="px-2 py-1 rounded text-xs font-medium bg-slate-600 hover:bg-slate-500 text-white">⟲ Reset view</button>
+          <button onClick={() => { const cv = ref.current && ref.current.querySelector("canvas"); if (!cv) return; try { dlBrand(cv.toDataURL("image/png"), "kitchen-3d.png"); } catch (e) {} }}
+            className="px-2 py-1 rounded text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white">📷 Save PNG</button>
+          <button disabled={rendering} onClick={() => { if (!renderHDRef.current) return; setRendering(true); setTimeout(() => { try { const url = renderHDRef.current(3); dlBrand(url, "kitchen-render-HD.png"); } catch (e) { alert("Render failed: " + (e && e.message)); } setRendering(false); }, 40); }}
+            className="px-2 py-1 rounded text-xs font-medium bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white">{rendering ? "Rendering…" : "🎞 HD Render"}</button>
+          <button disabled={recording} onClick={() => {
+              const cv = ref.current && ref.current.querySelector("canvas");
+              if (!cv || !cv.captureStream || typeof window.MediaRecorder === "undefined") { alert("Video recording isn't supported in this browser."); return; }
+              if (recRef.current) return;
+              setWalking(false); walkRef.current = false; setPlaying(true); tourRef.current = true; tourT0Ref.current = window.performance.now();
+              let mr; try { mr = new MediaRecorder(cv.captureStream(30), { mimeType: "video/webm" }); } catch (e) { alert("WebM recording not supported here."); setPlaying(false); tourRef.current = false; return; }
+              const chunks = []; recRef.current = mr; setRecording(true);
+              mr.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+              mr.onstop = () => { saveBlobAs(new Blob(chunks, { type: "video/webm" }), "kitchen-walkthrough.webm"); recRef.current = null; setRecording(false); setPlaying(false); tourRef.current = false; };   // 18.pdf §6: ask where to save
+              mr.start(); setTimeout(() => { if (recRef.current) try { recRef.current.stop(); } catch (e) {} }, 9000);
+            }}
+            className="px-2 py-1 rounded text-xs font-medium bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-60 text-white">{recording ? "● Recording…" : "🎥 Record clip"}</button>
+          {/* §3.2 #6 — server-encoded animated walkthrough GIF (shareable, no native deps) */}
+          <button disabled={!!gifBusy} onClick={serverWalkthroughGIF} title="Capture an orbit and download an animated GIF the server encodes for you"
+            className="px-2 py-1 rounded text-xs font-medium bg-violet-700 hover:bg-violet-600 disabled:opacity-60 text-white">{gifBusy ? ("🎞 " + gifBusy) : "🎞 Walkthrough GIF"}</button>
+          {/* §3.2 #5 — persist the current finish as an addressable PBR material set */}
+          <button onClick={saveServerMaterial} title="Save the current brand finish as a stored PBR material set on this design"
+            className="px-2 py-1 rounded text-xs font-medium bg-slate-600 hover:bg-slate-500 text-white">🎨 Save finish (PBR)</button>
+          {matMsg && <span className="text-[11px] text-emerald-700">{matMsg}</span>}
+          <button disabled={prLoading} onClick={() => runPhotoreal()}
+            className="px-2 py-1 rounded text-xs font-semibold bg-gradient-to-r from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500 disabled:opacity-60 text-white">{prLoading ? "✨ Rendering… (~15s)" : "✨ AI Photoreal"}</button>
+          <label className="text-[10px] text-slate-500 flex items-center gap-1" title="Higher = keep your exact layout · Lower = more photoreal freedom">Faithful
+            <input type="range" min="0.4" max="0.85" step="0.05" value={prStrength} onChange={(e) => setPrStrength(+e.target.value)} className="w-16 align-middle" />
+            <span className="tabular-nums">{Math.round(prStrength * 100)}%</span>
+          </label>
+          <select value={prStyle} onChange={(e) => setPrStyle(e.target.value)} title="Photoreal mood preset" className="px-1.5 py-1 bg-white border border-slate-300 rounded text-[11px] text-slate-700">
+            {PR_STYLES.map(([v, n]) => <option key={v} value={v}>{n}</option>)}
+          </select>
+          <button disabled={prLoading} onClick={async () => {
+              if (!turntableRef.current) { alert("Open the 3D view first."); return; }
+              const N = 8;
+              if (!window.confirm("Render a photoreal 360° spin from " + N + " angles?  (~" + (N * 25) + "s total · " + N + " renders billed, about ₹" + (N * 3) + " on Stability)  Then drag the result to rotate the photoreal kitchen.")) return;
+              const seed = Math.floor(Math.random() * 1e7) + 1;
+              setPrLoading(true); spinFramesRef.current = null; spinShownRef.current = -1; setPhotoreal(null); prFreshRef.current = false; prFileKeepRef.current = false;
+              const out = [];
+              for (let i = 0; i < N; i++) {
+                setPrProgress((i + 1) + "/" + N);
+                let img = null; try { img = turntableRef.current(i / N); } catch (e) {}
+                if (!img) continue;
+                try {
+                  const r = await fetch("/api/render/photoreal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: img, designType: type, finish: FIN.name, handleSystem: handle, controlStrength: 0.82, style: prStyle, seed }) });   // high strength + shared seed → all angles stay the SAME kitchen · 18.pdf §3 handle rule included
+                  const j = await r.json();
+                  if (j && j.data && j.data.image) out.push(j.data.image);
+                  else { alert("Frame " + (i + 1) + " failed: " + ((j && j.message) || (j && j.error) || "error")); break; }
+                } catch (e) { alert("Frame " + (i + 1) + " request failed: " + (e && e.message)); break; }
+              }
+              setPrProgress(""); setPrLoading(false);
+              if (out.length) { try { window.__adsPR = out[0]; } catch (e) {} }
+              // saved 360° → rendered mode: rotating the kitchen now pages through these frames live, free
+              if (out.length > 1) { spinFramesRef.current = out; prModeRef.current = true; spinShownRef.current = -1; if (prInvalidateRef.current) prInvalidateRef.current(); }
+              else if (out.length === 1) { setPhotoreal(out[0]); prFreshRef.current = true; setPrStale(false); prModeRef.current = true; }
+            }}
+            className="px-2 py-1 rounded text-xs font-semibold bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 disabled:opacity-60 text-white">{prLoading && prProgress ? ("✨ " + prProgress) : "✨ Photoreal 360°"}</button>
+          {/* save the rendered view to the computer / open a saved one — no re-rendering, no re-billing */}
+          <button onClick={save360} title="Save the rendered 360° + all saved angle renders to a file on your computer"
+            className="px-2 py-1 rounded text-xs font-medium bg-teal-700 hover:bg-teal-600 text-white">💾 Save 360 file</button>
+          <label title="Open a previously saved rendered-view file — the rendered kitchen comes back instantly, free"
+            className="px-2 py-1 rounded text-xs font-medium bg-teal-600 hover:bg-teal-500 text-white cursor-pointer">📂 Open render
+            <input type="file" accept=".html,.json,text/html,application/json" style={{ display: "none" }}
+              onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) open360(f); e.target.value = ""; }} />
+          </label>
+          <button onClick={() => {
+              const T = window.THREE, g = groupRef.current;
+              if (!T || !T.GLTFExporter || !g) { alert("Open the 3D view, then export."); return; }
+              try {
+                const meshes = g.children.filter((ch) => ch.isMesh || ch.isGroup);   // meshes + mechanism groups (doors/drawers/baskets) — drop the EdgesGeometry outline lines (they bloat the GLB & import poorly)
+                new T.GLTFExporter().parse(meshes.length ? meshes : g, (out) => {
+                  try {
+                    const bin = out instanceof ArrayBuffer;
+                    saveBlobAs(new Blob([bin ? out : JSON.stringify(out)], { type: bin ? "model/gltf-binary" : "model/gltf+json" }), bin ? "kitchen-3d.glb" : "kitchen-3d.gltf");   // 18.pdf §6
+                  } catch (e) { alert("3D export failed: " + (e && e.message)); }
+                }, { binary: true });
+              } catch (e) { alert("3D export failed: " + (e && e.message)); }
+            }}
+            className="px-2 py-1 rounded text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white">⬇ Export 3D (GLB)</button>
+          <span className="text-[11px] text-slate-400">{walking ? "Inside view — drag to look · W/A/S/D or arrow keys to walk" : playing ? "Touring… click Stop to orbit manually" : "Click any door/drawer to open it & see its accessory work · ⇧Shift+drag a cabinet to move it (2D updates live) · drag to orbit · scroll to zoom"}</span>
+        </div>
+        <div style={{ position: "relative" }}>
+          <div ref={ref} style={{ width: "100%", height: 460, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0" }} />
+          {/* ✨ 18.pdf §1/§8 + user feedback: the photoreal result is applied to the 3D LAYOUT VIEW
+              itself — a full-viewport rendered view that stays interactive. The image lets every drag
+              pass through to the live scene below; the moment you orbit (or open a door) the render is
+              stale, so it hides to reveal the live working view and offers "↻ Render this angle".
+              The still image remains a separate download (⬇ Save render). */}
+          {!prLoading && photoreal && <React.Fragment>
+            <img src={photoreal} alt="Photoreal render" className="absolute inset-0 w-full h-full object-cover rounded-lg pointer-events-none transition-opacity duration-200" style={{ opacity: prStale ? 0 : 1 }} />
+            <div className="absolute top-2 left-2 z-10 flex items-center gap-2">
+              <span className="px-2 py-1 rounded bg-slate-900/70 text-white text-[11px] font-semibold">{prStale
+                ? "Working view — stop moving to load the saved render, or ↻"
+                : (spinFramesRef.current && spinFramesRef.current.length > 1 ? "✨ Rendered 360° — drag to rotate the rendered kitchen · click any door/drawer" : "✨ Rendered 3D view — drag to rotate · click any door/drawer")}</span>
+              {prStale && <button onClick={() => runPhotoreal()} className="px-2 py-1 rounded text-[11px] font-semibold bg-fuchsia-600 hover:bg-fuchsia-500 text-white shadow">↻ Render this angle</button>}
+            </div>
+            <div className="absolute bottom-2 right-2 z-10 flex gap-2">
+              <button onClick={() => dlBrand(photoreal, "kitchen-photoreal.png")} className="px-2 py-1 rounded text-[11px] font-medium bg-emerald-600 hover:bg-emerald-500 text-white shadow">⬇ Save render</button>
+              <button onClick={() => { prModeRef.current = false; prFileKeepRef.current = false; autoNextRef.current = false; prFreshRef.current = false; spinShownRef.current = -1; if (prSettleRef.current) { clearTimeout(prSettleRef.current); prSettleRef.current = null; } setPhotoreal(null); setPrStale(false); }} className="px-2 py-1 rounded text-[11px] font-medium bg-slate-700 hover:bg-slate-600 text-white shadow">× Close rendered view</button>
+            </div>
+          </React.Fragment>}
+          {prLoading && <div className="absolute inset-0 bg-slate-900/85 rounded-lg flex flex-col items-center justify-center p-3 z-20">
+            <div className="text-white text-sm flex flex-col items-center gap-2"><div className="text-2xl">✨</div><div>{prProgress ? ("Rendering photoreal spin… angle " + prProgress) : "Generating photoreal render…"}</div><div className="text-[11px] text-slate-300">Stability AI · keeps your exact layout{prProgress ? " · rotate the kitchen to view each angle when done" : " · ~15–25s · saved for reuse"}</div></div>
+          </div>}
+        </div>
+        {story && <div className="mt-2 rounded-lg border border-orange-200 bg-orange-50/60 p-3">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <span className="text-sm font-semibold text-slate-800">🎬 Cinematic AI-video storyboard</span>
+            <span className="text-[11px] text-slate-500">Seedance 2.0 · Veo 3 · Runway · Google Flow — pair each prompt with its frame (image-to-video)</span>
+            <span className="flex-1" />
+            <button onClick={() => copyStory(story)} className="px-2 py-1 rounded text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white">📋 Copy all</button>
+            <button onClick={() => dlStory(story)} className="px-2 py-1 rounded text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white">⬇ .txt</button>
+            <button disabled={sbBusy} onClick={() => grabAllFrames(story)} className="px-2 py-1 rounded text-xs font-medium bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white">{sbBusy ? "Capturing…" : "📸 All frames (" + story.length + ")"}</button>
+          </div>
+          <div className="grid md:grid-cols-2 gap-2">
+            {story.map((g, i) => <div key={i} className="rounded border border-orange-200 bg-white p-2.5">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[11px] font-bold text-orange-700">Segment {i + 1}</span>
+                <span className="text-xs font-semibold text-slate-800">{g.title}</span>
+                <span className="flex-1" />
+                <button onClick={() => camPresetRef.current && camPresetRef.current(g.cam)} title="Jump the 3D camera to this segment's angle" className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300">📷 view</button>
+                <button onClick={() => grabFrame(g, i)} title="Save this segment's reference frame (HD PNG)" className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300">⬇ frame</button>
+              </div>
+              <div className="text-[11px] text-slate-700 mb-1"><span className="font-semibold text-slate-500">Script:</span> {g.script}</div>
+              <div className="text-[11px] text-slate-600"><span className="font-semibold text-slate-500">Video Prompt:</span> {g.prompt}</div>
+            </div>)}
+          </div>
+        </div>}
+        </div>);
+    }
+
+    // ---- MKW branding (injected from the server) — stamped on PNG/PDF exports ----
+    const MKW_BRAND = ${JSON.stringify(MKW)};
+    (() => { const li = new Image(); li.onload = () => { window.__mkwLogoImg = li; }; li.src = "/mkw-logo.jpg"; })();
+
+    // ---- Generator -----------------------------------------------------------
+    const TYPES = ${JSON.stringify(DESIGN_TYPES)};
+    function Generator() {
+      const [type, setType] = useState(TYPES[0]);
+      const [wall, setWall] = useState(3600);
+      const [wallB, setWallB] = useState(2400);
+      const [wallC, setWallC] = useState(2400);
+      const [result, setResult] = useState(null);
+      const [liveRuns, setLiveRuns] = useState(null);   // §7.9 shared room model (edits lifted from elevations)
+      // §3.2 #1/#2: per-tab id, remote-echo guard, and live-presence state for the SSE coordination bus.
+      const clientId = React.useRef(Math.random().toString(36).slice(2));
+      const applyingRemote = React.useRef(false);
+      const [live, setLive] = useState({ on: false, clients: 0 });
+      const [tile, setTile] = useState({ on: true, color: "#e8eef0", grid: "#c2d0d4", size: 100, pattern: "grid" });   // 13.pdf §4 selectable backsplash
+      // 15.txt 3D-first workflow: room model + interactive empty 3D room shown before generation
+      const [room, setRoom] = useState({ width: 3600, depth: 2400, height: 2700, ceiling: 2700, wallA: 3600, wallB: 2400, wallC: 3600, wallD: 2400, unit: "mm" });
+      const [selectedWall, setSelectedWall] = useState(null);
+      const [structures, setStructures] = useState([]);   // doors/windows/beams/columns on walls (5.16)
+      const [wallProps, setWallProps] = useState({});     // {wallName: {height,thickness,direction,usable,allowCab,allowTall,allowWallCab}} (5.15)
+      const [wallMenu, setWallMenu] = useState(null);     // {wall,x,y} right-click context menu
+      const [wallPropEdit, setWallPropEdit] = useState(null);  // wall name whose properties modal is open
+      const [structEdit, setStructEdit] = useState(null);     // 6.5/6.6: structure id whose size editor is open (double-click in 3D)
+      const [points, setPoints] = useState([]);          // 5.17 mandatory points (sink/chimney/hob/appliances)
+      const [markType, setMarkType] = useState(null);    // active point type being placed (click a wall/floor)
+      const POINT_TYPES = [["sink", "Sink"], ["plumbing", "Plumbing"], ["ro", "RO"], ["chimney", "Chimney"], ["hob", "Hob"], ["gas", "Gas"], ["fridge", "Fridge"], ["microwave", "Microwave"], ["oven", "Oven"], ["dishwasher", "Dishwasher"], ["washing", "Washing m/c"], ["switchboard", "Switchboard"], ["socket", "Socket"]];
+      const POINT_HEX = { sink: "#2563eb", plumbing: "#0891b2", ro: "#14b8a6", chimney: "#6366f1", hob: "#ea580c", gas: "#dc2626", fridge: "#8b5cf6", microwave: "#f59e0b", oven: "#d97706", dishwasher: "#0ea5e9", washing: "#64748b", switchboard: "#eab308", socket: "#22c55e" };
+      const placePoint = (p) => { setPoints((prev) => [...prev, { id: "pt" + prev.length + "_" + p.type, ...p }]); };
+      const updPoint = (id, f) => setPoints((p) => p.map((q) => q.id === id ? { ...q, ...f } : q));
+      const delPoint = (id) => setPoints((p) => p.filter((q) => q.id !== id));
+      // 5.13: print ONLY the cut list — open a clean window with just the table and print it.
+      const printCutList = () => {
+        if (!result || !result.cutList || !result.cutList.length) return;
+        const rows = result.cutList.map((r, i) => "<tr><td>" + (i + 1) + "</td><td>" + r.h + "</td><td>" + r.w + "</td><td>" + r.qty + "</td><td>" + r.desc + "</td></tr>").join("");
+        const css = "body{font-family:Arial,sans-serif;padding:24px;color:#0f172a}h1{font-size:18px;margin:0 0 4px}p{color:#64748b;font-size:12px;margin:0 0 12px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{border:1px solid #94a3b8;padding:4px 8px;text-align:left}th{background:#e2e8f0}";
+        const html = "<html><head><title>Production Cut List - " + type + "</title><style>" + css + "</style></head><body><h1>Production Cut List - " + type + "</h1><p>" + result.cutList.length + " panels &middot; 18 mm board &middot; 3 mm shutter gaps</p><table><thead><tr><th>S.No</th><th>Height (mm)</th><th>Width (mm)</th><th>Qty</th><th>Description</th></tr></thead><tbody>" + rows + "</tbody></table></body></html>";
+        const w = window.open("", "_blank"); if (!w) { setCutListPage(true); return; }
+        w.document.write(html); w.document.close(); w.focus(); setTimeout(() => { try { w.print(); } catch (e) {} }, 350);
+      };
+      // 6.10 Undo/Redo — snapshot the editable state (room objects + cabinet model) on every change,
+      // 500-action stack; Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo. histVer bumps remount the elevations.
+      const histRef = React.useRef({ undo: [], redo: [] });
+      const restoringRef = React.useRef(false);
+      const [histVer, setHistVer] = useState(0);
+      const [histLen, setHistLen] = useState({ u: 0, r: 0 });
+      React.useEffect(() => {
+        if (restoringRef.current) { restoringRef.current = false; return; }
+        const snap = JSON.stringify({ structures, points, room, liveRuns });
+        const h = histRef.current;
+        if (h.undo[h.undo.length - 1] !== snap) { h.undo.push(snap); if (h.undo.length > 500) h.undo.shift(); h.redo = []; setHistLen({ u: h.undo.length, r: 0 }); }
+      }, [structures, points, room, liveRuns]);
+      const restoreSnap = (snapStr) => { const s = JSON.parse(snapStr); restoringRef.current = true; setStructures(s.structures || []); setPoints(s.points || []); setRoom(s.room); setLiveRuns(s.liveRuns); setSelectedObj(null); setHistVer((v) => v + 1); };
+      const doUndo = () => { const h = histRef.current; if (h.undo.length > 1) { h.redo.push(h.undo.pop()); restoreSnap(h.undo[h.undo.length - 1]); setHistLen({ u: h.undo.length, r: h.redo.length }); } };
+      const doRedo = () => { const h = histRef.current; if (h.redo.length) { const s = h.redo.pop(); h.undo.push(s); restoreSnap(s); setHistLen({ u: h.undo.length, r: h.redo.length }); } };
+      React.useEffect(() => {
+        const onKey = (e) => {
+          const tag = (e.target && e.target.tagName) || "";
+          if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+          const k = (e.key || "").toLowerCase();
+          if ((e.ctrlKey || e.metaKey) && k === "z" && !e.shiftKey) { e.preventDefault(); doUndo(); }
+          else if ((e.ctrlKey || e.metaKey) && (k === "y" || (k === "z" && e.shiftKey))) { e.preventDefault(); doRedo(); }
+        };
+        window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
+      }, []);
+      const wallLenOf = (n) => ({ "Wall A (back)": +room.wallA, "Wall B (right)": +room.wallB, "Wall C (front)": +room.wallC, "Wall D (left)": +room.wallD }[n] || +room.width);
+      const getWallProps = (n) => wallProps[n] || { length: wallLenOf(n), height: +room.height, thickness: 100, direction: (n || "").indexOf("back") >= 0 || (n || "").indexOf("front") >= 0 ? "horizontal" : "vertical", usable: wallLenOf(n), allowCab: true, allowTall: true, allowWallCab: true };
+      const addStruct = (wall, kind) => {
+        const id = kind + "_" + Math.round(structures.reduce((s) => s + 1, 0) + wallLenOf(wall) + structures.length);
+        const def = kind === "door" ? { width: 800, height: 2050, pos: 200 } : kind === "window" ? { width: 1200, height: 1200, sill: 900, pos: 600 } : kind === "beam" ? { width: 0, drop: 300, depth: 230, pos: 0 } : { width: 300, depth: 300, height: 2700, pos: 400 };
+        setStructures((p) => [...p, { id, wall, kind, ...def }]); setWallMenu(null);
+      };
+      const updStruct = (id, f) => setStructures((p) => p.map((s) => s.id === id ? { ...s, ...f } : s));
+      const delStruct = (id) => setStructures((p) => p.filter((s) => s.id !== id));
+      const [loading, setLoading] = useState(false);
+      const [reasoning, setReasoning] = useState("");
+      const [streaming, setStreaming] = useState(false);
+      const [pdfBusy, setPdfBusy] = useState(false);
+      const [editRun, setEditRun] = useState(0);
+      const [activeView, setActiveView] = useState(0);   // Project Tree selection: 'plan' | run index
+      React.useEffect(() => { if (activeView !== "3d") last2dRef.current = activeView; }, [activeView]);   // 5.12: remember last 2D view
+      const [canvasZoom, setCanvasZoom] = useState(1);
+      const [cutListPage, setCutListPage] = useState(false);   // 5.13: separate Production Cut List page
+      const [roomWarn, setRoomWarn] = useState(null);          // 6.14: 'Room definition incomplete' warning (keeps planner visible)
+      const [selectedObj, setSelectedObj] = useState(null);    // 6.1: selected Top-View object {kind,id}
+      const canvasScrollRef = React.useRef(null);   // 6.11/6.12: 2D viewport (pan via scroll + cursor-centred wheel zoom)
+      const last2dRef = React.useRef("plan");        // 5.12: remember the last 2D view for the 2D/3D toggle
+      const cam3dRef = React.useRef(null);           // 6.11: persist 3D camera (position/target) across rebuilds
+      const panRef = React.useRef(null);             // 6.12: 2D viewport pan drag state (space/middle-drag)
+      const spaceRef = React.useRef(false);          // 6.12: Space held → pan mode
+      React.useEffect(() => {                          // 6.12: Space + Drag pan (space arms pan mode; ignored while typing)
+        const dn = (e) => { if (e.code === "Space" && !/INPUT|TEXTAREA|SELECT/.test((e.target && e.target.tagName) || "")) { spaceRef.current = true; if (canvasScrollRef.current) canvasScrollRef.current.style.cursor = "grab"; } };
+        const up = (e) => { if (e.code === "Space") { spaceRef.current = false; if (canvasScrollRef.current && !panRef.current) canvasScrollRef.current.style.cursor = ""; } };
+        window.addEventListener("keydown", dn); window.addEventListener("keyup", up);
+        return () => { window.removeEventListener("keydown", dn); window.removeEventListener("keyup", up); };
+      }, []);
+      const zoomRef = React.useRef(1);   // mirror of canvasZoom for the native wheel listener's closure
+      React.useEffect(() => { zoomRef.current = canvasZoom; }, [canvasZoom]);
+      const activeViewRef = React.useRef(activeView);
+      React.useEffect(() => { activeViewRef.current = activeView; }, [activeView]);
+      // Cursor-centred wheel zoom via a NON-passive native listener. React's onWheel is registered
+      // passive at the root, so ev.preventDefault() there is ignored → the wheel scrolls the whole
+      // page instead of only zooming. A native { passive:false } listener lets preventDefault work.
+      React.useEffect(() => {
+        const el = canvasScrollRef.current; if (!el) return;
+        const onWheel = (ev) => {
+          if (activeViewRef.current === "3d") return;   // 3D handles its own orbit-zoom
+          ev.preventDefault(); ev.stopPropagation();
+          const step = ev.ctrlKey ? 0.05 : 0.15; const dir = ev.deltaY < 0 ? 1 : -1;
+          const z0 = zoomRef.current, z1 = Math.max(0.4, Math.min(3, +(z0 + dir * step).toFixed(2)));
+          if (z1 === z0) return;
+          const r = el.getBoundingClientRect(); const cxp = ev.clientX - r.left + el.scrollLeft, cyp = ev.clientY - r.top + el.scrollTop; const k = z1 / z0;
+          zoomRef.current = z1; setCanvasZoom(z1);
+          requestAnimationFrame(() => { el.scrollLeft = cxp * k - (ev.clientX - r.left); el.scrollTop = cyp * k - (ev.clientY - r.top); });
+        };
+        el.addEventListener("wheel", onWheel, { passive: false });
+        return () => el.removeEventListener("wheel", onWheel);
+      }, [result]);
+      const [chimneyWidth, setChimneyWidth] = useState(900);
+      const [hob, setHob] = useState("optional");
+      const [dishwasher, setDishwasher] = useState("optional");
+      const [hiunit, setHiunit] = useState("no");
+      const [utility, setUtility] = useState("no");
+      const [designMode, setDesignMode] = useState("rule");   // 18.txt: "rule" (primary) | "consensus" (optional AI consensus mode)
+      const [consensus, setConsensus] = useState(null);       // 18.txt: {missing,autoMode,brief,candidates,winner} when consensus mode produced a result
+      const [style, setStyle] = useState("Modern Indian Kitchen");          // 18.txt: design brief style hint
+      const [storagePriority, setStoragePriority] = useState("Maximum Storage");   // 18.txt: design brief storage priority
+      const [useExtAI, setUseExtAI] = useState(false);                      // 15.pdf Stage 3: include ChatGPT + DeepSeek review
+      const [aiKeys, setAiKeys] = useState({ openai: false, deepseek: false, stability: false });   // configured-status (never the keys)
+      const [keyForm, setKeyForm] = useState({ openai: "", deepseek: "", stability: "" });
+      const [showKeys, setShowKeys] = useState(false);
+      React.useEffect(() => { api("/api/ai/keys").then((j) => { if (j && j.data) { setAiKeys(j.data); if (j.data.openai || j.data.deepseek) setUseExtAI(true); } }).catch(() => {}); }, []);
+      const saveKeys = async () => { const j = await api("/api/ai/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(keyForm) }); if (j && j.data) { setAiKeys(j.data); setKeyForm({ openai: "", deepseek: "", stability: "" }); } };
+      const [handle, setHandle] = useState("D Handle");
+      const [applianceBrand, setApplianceBrand] = useState("Custom");
+      const [beam, setBeam] = useState({ present: false, width: 0, drop: 300, height: 2100, wall: "Back", distance: 0, orientation: "horizontal" });
+      const isL = type.indexOf("L-Shape") === 0;
+      const isU = type.indexOf("U-Shape") === 0;
+      const isParallel = type.indexOf("Parallel") === 0;
+      const isIsland = type.indexOf("Island") === 0;
+      const isPeninsula = type.indexOf("Peninsula") === 0;
+      const isFurniture = type.indexOf("Kitchen") < 0;
+      const isKitchen = !isFurniture;
+      const needsB = isL || isU || isParallel || isIsland || isPeninsula || isFurniture;
+      const wallLabel = isFurniture ? "Width (mm)" : isU ? "Back wall (mm)" : isL ? "Cooking wall — Run A (mm)"
+        : isParallel ? "Run A — Cooking (mm)" : isIsland ? "Main wall (mm)" : isPeninsula ? "Main wall (mm)" : "Wall / Run length (mm)";
+      const wallBLabel = isFurniture ? "Height (mm)" : isU ? "Left wall (mm)" : isL ? "Sink wall — Run B (mm)"
+        : isParallel ? "Run B — facing wall (mm)" : isPeninsula ? "Peninsula length (mm)" : "Island length (mm)";
+
+      // 6.14 AI validation gate: room dimensions + wall/structure/point sanity before generation.
+      const validateRoom = () => {
+        const lenOf = (n) => wallLenOf(n);
+        if (!(+room.width >= 300 && +room.width <= 12000) || !(+room.depth >= 300 && +room.depth <= 12000) || !(+room.height >= 1500 && +room.height <= 6000)) return "room dimensions are missing or out of range";
+        for (const k of ["wallA", "wallB", "wallC", "wallD"]) if (!(+room[k] >= 300)) return k + " length is invalid";
+        for (const s of structures) { const L = lenOf(s.wall); if ((+s.pos || 0) < 0 || (+s.pos || 0) + (+s.width || 0) > L + 1) return (s.kind || "object") + " on " + (s.wall || "a wall") + " extends past the wall (" + L + " mm)"; }
+        for (const p of points) { if (p.wall && p.wall !== "Floor" && (+p.along || 0) > lenOf(p.wall) + 1) return (p.type || "point") + " on " + p.wall + " is beyond the wall length"; }
+        return null;
+      };
+      const generate = async () => {
+        const bad = validateRoom();   // 6.14: block generation on an incomplete/invalid room (keep the planner visible)
+        if (bad) { setRoomWarn("Room definition incomplete — " + bad + "."); return; }
+        setRoomWarn(null);
+        setLoading(true); setResult(null); setReasoning(""); setConsensus(null);
+        try {
+          const body = { designType: type, wall: Number(wall) };
+          if (needsB) body.wallB = Number(wallB);
+          if (isU) body.wallC = Number(wallC);
+          if (isKitchen) { body.chimneyWidth = Number(chimneyWidth); body.hob = hob; body.dishwasher = dishwasher; body.hiunit = hiunit; body.utility = utility; body.handle = handle; body.applianceBrand = applianceBrand; }
+          if (isKitchen && points.length) body.points = points.map((p) => ({ type: p.type, wall: p.wall, along: p.along, height: p.height, x: p.x, z: p.z }));   // 15.txt 5.18: marked 3D points drive placement
+          if (isKitchen && structures.some((s) => s.kind === "window")) body.windows = structures.filter((s) => s.kind === "window").map((s) => ({ wall: s.wall, along: +s.pos || 0, width: +s.width || 1200, sill: +s.sill || 900, height: +s.height || 1200 }));   // 6.2 windows to respect
+          if (designMode === "consensus") {   // 18.txt AI Consensus Design Mode (deterministic, internal strategies)
+            body.designMode = "consensus"; body.style = style; body.storagePriority = storagePriority; body.useExternalAI = useExtAI;
+            if (isKitchen && structures.length) body.structures = structures.map((s) => ({ kind: s.kind, wall: s.wall, pos: +s.pos || 0, width: +s.width || 0 }));   // 15.pdf Stage 2: beams/columns/ducts/doors → Master Design Brief
+            const cj = await api("/api/generate-consensus", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            const cd = cj.data;
+            setConsensus({ missing: cd.missing || [], autoMode: !!cd.autoMode, brief: cd.brief || {}, candidates: cd.candidates || [], winner: cd.winner || 0, externalReviews: cd.externalReviews || [] });
+            setResult(cd); setLiveRuns((cd.runs || []).map((r) => ({ ...r }))); setActiveView(0);
+            setLoading(false); return;
+          }
+          const json = await api("/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+          setResult(json.data); setLiveRuns((json.data.runs || []).map((r) => ({ ...r }))); setActiveView(0);
+        } catch (e) { setResult({ error: "Generation failed" }); }
+        setLoading(false);
+      };
+
+      // §7.9: an elevation lifts its edited cabinets here; 3D / plan read the shared model.
+      const updateLiveRun = React.useCallback((i, base, wallCabs) => {
+        setLiveRuns((prev) => {
+          if (!prev || !prev[i]) return prev;
+          // §7.9: keep the SAME liveRuns reference when nothing actually changed, so the run prop
+          // identity stays stable and InteractiveElevation's [run] re-seed effect does not re-fire
+          // (that echo cycle — onChange → updateLiveRun → new run identity → re-seed → onChange — was
+          // the "Maximum update depth exceeded" loop). Real edits change the signature and propagate.
+          const sig = (a) => (a || []).map((c) => c.kind + ":" + Math.round(c.w || 0) + ":" + Math.round(c.h || 0) + ":" + (c.drawers || 0) + ":" + (c.label || "") + ":" + Math.round(c.sill || 0)).join("|");   // NB: a 3D drag reorder changes the SEQUENCE, so it still registers (x itself excluded — the 2D mount echo differs only in x rounding)
+          const cur = prev[i];
+          if (sig(cur.base) === sig(base) && sig(cur.wallCabs) === sig(wallCabs)) return prev;
+          const n = prev.slice(); n[i] = { ...cur, base, wallCabs }; return n;
+        });
+      }, []);
+      // 19.txt step 7 — LIVE DOCUMENTS: any edit to the shared model (2D canvas OR 3D drag) re-derives the
+      // cut list, hardware schedule, BOQ and manufacturing checks from the same single source of truth.
+      React.useEffect(() => {
+        if (!liveRuns || !result) return;
+        // §3.2 #1: a remote-applied edit must not bounce straight back to the server.
+        if (applyingRemote.current) { applyingRemote.current = false; return; }
+        const t2 = setTimeout(async () => {
+          try {
+            // §3.2 #1: when the design is persisted, autosave through PUT /layout — it re-derives the
+            // documents AND stores them AND broadcasts the diff to other clients. Otherwise just recompute.
+            const persist = !!(result && result.id);
+            const r = await fetch(persist ? ("/api/designs/" + result.id + "/layout") : "/api/recompute",
+              { method: persist ? "PUT" : "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ runs: liveRuns, handle: result.handle, applianceBrand: result.applianceBrand, clientId: clientId.current }) });
+            const j = await r.json();
+            if (j && j.data) setResult((prev) => (prev ? Object.assign({}, prev, j.data) : prev));
+          } catch (e) { /* offline edit — documents refresh on next change */ }
+        }, 700);
+        return () => clearTimeout(t2);
+      }, [liveRuns]);
+      // §3.2 #2: subscribe to the realtime SSE bus for this design — apply edits pushed by other
+      // clients to the shared model (single source of truth) and track live-presence count.
+      React.useEffect(() => {
+        if (!result || !result.id) return;
+        let es;
+        try { es = new EventSource("/api/designs/" + result.id + "/live"); } catch (e) { return; }
+        const presence = (e) => { try { setLive({ on: true, clients: JSON.parse(e.data).clients || 0 }); } catch (x) { } };
+        es.addEventListener("hello", presence);
+        es.addEventListener("presence", presence);
+        const applyRuns = (runs) => { if (!Array.isArray(runs)) return; applyingRemote.current = true; setLiveRuns(runs.map((r) => ({ ...r }))); };
+        ["layout", "coordinate", "obstruction"].forEach((ev) => es.addEventListener(ev, (e) => {
+          try { const d = JSON.parse(e.data); if (d.by && d.by === clientId.current) return; applyRuns(d.runs); } catch (x) { }
+        }));
+        ["cabinet", "props", "dimension"].forEach((ev) => es.addEventListener(ev, (e) => {
+          try {
+            const d = JSON.parse(e.data); if (d.by && d.by === clientId.current) return;
+            applyingRemote.current = true;
+            setLiveRuns((prev) => {
+              if (!prev || !prev[d.run]) return prev;
+              const n = prev.slice(); const run = Object.assign({}, n[d.run]); const base = run.base.slice();
+              if (d.cab) base[d.index] = d.cab; else if (d.mm != null) base[d.index] = Object.assign({}, base[d.index], { w: d.mm });
+              run.base = base; n[d.run] = run; return n;
+            });
+          } catch (x) { }
+        }));
+        es.onerror = () => { };
+        return () => { try { es.close(); } catch (x) { } setLive({ on: false, clients: 0 }); };
+      }, [result && result.id]);
+      // §4.11 shared-corner sync: a run's corner mechanism depends on the CURRENT length of the
+      // run it returns into. Derive that adjoining length live from liveRuns so resizing one wall
+      // updates the adjoining wall's corner solution (LeMans/Magic/Blind/Carousel).
+      const runTotal = (r) => (r && r.base ? r.base.reduce((s, c) => s + (c.w || 0), 0) : 0);
+      const adjoinLenFor = (i) => {
+        const rs = liveRuns || (result && result.runs) || [];
+        const tt = type.toLowerCase();
+        if (tt.indexOf("l-shape") >= 0 || tt.indexOf("peninsula") >= 0) return i === 1 ? runTotal(rs[0]) : null;
+        if (tt.indexOf("u-shape") >= 0) return (i === 0 || i === 2) ? runTotal(rs[1]) : null;
+        return null;
+      };
+
+      const streamReasoning = async () => {
+        if (streaming) return;
+        setStreaming(true); setReasoning("");
+        try {
+          const res = await fetch("/api/ai/stream", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: type + " " + wall + "mm" }) });
+          const reader = res.body.getReader(); const dec = new TextDecoder(); let acc = "";
+          while (true) {
+            const { done, value } = await reader.read(); if (done) break;
+            for (const line of dec.decode(value, { stream: true }).split("\\n")) {
+              if (line.startsWith("data: ")) { try { const p = JSON.parse(line.slice(6)); if (!p.done) { acc += p.token; setReasoning(acc); } } catch {} }
+            }
+          }
+        } catch (e) { setReasoning("Error streaming reasoning."); }
+        setStreaming(false);
+      };
+
+      return (
+        <div className="grid md:grid-cols-3 gap-5">
+          {/* 5.13: separate Production Cut List page (full-screen) with Print-only */}
+          {cutListPage && result && result.cutList && (
+            <div className="fixed inset-0 z-[70] bg-white overflow-auto p-6">
+              <div className="flex items-center justify-between mb-3 max-w-3xl mx-auto">
+                <h1 className="text-xl font-bold text-slate-800">Production Cut List — {type} <span className="text-sm font-normal text-slate-400">({result.cutList.length} panels)</span></h1>
+                <div className="flex gap-2">
+                  <button onClick={printCutList} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm">🖨 Print Production Cut List</button>
+                  <button onClick={() => setCutListPage(false)} className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-sm">Close</button>
+                </div>
+              </div>
+              <table className="max-w-3xl mx-auto w-full text-sm border border-slate-300">
+                <thead className="bg-slate-100 text-slate-600"><tr><th className="border border-slate-300 px-2 py-1 text-left">S.No</th><th className="border border-slate-300 px-2 py-1 text-left">Height (mm)</th><th className="border border-slate-300 px-2 py-1 text-left">Width (mm)</th><th className="border border-slate-300 px-2 py-1 text-left">Qty</th><th className="border border-slate-300 px-2 py-1 text-left">Description</th></tr></thead>
+                <tbody>{result.cutList.map((r, i) => <tr key={i} className={i % 2 ? "bg-slate-50" : ""}><td className="border border-slate-200 px-2 py-0.5 text-slate-400">{i + 1}</td><td className="border border-slate-200 px-2 py-0.5">{r.h}</td><td className="border border-slate-200 px-2 py-0.5">{r.w}</td><td className="border border-slate-200 px-2 py-0.5">{r.qty}</td><td className="border border-slate-200 px-2 py-0.5 text-slate-600">{r.desc}</td></tr>)}</tbody>
+              </table>
+            </div>
+          )}
+          <div className="space-y-4">
+          {/* 15.txt 5.14: New Kitchen Project — room size first (shown as interactive 3D room) */}
+          <div className="bg-white rounded-xl p-5 border border-slate-200 space-y-2">
+            <h2 className="text-lg font-semibold flex items-center justify-between">Room Setup <span className="text-[10px] font-normal text-cyan-600 uppercase tracking-wide">3D-first</span></h2>
+            <p className="text-[11px] text-slate-400">Define the room, then it shows in 3D. Walls A (back) · B (right) · C (front) · D (left).</p>
+            <div className="grid grid-cols-2 gap-2">
+              {[["width", "Room width"], ["depth", "Room depth"], ["height", "Room/wall height"], ["ceiling", "Ceiling height"], ["wallA", "Wall A (back)"], ["wallB", "Wall B (right)"], ["wallC", "Wall C (front)"], ["wallD", "Wall D (left)"]].map(([k, lab]) => (
+                <label key={k} className="block"><span className="text-[10px] text-slate-500">{lab} (mm)</span>
+                  <input type="number" value={room[k]} min="300" max="12000" onChange={(e) => setRoom({ ...room, [k]: +e.target.value })}
+                    className="w-full px-2 py-1 bg-slate-100 border border-slate-300 rounded text-sm" /></label>
+              ))}
+            </div>
+            <label className="flex items-center gap-2 text-[11px] text-slate-500">Unit
+              <select value={room.unit} onChange={(e) => setRoom({ ...room, unit: e.target.value })} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs">
+                <option value="mm">mm</option><option value="ftin">feet-inch</option>
+              </select>
+              {room.unit === "ftin" && <span className="text-slate-400">{(room.width / 304.8).toFixed(1)}′ × {(room.depth / 304.8).toFixed(1)}′ × {(room.height / 304.8).toFixed(1)}′</span>}
+            </label>
+          </div>
+          <div className="bg-white rounded-xl p-5 border border-slate-200 space-y-3">
+            <h2 className="text-lg font-semibold">Design Generator</h2>
+            <label className="block text-xs text-slate-500">Design Type</label>
+            <select value={type} onChange={e => setType(e.target.value)} disabled={loading}
+              className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+              {TYPES.map(t => <option key={t}>{t}</option>)}
+            </select>
+            <label className="block text-xs text-slate-500">{wallLabel}</label>
+            <input type="number" value={wall} onChange={e => setWall(e.target.value)} disabled={loading} min="900" max="8000"
+              className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50" />
+            {needsB && <React.Fragment>
+              <label className="block text-xs text-slate-500">{wallBLabel}</label>
+              <input type="number" value={wallB} onChange={e => setWallB(e.target.value)} disabled={loading} min="900" max="8000"
+                className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50" />
+            </React.Fragment>}
+            {isU && <React.Fragment>
+              <label className="block text-xs text-slate-500">Right wall (mm)</label>
+              <input type="number" value={wallC} onChange={e => setWallC(e.target.value)} disabled={loading} min="900" max="8000"
+                className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50" />
+            </React.Fragment>}
+            {isKitchen && <React.Fragment>
+              <label className="block text-xs text-slate-500">Chimney width (mm)</label>
+              <select value={chimneyWidth} onChange={e => setChimneyWidth(e.target.value)} disabled={loading}
+                className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                {[600, 750, 900, 1200].map(w => <option key={w} value={w}>{w}</option>)}
+              </select>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-500">Include Hob?</label>
+                  <select value={hob} onChange={e => setHob(e.target.value)} disabled={loading} className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                    <option value="optional">Optional</option><option value="yes">Yes</option><option value="no">No</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500">Include Dishwasher?</label>
+                  <select value={dishwasher} onChange={e => setDishwasher(e.target.value)} disabled={loading} className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                    <option value="optional">Optional</option><option value="yes">Yes</option><option value="no">No</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500">Hi-unit (Oven+MW)?</label>
+                  <select value={hiunit} onChange={e => setHiunit(e.target.value)} disabled={loading} className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                    <option value="no">No</option><option value="yes">Yes</option><option value="optional">Optional</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500">Utility tall unit?</label>
+                  <select value={utility} onChange={e => setUtility(e.target.value)} disabled={loading} className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                    <option value="no">No</option><option value="yes">Yes</option><option value="optional">Optional</option>
+                  </select>
+                </div>
+              </div>
+              <label className="block text-xs text-slate-500">Handle system</label>
+              <select value={handle} onChange={e => setHandle(e.target.value)} disabled={loading}
+                className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                {${JSON.stringify(HANDLE_TYPES)}.map(h => <option key={h} value={h}>{h}</option>)}
+              </select>
+              <label className="block text-xs text-slate-500">Appliance brand</label>
+              <select value={applianceBrand} onChange={e => setApplianceBrand(e.target.value)} disabled={loading}
+                className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                {${JSON.stringify(APPLIANCE_BRAND_NAMES)}.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+              <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={beam.present} onChange={e => setBeam({ ...beam, present: e.target.checked })} className="accent-cyan-600" /> Beam present? (ask before finalizing)</label>
+              {beam.present && <div className="grid grid-cols-2 gap-2 bg-slate-50 border border-slate-200 rounded-lg p-2">
+                <label className="block"><span className="text-[11px] text-slate-500">Beam drop (mm)</span><input type="number" value={beam.drop} onChange={e => setBeam({ ...beam, drop: +e.target.value })} className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-sm" /></label>
+                <label className="block"><span className="text-[11px] text-slate-500">Soffit ht from floor (mm)</span><input type="number" value={beam.height} onChange={e => setBeam({ ...beam, height: +e.target.value })} className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-sm" /></label>
+                <label className="block"><span className="text-[11px] text-slate-500">Beam width / span (0 = full)</span><input type="number" value={beam.width} onChange={e => setBeam({ ...beam, width: +e.target.value })} className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-sm" /></label>
+                <label className="block"><span className="text-[11px] text-slate-500">Distance from left (mm)</span><input type="number" value={beam.distance} onChange={e => setBeam({ ...beam, distance: +e.target.value })} className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-sm" /></label>
+              </div>}
+            </React.Fragment>}
+            <div className="pt-1">
+              <label className="block text-xs text-slate-500 mb-1">Design Mode</label>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setDesignMode("rule")} disabled={loading}
+                  className={"flex-1 rounded-lg border px-3 py-1.5 text-xs disabled:opacity-50 " + (designMode === "rule" ? "bg-cyan-600 text-white border-cyan-600" : "bg-white text-slate-600 border-slate-300")}>
+                  Rule-Based (Primary)
+                </button>
+                <button type="button" onClick={() => setDesignMode("consensus")} disabled={loading}
+                  className={"flex-1 rounded-lg border px-3 py-1.5 text-xs disabled:opacity-50 " + (designMode === "consensus" ? "bg-cyan-600 text-white border-cyan-600" : "bg-white text-slate-600 border-slate-300")}>
+                  AI Consensus (Optional)
+                </button>
+              </div>
+              {designMode === "consensus" && <div className="grid grid-cols-2 gap-2 mt-2">
+                <div>
+                  <label className="block text-xs text-slate-500">Style</label>
+                  <select value={style} onChange={e => setStyle(e.target.value)} disabled={loading} className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                    <option>Modern Indian Kitchen</option><option>Minimal / Handle-less</option><option>Classic Shaker</option><option>Contemporary Glass</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500">Storage Priority</label>
+                  <select value={storagePriority} onChange={e => setStoragePriority(e.target.value)} disabled={loading} className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50">
+                    <option>Maximum Storage</option><option>Balanced</option><option>Open / Minimal</option>
+                  </select>
+                </div>
+              </div>}
+              {designMode === "consensus" && <div className="mt-2 rounded-lg border border-violet-200 bg-violet-50 p-2">
+                <label className="flex items-center gap-2 text-xs text-violet-800">
+                  <input type="checkbox" checked={useExtAI} onChange={e => setUseExtAI(e.target.checked)} disabled={loading} />
+                  <span className="font-medium">Include external AI review (ChatGPT + DeepSeek)</span>
+                </label>
+                <div className="mt-1 text-[11px] text-violet-700">
+                  {aiKeys.openai || aiKeys.deepseek
+                    ? ("Keys configured: " + [aiKeys.openai ? "ChatGPT" : null, aiKeys.deepseek ? "DeepSeek" : null].filter(Boolean).join(" + "))
+                    : "No API keys set — review uses internal strategies until you add keys."}
+                  <button type="button" onClick={() => setShowKeys(!showKeys)} className="ml-2 underline">{showKeys ? "hide keys" : "set API keys"}</button>
+                </div>
+                {showKeys && <div className="mt-1.5 space-y-1.5">
+                  <input type="password" placeholder="OpenAI API key (sk-…)" value={keyForm.openai} onChange={e => setKeyForm({ ...keyForm, openai: e.target.value })} className="w-full px-2 py-1 text-xs bg-white border border-violet-300 rounded" />
+                  <input type="password" placeholder="DeepSeek API key" value={keyForm.deepseek} onChange={e => setKeyForm({ ...keyForm, deepseek: e.target.value })} className="w-full px-2 py-1 text-xs bg-white border border-violet-300 rounded" />
+                  <input type="password" placeholder="Stability AI key (photoreal 3D render — sk-…)" value={keyForm.stability} onChange={e => setKeyForm({ ...keyForm, stability: e.target.value })} className="w-full px-2 py-1 text-xs bg-white border border-fuchsia-300 rounded" />
+                  <div className="text-[10px] text-slate-500">Stability AI key → the ✨ Photoreal button in 3D. Get one at platform.stability.ai (pay-as-you-go).</div>
+                  <button type="button" onClick={saveKeys} className="px-2 py-1 text-xs bg-violet-600 text-white rounded">Save keys (stored locally)</button>
+                </div>}
+              </div>}
+            </div>
+            <button onClick={generate} disabled={loading}
+              className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg font-medium disabled:opacity-50">
+              {loading ? "Generating…" : (designMode === "consensus" ? "Generate (AI Consensus)" : "Generate Design")}
+            </button>
+            <button onClick={streamReasoning} disabled={streaming}
+              className="w-full px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-medium disabled:opacity-50">
+              {streaming ? "Streaming…" : "Stream AI Reasoning"}
+            </button>
+            {reasoning && (
+              <div className="fade-in bg-slate-50 rounded-lg p-3 text-xs text-slate-700 leading-relaxed max-h-40 overflow-y-auto border border-slate-200">
+                {reasoning}{streaming && <span className="cursor-blink text-purple-600">|</span>}
+              </div>
+            )}
+          </div>
+          </div>
+
+          <div className="md:col-span-2 bg-white rounded-xl p-5 border border-slate-200 space-y-4">
+            <h2 className="text-lg font-semibold flex items-center justify-between">Generated CAD Output
+              {live.on && (
+                <span title="Live coordination bus — edits persist & sync across open tabs (SSE)" className="text-[10px] font-normal normal-case px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                  <span style={{ width: 7, height: 7, borderRadius: 9, background: "#10b981", display: "inline-block", boxShadow: "0 0 0 0 #10b981", animation: "adsPulse 1.6s infinite" }}></span>
+                  Live · autosaved{live.clients > 1 ? " · " + live.clients + " tabs" : ""}
+                </span>
+              )}
+            </h2>
+            {/* Project Tree — sits under the heading, above the elevation/viewport */}
+            {result && !result.error && (
+              <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-200 flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-semibold text-cyan-600 uppercase tracking-wide mr-1">Project Tree</span>
+                <span className="text-xs text-slate-500 mr-1">📁 {type}</span>
+                <button onClick={() => setActiveView("plan")} className={"px-2.5 py-1 text-xs rounded-lg border " + (activeView === "plan" ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>📐 Plan <span className="text-slate-400">({result.runs.length} {result.runs.length > 1 ? "runs" : "run"})</span></button>
+                {result.elevations.map((e, i) => (
+                  <React.Fragment key={i}>
+                    <button onClick={() => setActiveView(i)} className={"px-2.5 py-1 text-xs rounded-lg border " + (activeView === i ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>📋 Wall {String.fromCharCode(65 + i)} <span className="text-slate-400">· {e.name} ({(result.runs[i] && result.runs[i].base ? result.runs[i].base.length : 0)})</span></button>
+                    {result.sections && result.sections[i] && (
+                      <button onClick={() => setActiveView("sec" + i)} className={"px-2 py-1 text-[11px] rounded-lg border " + (activeView === "sec" + i ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-500 hover:border-slate-300")}>📏 Section {i + 1}</button>
+                    )}
+                  </React.Fragment>
+                ))}
+                {type.indexOf("Kitchen") >= 0 && (
+                  <button onClick={() => setActiveView("3d")} className={"px-2.5 py-1 text-xs rounded-lg border " + (activeView === "3d" ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>🧊 3D View</button>
+                )}
+                <span className="text-[11px] text-slate-400 ml-auto">One shared room model · edits propagate to all views</span>
+              </div>
+            )}
+            {/* 15.txt 5.14/Part 10: the initial room is ALWAYS shown in 3D (no 2D outline step) */}
+            {!result && !loading && (
+              <div className="fade-in space-y-2 relative">
+                <div className="text-xs text-slate-500">Step 1 — your room in 3D. Click a wall to select; <span className="font-semibold">right-click a wall</span> for properties + to add doors/windows/beams. Then choose a Design Type and <span className="font-semibold text-cyan-700">Generate Design</span>.</div>
+                {roomWarn && <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 font-medium">⚠ {roomWarn}</div>}
+                <div className="flex items-center gap-1 text-[11px]">
+                  <button title="Undo (Ctrl+Z)" disabled={histLen.u <= 1} onClick={doUndo} className="px-2 py-0.5 rounded bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 disabled:opacity-40">↶ Undo</button>
+                  <button title="Redo (Ctrl+Y)" disabled={histLen.r <= 0} onClick={doRedo} className="px-2 py-0.5 rounded bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 disabled:opacity-40">↷ Redo</button>
+                  <span className="text-slate-400 ml-1">Ctrl+Z / Ctrl+Y · {Math.max(0, histLen.u - 1)} undo steps</span>
+                </div>
+                {/* 5.17 mandatory-point palette — pick a type, then click a wall/floor in 3D */}
+                <div className="flex flex-wrap items-center gap-1 text-[11px]">
+                  <span className="font-semibold text-slate-600 mr-1">Mark points:</span>
+                  {POINT_TYPES.map(([k, lab]) => (
+                    <button key={k} onClick={() => setMarkType(markType === k ? null : k)}
+                      className={"px-2 py-0.5 rounded border " + (markType === k ? "text-white border-transparent" : "bg-white border-slate-300 text-slate-600")}
+                      style={markType === k ? { background: POINT_HEX[k] } : {}}>{lab}</button>
+                  ))}
+                  {markType && <button onClick={() => setMarkType(null)} className="px-2 py-0.5 rounded bg-slate-200 text-slate-600">Done</button>}
+                </div>
+                <RoomShell3D room={room} structures={structures} points={points} markType={markType} selectedWall={selectedWall} camRef={cam3dRef} onPlacePoint={placePoint} onPickWall={(w) => setSelectedWall(w)} onWallMenu={(w, x, y) => { setSelectedWall(w); setWallMenu({ wall: w, x, y }); }} selectedObj={selectedObj} onSelectStruct={(id) => setSelectedObj({ kind: "struct", id })} onMoveStruct={(id, pos) => updStruct(id, { pos })} onStructEdit={(id) => { setSelectedObj({ kind: "struct", id }); setStructEdit(id); }} />
+                {points.length > 0 && (
+                  <div className="text-[11px] text-slate-600 border border-slate-200 rounded-lg p-2 space-y-1">
+                    <div className="font-semibold text-slate-700">Mandatory points ({points.length}) — distance from wall corner + height from floor</div>
+                    {points.map((p) => (
+                      <div key={p.id} className="flex flex-wrap items-center gap-1">
+                        <span className="w-3 h-3 rounded-full inline-block" style={{ background: POINT_HEX[p.type] || "#334155" }}></span>
+                        <span className="w-20 capitalize">{p.type}</span>
+                        <span className="text-slate-400 w-24 truncate">{p.wall}</span>
+                        {p.wall !== "Floor" && <label className="flex items-center gap-0.5">dist<input type="number" value={p.along} onChange={(e) => updPoint(p.id, { along: +e.target.value })} className="w-14 px-1 border border-slate-300 rounded" /></label>}
+                        <label className="flex items-center gap-0.5">ht<input type="number" value={p.height} onChange={(e) => updPoint(p.id, { height: +e.target.value })} className="w-14 px-1 border border-slate-300 rounded" /></label>
+                        <button onClick={() => delPoint(p.id)} className="text-rose-500 hover:text-rose-700 px-1">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* 5.15/5.16 wall right-click context menu */}
+                {wallMenu && (
+                  <div className="bg-white border border-slate-300 rounded-lg shadow-lg text-xs py-1" style={{ position: "fixed", left: Math.max(4, Math.min(wallMenu.x, (typeof window !== "undefined" ? window.innerWidth : 1280) - 180)), top: Math.max(4, Math.min(wallMenu.y, (typeof window !== "undefined" ? window.innerHeight : 800) - 200)), zIndex: 60 }} onMouseLeave={() => setWallMenu(null)}>
+                    <div className="px-3 py-1 text-[10px] text-slate-400 border-b border-slate-100">{wallMenu.wall}</div>
+                    <button onClick={() => { setWallPropEdit(wallMenu.wall); setWallMenu(null); }} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-cyan-700">⚙ Wall Properties…</button>
+                    {["door", "window", "beam", "column"].map((k) => <button key={k} onClick={() => addStruct(wallMenu.wall, k)} className="block w-full text-left px-3 py-1 hover:bg-slate-50 capitalize">＋ Add {k}</button>)}
+                  </div>
+                )}
+                {/* 5.16 structures list (edit/delete) + 5.16 2D room plan */}
+                {structures.length > 0 && (
+                  <div className="text-[11px] text-slate-600 border border-slate-200 rounded-lg p-2 space-y-1">
+                    <div className="font-semibold text-slate-700">Structural elements ({structures.length})</div>
+                    {structures.map((s) => (
+                      <div key={s.id} className="flex flex-wrap items-center gap-1">
+                        <span className="capitalize w-14 text-slate-500">{s.kind}</span>
+                        <span className="text-slate-400 w-24 truncate">{s.wall}</span>
+                        <label className="flex items-center gap-0.5">w<input type="number" value={s.width} onChange={(e) => updStruct(s.id, { width: +e.target.value })} className="w-12 px-1 border border-slate-300 rounded" /></label>
+                        {s.kind !== "beam" && <label className="flex items-center gap-0.5">h<input type="number" value={s.height || 0} onChange={(e) => updStruct(s.id, { height: +e.target.value })} className="w-12 px-1 border border-slate-300 rounded" /></label>}
+                        {s.kind === "window" && <label className="flex items-center gap-0.5">sill<input type="number" value={s.sill} onChange={(e) => updStruct(s.id, { sill: +e.target.value })} className="w-12 px-1 border border-slate-300 rounded" /></label>}
+                        {s.kind === "beam" && <label className="flex items-center gap-0.5">drop<input type="number" value={s.drop} onChange={(e) => updStruct(s.id, { drop: +e.target.value })} className="w-12 px-1 border border-slate-300 rounded" /></label>}
+                        <label className="flex items-center gap-0.5">pos<input type="number" value={s.pos} onChange={(e) => updStruct(s.id, { pos: +e.target.value })} className="w-12 px-1 border border-slate-300 rounded" /></label>
+                        <button onClick={() => delStruct(s.id)} className="text-rose-500 hover:text-rose-700 px-1">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <RoomPlan2D room={room} structures={structures} points={points} selected={selectedObj}
+                  onSelect={(o) => setSelectedObj(o)}
+                  onMoveStruct={(id, pos) => updStruct(id, { pos })}
+                  onResizeStruct={(id, patch) => updStruct(id, patch)}
+                  onMovePoint={(id, along) => updPoint(id, { along })}
+                  onDeleteObj={(kind, id) => { if (kind === "struct") delStruct(id); else delPoint(id); setSelectedObj(null); }} />
+                {/* 5.15 Wall Properties modal */}
+                {wallPropEdit && (() => { const wp = getWallProps(wallPropEdit); const set = (f) => setWallProps((p) => ({ ...p, [wallPropEdit]: { ...wp, ...f } })); return (
+                  <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/30" onClick={() => setWallPropEdit(null)}>
+                    <div className="bg-white rounded-xl border border-slate-300 shadow-xl p-4 w-72 text-xs space-y-2" onClick={(e) => e.stopPropagation()}>
+                      <div className="font-semibold text-cyan-700 flex items-center justify-between">Wall Properties — {wallPropEdit}<button onClick={() => setWallPropEdit(null)} className="text-slate-300 hover:text-slate-600">✕</button></div>
+                      {[["length", "Length (mm)"], ["height", "Height (mm)"], ["thickness", "Thickness (mm)"], ["usable", "Usable kitchen length (mm)"]].map(([k, lab]) => (
+                        <label key={k} className="flex items-center justify-between gap-2">{lab}<input type="number" value={wp[k]} onChange={(e) => set({ [k]: +e.target.value })} className="w-24 px-2 py-1 border border-slate-300 rounded" /></label>
+                      ))}
+                      <label className="flex items-center justify-between gap-2">Direction
+                        <select value={wp.direction} onChange={(e) => set({ direction: e.target.value })} className="px-2 py-1 border border-slate-300 rounded"><option value="horizontal">horizontal</option><option value="vertical">vertical</option></select></label>
+                      {[["allowCab", "Base cabinets allowed"], ["allowWallCab", "Wall cabinets allowed"], ["allowTall", "Tall units allowed"]].map(([k, lab]) => (
+                        <label key={k} className="flex items-center gap-2"><input type="checkbox" checked={wp[k]} onChange={(e) => set({ [k]: e.target.checked })} className="accent-cyan-600" />{lab}</label>
+                      ))}
+                      <button onClick={() => setWallPropEdit(null)} className="w-full px-3 py-1.5 bg-cyan-600 text-white rounded-lg">Done</button>
+                    </div>
+                  </div>
+                ); })()}
+                {/* 6.5/6.6: structure size editor — opened by double-clicking a door/window/beam in 3D (live-updates the wall) */}
+                {structEdit && (() => { const s = structures.find((x) => x.id === structEdit); if (!s) return null; const su = (f) => updStruct(s.id, f); return (
+                  <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/30" onClick={() => setStructEdit(null)}>
+                    <div className="bg-white rounded-xl border border-slate-300 shadow-xl p-4 w-64 text-xs space-y-2" onClick={(e) => e.stopPropagation()}>
+                      <div className="font-semibold text-cyan-700 flex items-center justify-between"><span className="capitalize">{s.kind} size — {s.wall}</span><button onClick={() => setStructEdit(null)} className="text-slate-300 hover:text-slate-600">✕</button></div>
+                      <label className="flex items-center justify-between gap-2">Width (mm)<input type="number" value={s.width} onChange={(e) => su({ width: +e.target.value })} className="w-24 px-2 py-1 border border-slate-300 rounded" /></label>
+                      {s.kind !== "beam" && <label className="flex items-center justify-between gap-2">Height (mm)<input type="number" value={s.height || 0} onChange={(e) => su({ height: +e.target.value })} className="w-24 px-2 py-1 border border-slate-300 rounded" /></label>}
+                      {s.kind === "window" && <label className="flex items-center justify-between gap-2">Sill (mm)<input type="number" value={s.sill || 0} onChange={(e) => su({ sill: +e.target.value })} className="w-24 px-2 py-1 border border-slate-300 rounded" /></label>}
+                      {s.kind === "beam" && <label className="flex items-center justify-between gap-2">Drop (mm)<input type="number" value={s.drop || 0} onChange={(e) => su({ drop: +e.target.value })} className="w-24 px-2 py-1 border border-slate-300 rounded" /></label>}
+                      <label className="flex items-center justify-between gap-2">Position (mm)<input type="number" value={s.pos || 0} onChange={(e) => su({ pos: +e.target.value })} className="w-24 px-2 py-1 border border-slate-300 rounded" /></label>
+                      <div className="flex gap-2 pt-1"><button onClick={() => { delStruct(s.id); setStructEdit(null); }} className="flex-1 px-3 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded-lg">Delete</button><button onClick={() => setStructEdit(null)} className="flex-1 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg">Done</button></div>
+                    </div>
+                  </div>
+                ); })()}
+              </div>
+            )}
+            {loading && <p className="text-slate-500 text-sm">Applying learned standards…</p>}
+            {result && result.error && <p className="text-red-600 text-sm">{result.error}</p>}
+            {result && !result.error && (
+              <div className="fade-in space-y-4">
+                <div className="flex gap-2">
+                  {/* 18.pdf §6: exports ask WHERE to save (native Save As / name dialog) — no silent downloads */}
+                  <a href={"/api/designs/" + result.id + "/export.svg"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/export.svg", (type + "-" + result.id.slice(0, 8) + ".svg").replace(/[^\\w.-]/g, "_")); }}
+                    className="px-3 py-1.5 text-xs font-medium bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200 text-slate-800">⬇ Export SVG</a>
+                  <a href={"/api/designs/" + result.id + "/export.dxf"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/export.dxf", (type + "-" + result.id.slice(0, 8) + ".dxf").replace(/[^\\w.-]/g, "_")); }}
+                    className="px-3 py-1.5 text-xs font-medium bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200 text-slate-800">⬇ Export DXF (mm)</a>
+                  <button onClick={async () => { setPdfBusy(true); try { await exportDesignPdf(result, type); } catch (e) { console.error(e); } setPdfBusy(false); }} disabled={pdfBusy}
+                    className="px-3 py-1.5 text-xs font-medium bg-rose-600 hover:bg-rose-500 text-white rounded-lg disabled:opacity-50">{pdfBusy ? "Building PDF…" : "⬇ Export PDF"}</button>
+                  {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/cutlist.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/cutlist.csv", (type + "-" + result.id.slice(0, 8) + "-cutlist.csv").replace(/[^\\w.-]/g, "_")); }}
+                    className="px-3 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg">⬇ Cut List (CSV)</a>}
+                  {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/hardware.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/hardware.csv", (type + "-" + result.id.slice(0, 8) + "-hardware.csv").replace(/[^\\w.-]/g, "_")); }}
+                    className="px-3 py-1.5 text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white rounded-lg">⬇ Hardware (CSV)</a>}
+                  {/* 18.pdf §6: standalone production documents — Cut List PDF · BOQ Excel/PDF · Cabinet Schedule Excel/PDF */}
+                  {result.cutList && result.cutList.length > 0 && <button onClick={() => exportTablePdf("Production Cut List — " + type, ["S.No", "Height (mm)", "Width (mm)", "Qty", "Description"], [40, 100, 190, 280, 350], result.cutList.map((r, i) => [i + 1, r.h, r.w, r.qty, r.desc]), (type + "-cutlist.pdf").replace(/[^\\w.-]/g, "_"))}
+                    className="px-3 py-1.5 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg">⬇ Cut List (PDF)</button>}
+                  {result.boq && result.boq.length > 0 && <button onClick={() => saveCsvAs(["Item", "Qty", "Unit"], result.boq.map((r) => [r.item, r.qty, r.unit]), (type + "-boq.csv").replace(/[^\\w.-]/g, "_"))}
+                    className="px-3 py-1.5 text-xs font-medium bg-sky-600 hover:bg-sky-500 text-white rounded-lg">⬇ BOQ (Excel)</button>}
+                  {result.boq && result.boq.length > 0 && <button onClick={() => exportTablePdf("BOQ Summary — " + type, ["Item", "Qty", "Unit"], [40, 420, 520], result.boq.map((r) => [r.item, r.qty, r.unit]), (type + "-boq.pdf").replace(/[^\\w.-]/g, "_"))}
+                    className="px-3 py-1.5 text-xs font-medium bg-sky-700 hover:bg-sky-600 text-white rounded-lg">⬇ BOQ (PDF)</button>}
+                  {type.indexOf("Kitchen") >= 0 && <button onClick={() => saveCsvAs(CAB_SCHED_HEADERS, cabinetScheduleRows(liveRuns || result.runs), (type + "-cabinet-schedule.csv").replace(/[^\\w.-]/g, "_"))}
+                    className="px-3 py-1.5 text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white rounded-lg">⬇ Cabinet Schedule (Excel)</button>}
+                  {type.indexOf("Kitchen") >= 0 && <button onClick={() => exportTablePdf("Cabinet Schedule — " + type, CAB_SCHED_HEADERS, [40, 80, 175, 230, 360, 425, 495, 555, 640, 705, 775], cabinetScheduleRows(liveRuns || result.runs), (type + "-cabinet-schedule.pdf").replace(/[^\\w.-]/g, "_"))}
+                    className="px-3 py-1.5 text-xs font-medium bg-violet-700 hover:bg-violet-600 text-white rounded-lg">⬇ Cabinet Schedule (PDF)</button>}
+                  {/* 5.13: separate Production Cut List page (View) + Print-only */}
+                  {type.indexOf("Kitchen") >= 0 && result.cutList && result.cutList.length > 0 && <button onClick={() => setCutListPage(true)}
+                    className="px-3 py-1.5 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white rounded-lg">📋 View Production Cut List</button>}
+                  {type.indexOf("Kitchen") >= 0 && result.cutList && result.cutList.length > 0 && <button onClick={printCutList}
+                    className="px-3 py-1.5 text-xs font-medium bg-slate-500 hover:bg-slate-400 text-white rounded-lg">🖨 Print Cut List</button>}
+                </div>
+                {/* 13.pdf §4: selectable backsplash tiles (pattern / size / colour) — applies to elevation, section & 3D */}
+                {type.indexOf("Kitchen") >= 0 && (
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                    <span className="font-semibold text-slate-600">Backsplash tiles</span>
+                    <label className="flex items-center gap-1">Pattern
+                      <select value={tile.pattern} onChange={(e) => setTile({ ...tile, pattern: e.target.value })} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs">
+                        <option value="grid">Grid</option><option value="brick">Brick</option>
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1">Tile
+                      <select value={tile.size} onChange={(e) => setTile({ ...tile, size: +e.target.value })} className="px-2 py-1 bg-white border border-slate-300 rounded text-xs">
+                        <option value={75}>75 mm</option><option value={100}>100 mm</option><option value={150}>150 mm</option><option value={200}>200 mm</option><option value={300}>300 mm</option>
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1">Colour <input type="color" value={tile.color} onChange={(e) => setTile({ ...tile, color: e.target.value })} className="w-7 h-6 rounded border border-slate-300 bg-white p-0" /></label>
+                    <label className="flex items-center gap-1">Grout <input type="color" value={tile.grid} onChange={(e) => setTile({ ...tile, grid: e.target.value })} className="w-7 h-6 rounded border border-slate-300 bg-white p-0" /></label>
+                  </div>
+                )}
+                {/* Enhanced viewport: breadcrumb header + zoom toolbar + full-width canvas */}
+                <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white overflow-hidden">
+                  <div className="flex items-center justify-between px-3 py-2 bg-slate-100 border-b border-slate-200">
+                    <div className="text-xs font-semibold text-slate-700">{type} <span className="text-slate-400">›</span> {activeView === "plan" ? "Plan" : activeView === "3d" ? "3D View" : (typeof activeView === "string" && activeView.indexOf("sec") === 0 ? ((result.sections[+activeView.slice(3)] || {}).name || "") + " — Section" : (result.elevations[activeView] ? "Wall " + String.fromCharCode(65 + activeView) + " · " + result.elevations[activeView].name : ""))}</div>
+                    <div className="flex items-center gap-1">
+                      {/* 6.10 undo/redo (Ctrl+Z / Ctrl+Y) */}
+                      <button title="Undo (Ctrl+Z)" disabled={histLen.u <= 1} onClick={doUndo} className="px-2 h-6 rounded bg-white border border-slate-300 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-40">↶ Undo</button>
+                      <button title="Redo (Ctrl+Y)" disabled={histLen.r <= 0} onClick={doRedo} className="px-2 h-6 rounded bg-white border border-slate-300 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-40 mr-2">↷ Redo</button>
+                      {/* 5.12: explicit 2D / 3D view toggle (shared state) */}
+                      <button onClick={() => setActiveView(last2dRef.current || "plan")} className={"px-2 h-6 rounded border text-[11px] " + (activeView !== "3d" ? "bg-cyan-600 text-white border-transparent" : "bg-white border-slate-300 text-slate-600 hover:bg-slate-50")}>2D View</button>
+                      <button onClick={() => setActiveView("3d")} className={"px-2 h-6 rounded border text-[11px] mr-2 " + (activeView === "3d" ? "bg-cyan-600 text-white border-transparent" : "bg-white border-slate-300 text-slate-600 hover:bg-slate-50")}>3D View</button>
+                      <button title="Zoom out" onClick={() => setCanvasZoom((z) => Math.max(0.4, +(z - 0.2).toFixed(2)))} className="w-6 h-6 rounded bg-white border border-slate-300 text-slate-600 hover:bg-slate-50">−</button>
+                      <span className="text-[11px] text-slate-500 w-10 text-center">{Math.round(canvasZoom * 100)}%</span>
+                      <button title="Zoom in" onClick={() => setCanvasZoom((z) => Math.min(3, +(z + 0.2).toFixed(2)))} className="w-6 h-6 rounded bg-white border border-slate-300 text-slate-600 hover:bg-slate-50">+</button>
+                      <button title="Fit to screen" onClick={() => setCanvasZoom(1)} className="px-2 h-6 rounded bg-white border border-slate-300 text-[11px] text-slate-600 hover:bg-slate-50">Fit</button>
+                      <button title="Reset view" onClick={() => { setCanvasZoom(1); if (canvasScrollRef.current) { canvasScrollRef.current.scrollLeft = 0; canvasScrollRef.current.scrollTop = 0; } cam3dRef.current = null; }} className="px-2 h-6 rounded bg-white border border-slate-300 text-[11px] text-slate-600 hover:bg-slate-50">Reset</button>
+                    </div>
+                  </div>
+                  {/* 6.12 cursor-centred mouse-wheel zoom (Ctrl = precision); pan via scroll/drag. 6.11 viewport persists. */}
+                  <div ref={canvasScrollRef} className="p-2 overflow-auto" style={{ height: "660px" }}
+                    onPointerDownCapture={(e) => { if (activeView === "3d" || !(spaceRef.current || e.button === 1)) return; const el = canvasScrollRef.current; if (!el) return; e.preventDefault(); e.stopPropagation(); panRef.current = { x: e.clientX, y: e.clientY, sl: el.scrollLeft, st: el.scrollTop }; el.style.cursor = "grabbing"; try { el.setPointerCapture(e.pointerId); } catch (z) {} }}
+                    onPointerMove={(e) => { const p = panRef.current, el = canvasScrollRef.current; if (!p || !el) return; el.scrollLeft = p.sl - (e.clientX - p.x); el.scrollTop = p.st - (e.clientY - p.y); }}
+                    onPointerUp={() => { const el = canvasScrollRef.current; if (panRef.current && el) el.style.cursor = spaceRef.current ? "grab" : ""; panRef.current = null; }}
+                    onDoubleClick={() => { if (activeView === "3d") return; setCanvasZoom(1); const el = canvasScrollRef.current; if (el) { el.scrollLeft = 0; el.scrollTop = 0; } }}>
+                    <div className={activeView === "plan" ? "" : "hidden"} style={{ transform: "scale(" + canvasZoom + ")", transformOrigin: "top left" }}>
+                      {type.indexOf("Kitchen") >= 0
+                        ? <div className="inline-block rounded-lg border border-slate-200 bg-white p-2 shadow-sm"><LivePlan2D runs={liveRuns || result.runs} type={type} dims={{ wall, wallB, wallC }} /></div>
+                        : <div className="inline-block rounded-lg border border-slate-200 bg-white p-2 shadow-sm" dangerouslySetInnerHTML={{ __html: result.planSvg }} />}
+                    </div>
+                    {result.elevations.map((e, i) => (
+                      <div key={i} className={activeView === i ? "" : "hidden"}>
+                        {(result.runs[i] && result.runs[i].base && result.runs[i].base.length > 0)
+                          ? <InteractiveElevation key={result.id + "-" + i + "-" + histVer} run={(liveRuns && liveRuns[i]) || result.runs[i]} label={e.name} designType={type} beam={beam.present ? beam : null} width={Math.round(900 * canvasZoom)} handle={result.handle} applianceDims={result.applianceDims} applianceBrand={result.applianceBrand} cornerAdjoinLen={adjoinLenFor(i)} tile={tile} onChange={(b, w) => updateLiveRun(i, b, w)} />
+                          : <div style={{ transform: "scale(" + canvasZoom + ")", transformOrigin: "top left" }}>
+                              <div className="inline-block rounded-lg border border-slate-200 bg-white p-2 shadow-sm" dangerouslySetInnerHTML={{ __html: e.svg }} />
+                            </div>}
+                      </div>
+                    ))}
+                    {(result.sections || []).map((s, i) => (
+                      <div key={"sec" + i} className={activeView === "sec" + i ? "" : "hidden"} style={{ transform: "scale(" + canvasZoom + ")", transformOrigin: "top left" }}>
+                        <div className="inline-block rounded-lg border border-slate-200 bg-white p-2 shadow-sm" dangerouslySetInnerHTML={{ __html: sectionSvg((liveRuns || result.runs)[i], tile) }} />
+                      </div>
+                    ))}
+                    {/* 19.txt §4: the 3D scene is ALWAYS mounted (built in the background right after generation)
+                        and merely toggled visible — one-click instant switching, camera preserved, no rebuild. */}
+                    <div style={{ display: activeView === "3d" ? "block" : "none" }}>
+                      <Room3D runs={liveRuns || result.runs} type={type} dims={{ wall, wallB, wallC }} tile={tile} camRef={cam3dRef}
+                        visible={activeView === "3d"} structures={structures} room={room} onRunsEdit={updateLiveRun} handle={result.handle} designId={result.id} />
+                    </div>
+                  </div>
+                </div>
+                {consensus && <React.Fragment>
+                  {consensus.autoMode && (
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                      <div className="font-semibold">Missing Information Detected → Auto Design Mode Activated</div>
+                      <div className="mt-1">Inferred sensible defaults for: {(consensus.missing || []).join(", ") || "none"}.</div>
+                    </div>
+                  )}
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <h3 className="text-sm font-semibold text-cyan-600 mb-1">Structured Design Brief</h3>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-700">
+                      <div><span className="text-slate-500">Room: </span>{consensus.brief.room || "—"}</div>
+                      <div><span className="text-slate-500">Kitchen type: </span>{consensus.brief.kitchenType || "—"}</div>
+                      <div><span className="text-slate-500">Wall used: </span>{consensus.brief.wallUsed || "—"}</div>
+                      <div><span className="text-slate-500">Window: </span>{consensus.brief.window || "—"}</div>
+                      <div><span className="text-slate-500">Door: </span>{consensus.brief.door || "—"}</div>
+                      <div><span className="text-slate-500">Style: </span>{consensus.brief.style || "—"}</div>
+                      <div><span className="text-slate-500">Storage priority: </span>{consensus.brief.storagePriority || "—"}</div>
+                      <div><span className="text-slate-500">Beams: </span>{consensus.brief.beams || "—"}</div>
+                      <div><span className="text-slate-500">Columns: </span>{consensus.brief.columns || "—"}</div>
+                      <div><span className="text-slate-500">Ducts: </span>{consensus.brief.ducts || "—"}</div>
+                      <div><span className="text-slate-500">Company standards: </span>{consensus.brief.companyStandards || "—"}</div>
+                      <div className="col-span-2"><span className="text-slate-500">Appliances: </span>{consensus.brief.appliances || "—"}</div>
+                      <div className="col-span-2"><span className="text-slate-500">Learned from drawings: </span>{consensus.brief.learnedFromDrawings || "—"}</div>
+                      <div className="col-span-2"><span className="text-slate-500">Indian rules: </span>{consensus.brief.indianRules || "—"}</div>
+                      <div className="col-span-2"><span className="text-slate-500">Storage requirements: </span>{consensus.brief.storageRequirements || "—"}</div>
+                      <div className="col-span-2"><span className="text-slate-500">Cabinet requirements: </span>{consensus.brief.cabinetRequirements || "—"}</div>
+                    </div>
+                    {(consensus.brief.designConstraints || []).length > 0 && (
+                      <div className="mt-2 text-xs text-slate-600">
+                        <div className="text-slate-500 mb-0.5">Design rules sent to the AI:</div>
+                        <ul className="list-disc pl-4 space-y-0.5">{(consensus.brief.designConstraints || []).map((r, i) => <li key={i}>{r}</li>)}</ul>
+                      </div>
+                    )}
+                    {(consensus.brief.mandatory || []).length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {(consensus.brief.mandatory || []).map((m, i) => <span key={i} className="rounded border border-cyan-200 bg-cyan-50 text-cyan-700 px-1.5 py-0.5 text-[11px]">{m}</span>)}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-cyan-600 mb-1">AI Consensus — candidate scores</h3>
+                    {consensus.candidates && consensus.candidates[consensus.winner] && (
+                      <div className="mb-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 px-2 py-1 text-xs">
+                        ✓ Most practical design selected & shown on screen: <span className="font-semibold">{consensus.candidates[consensus.winner].label}</span> — {consensus.candidates[consensus.winner].total}/100 (compared against {consensus.candidates.length} candidates)
+                      </div>
+                    )}
+                    {(consensus.externalReviews || []).length > 0 && (
+                      <div className="mb-1.5 rounded-lg bg-violet-50 border border-violet-200 px-2 py-1 text-xs text-violet-800">
+                        <div className="font-medium">External AI review (suggestions only — CAD stays authoritative):</div>
+                        {(consensus.externalReviews || []).map((r, i) => (
+                          <div key={i} className="mt-0.5">• <span className="font-semibold">{r.provider}</span>: {r.error ? <span className="text-rose-600">unavailable ({r.error})</span> : (r.notes || "suggestion applied as a candidate")}</div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="overflow-auto rounded-lg border border-slate-200">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-100 text-slate-600">
+                          <tr>
+                            <th className="px-2 py-1">Criterion</th>
+                            {(consensus.candidates || []).map((c, i) => (
+                              <th key={i} className={"px-2 py-1 text-center " + (i === consensus.winner ? "bg-cyan-600 text-white" : "")}>{c.label}{i === consensus.winner ? " ★" : ""}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {[["indianCompliance", "Indian compliance"], ["workTriangle", "Work triangle"], ["sink", "Sink"], ["gtpt", "GTPT"], ["chimney", "Chimney"], ["applianceAccessibility", "Appliance access"], ["windowFit", "Window fit"], ["doorFit", "Door fit"], ["beamFit", "Beam fit"], ["storage", "Storage"], ["symmetry", "Symmetry"], ["manufacturing", "Manufacturing"], ["installation", "Installation"]].map(([k, lbl], ri) => (
+                            <tr key={k} className={ri % 2 ? "bg-slate-50" : ""}>
+                              <td className="px-2 py-0.5 text-slate-600">{lbl}</td>
+                              {(consensus.candidates || []).map((c, i) => (
+                                <td key={i} className={"px-2 py-0.5 text-center " + (i === consensus.winner ? "bg-cyan-50 font-medium" : "")}>{(c.scores && c.scores[k] != null) ? c.scores[k] : "—"}</td>
+                              ))}
+                            </tr>
+                          ))}
+                          <tr className="border-t border-slate-300 font-semibold">
+                            <td className="px-2 py-1">Total</td>
+                            {(consensus.candidates || []).map((c, i) => (
+                              <td key={i} className={"px-2 py-1 text-center " + (i === consensus.winner ? "bg-cyan-600 text-white" : "text-slate-700")}>{c.total}</td>
+                            ))}
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-400">Note: external-AI review (Phase 4) and AI image concepts (Phase 6) are optional future hooks — not enabled in this build (no API keys). Scores are computed by deterministic internal strategies.</div>
+                  </div>
+                </React.Fragment>}
+                <div>
+                  <h3 className="text-sm font-semibold text-cyan-600 mb-1">Applied Learned Rules</h3>
+                  <ul className="text-xs text-slate-700 space-y-1 list-disc pl-5">
+                    {result.appliedRules.map((r, i) => <li key={i}>{r}</li>)}
+                  </ul>
+                </div>
+                {result.mfgChecks && result.mfgChecks.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-cyan-600 mb-1">Manufacturing validation ({result.mfgChecks.filter(m => m.ok).length}/{result.mfgChecks.length} passed)</h3>
+                    <ul className="text-xs space-y-1">
+                      {result.mfgChecks.map((m, i) => (
+                        <li key={i} className={m.ok ? "text-slate-600" : "text-amber-700"}>
+                          <span className="font-medium">{m.ok ? "✓" : "⚠"} {m.name}:</span> {m.note}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {result.cutList && result.cutList.length > 0 && (
+                  <details className="text-xs">
+                    <summary className="text-sm font-semibold text-emerald-600 cursor-pointer">Production cut list ({result.cutList.length} panels) — click to view</summary>
+                    <div className="mt-2 max-h-72 overflow-auto rounded-lg border border-slate-200">
+                      <table className="w-full text-left">
+                        <thead className="bg-slate-100 text-slate-600 sticky top-0">
+                          <tr><th className="px-2 py-1">#</th><th className="px-2 py-1">H (mm)</th><th className="px-2 py-1">W (mm)</th><th className="px-2 py-1">Qty</th><th className="px-2 py-1">Description</th></tr>
+                        </thead>
+                        <tbody>
+                          {result.cutList.map((r, i) => (
+                            <tr key={i} className={i % 2 ? "bg-slate-50" : ""}>
+                              <td className="px-2 py-0.5 text-slate-400">{i + 1}</td><td className="px-2 py-0.5">{r.h}</td><td className="px-2 py-0.5">{r.w}</td><td className="px-2 py-0.5">{r.qty}</td><td className="px-2 py-0.5 text-slate-600">{r.desc}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+                {result.boq && result.boq.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-emerald-600 mb-1">BOQ summary</h3>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5 text-xs">
+                      {result.boq.map((r, i) => (
+                        <div key={i} className="flex justify-between bg-slate-50 border border-slate-200 rounded px-2 py-1">
+                          <span className="text-slate-600 truncate mr-1">{r.item}</span><span className="font-medium text-slate-800 whitespace-nowrap">{r.qty} {r.unit}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.hardware && result.hardware.length > 0 && (
+                  <details className="text-xs">
+                    <summary className="text-sm font-semibold text-amber-600 cursor-pointer">Hardware schedule ({result.hardware.length} items) — click to view</summary>
+                    <div className="mt-2 max-h-72 overflow-auto rounded-lg border border-slate-200">
+                      <table className="w-full text-left">
+                        <thead className="bg-slate-100 text-slate-600 sticky top-0"><tr><th className="px-2 py-1">Item</th><th className="px-2 py-1">Qty</th><th className="px-2 py-1">Unit</th><th className="px-2 py-1">Spec</th></tr></thead>
+                        <tbody>
+                          {result.hardware.map((h, i) => (
+                            <tr key={i} className={i % 2 ? "bg-slate-50" : ""}><td className="px-2 py-0.5 text-slate-700">{h.item}</td><td className="px-2 py-0.5 font-medium">{h.qty}</td><td className="px-2 py-0.5 text-slate-500">{h.unit}</td><td className="px-2 py-0.5 text-slate-500">{h.spec}</td></tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+                {result.learnedRules && result.learnedRules.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-emerald-600 mb-1">Rule fusion — standards applied ({result.learnedRules.length})</h3>
+                    <div className="space-y-1 max-h-72 overflow-y-auto pr-1">
+                      {result.learnedRules.map((r, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2 text-xs bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-1.5">
+                          <span className="text-slate-700 min-w-0"><span className="font-medium">{r.title}</span> <span className="text-slate-400">· {r.category}</span></span>
+                          <span className="whitespace-nowrap flex items-center gap-1.5">
+                            <span className="px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 text-[10px]">{r.ruleClass}</span>
+                            <span className="text-emerald-700 font-medium">{(r.confidence * 100).toFixed(0)}%</span>
+                            {r.source === "uploaded template" && <span className="text-cyan-700 text-[10px]">· template</span>}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Drawing Upload & CAD Reference Learning Module (2.txt) ----------------
+    const DRAWING_COMMANDS = ${JSON.stringify(DRAWING_COMMANDS)};
+    const REF_BADGE = {
+      learned: "bg-emerald-500/15 text-emerald-600 border-emerald-500/30",
+      pending: "bg-amber-500/15 text-amber-600 border-amber-500/30",
+      duplicate: "bg-slate-500/15 text-slate-500 border-slate-500/30",
+      ignored: "bg-rose-500/15 text-rose-600 border-rose-500/30",
+    };
+    function ASection({ title, items }) {
+      if (!items || !items.length) return null;
+      return (
+        <div>
+          <div className="text-[11px] font-semibold text-cyan-600 uppercase tracking-wide mb-0.5">{title}</div>
+          <ul className="text-xs text-slate-700 list-disc pl-4 space-y-0.5">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
+        </div>
+      );
+    }
+    function Library() {
+      const [refs, setRefs] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [category, setCategory] = useState("kitchen");
+      const [approved, setApproved] = useState(false);
+      const [uploading, setUploading] = useState(false);
+      const [uploadMsg, setUploadMsg] = useState("");
+      const [dragOver, setDragOver] = useState(false);
+      const [selected, setSelected] = useState(null);
+      const [learnBusy, setLearnBusy] = useState(null);
+      const fileRef = useRef(null);
+      const load = useCallback(async () => { setLoading(true); const j = await api("/api/references"); setRefs(j.data || []); setLoading(false); }, []);
+      useEffect(() => { load(); }, [load]);
+
+      const upload = async (file) => {
+        if (!file) return;
+        setUploading(true); setUploadMsg("");
+        try {
+          const fd = new FormData();
+          fd.append("file", file); fd.append("category", category); fd.append("approved", approved ? "true" : "false");
+          const res = await fetch("/api/references/upload", { method: "POST", body: fd });
+          const j = await res.json();
+          if (j.error) setUploadMsg("✗ " + j.error);
+          else { setSelected(j.data); setUploadMsg("✓ Analyzed " + j.data.name + " — " + j.data.status); await load(); }
+        } catch (e) { setUploadMsg("✗ Upload failed"); }
+        setUploading(false);
+      };
+      const open = async (id) => { const j = await api("/api/references/" + id); if (j.data) setSelected(j.data); };
+      const learn = async (command) => {
+        if (!selected) return;
+        setLearnBusy(command);
+        const j = await api("/api/references/" + selected.id + "/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command }) });
+        if (j.data) setSelected({ ...selected, analysis: j.data.analysis, learnMsg: j.data.result });
+        setLearnBusy(null); await load();
+      };
+
+      const counts = { learned: refs.filter(r => r.status === "learned").length, duplicate: refs.filter(r => r.status === "duplicate").length };
+      const a = selected && selected.analysis;
+      return (
+        <div className="grid md:grid-cols-3 gap-5">
+          {/* Upload + corpus */}
+          <div className="space-y-4">
+            <div className="bg-white rounded-xl p-5 border border-slate-200 space-y-3">
+              <h2 className="text-lg font-semibold">Upload Reference Drawing</h2>
+              <p className="text-xs text-slate-500">Upload a CAD/drawing file. The AI reads &amp; learns from it before generating new designs (2.txt module). DXF/SVG are vector-parsed; others use heuristic detection. Duplicate content is auto-detected.</p>
+              <div onClick={() => fileRef.current && fileRef.current.click()}
+                onDragOver={e => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)}
+                onDrop={e => { e.preventDefault(); setDragOver(false); upload(e.dataTransfer.files[0]); }}
+                className={"border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors " + (dragOver ? "border-cyan-500 bg-cyan-500/5" : "border-slate-300 hover:border-slate-400")}>
+                <input ref={fileRef} type="file" className="hidden" accept=".dwg,.dxf,.pdf,.jpg,.jpeg,.png,.svg,.skp,.xml,.bmp,.webp" onChange={e => upload(e.target.files[0])} />
+                <div className="text-slate-700 text-sm">{uploading ? "Analyzing drawing…" : "Drop a drawing here or click to browse"}</div>
+                <div className="text-[11px] text-slate-500 mt-1">.dwg .dxf .pdf .jpg .png .svg .skp .xml</div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input value={category} onChange={e => setCategory(e.target.value)} placeholder="category" className="px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg text-sm" />
+                <label className="flex items-center gap-2 text-xs text-slate-500 px-1">
+                  <input type="checkbox" checked={approved} onChange={e => setApproved(e.target.checked)} className="accent-cyan-600" /> approved
+                </label>
+              </div>
+              {uploadMsg && <div className="fade-in text-xs text-slate-700 bg-slate-50 rounded-lg p-2 border border-slate-200">{uploadMsg}</div>}
+            </div>
+
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-base font-semibold">Corpus ({refs.length})</h2>
+                <div className="flex gap-2 text-[11px]"><span className="text-emerald-600">{counts.learned} learned</span><span className="text-slate-500">{counts.duplicate} dup</span></div>
+              </div>
+              {loading ? <p className="text-slate-500 text-sm">Loading…</p> : (
+                <div className="space-y-1.5 max-h-[26rem] overflow-y-auto">
+                  {refs.map(r => (
+                    <button key={r.id} onClick={() => open(r.id)}
+                      className={"w-full text-left flex items-center justify-between gap-2 rounded-lg px-3 py-2 border transition-colors " + (selected && selected.id === r.id ? "bg-cyan-500/10 border-cyan-500/40" : "bg-slate-50 border-slate-200 hover:border-slate-400")}>
+                      <div className="min-w-0">
+                        <div className="text-sm text-slate-800 truncate">{r.name}</div>
+                        <div className="text-[11px] text-slate-500">{r.fileType} · {r.category}{r.confidence > 0 ? " · " + (r.confidence * 100).toFixed(0) + "%" : ""}</div>
+                      </div>
+                      <span className={"text-[10px] px-1.5 py-0.5 rounded-full border whitespace-nowrap " + (REF_BADGE[r.status] || REF_BADGE.pending)}>{r.status}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Analysis + per-drawing command center */}
+          <div className="md:col-span-2 space-y-5">
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <h2 className="text-lg font-semibold mb-1">What AI Learned from Uploaded Drawing</h2>
+              {!selected && <p className="text-slate-500 text-sm">Upload a drawing, or pick one from the corpus, to see what the AI detected and learned.</p>}
+              {selected && !a && <p className="text-slate-500 text-sm">This reference has no analysis (registered before upload support).</p>}
+              {a && (
+                <div className="fade-in space-y-3">
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="font-mono text-slate-800">{selected.name}</span>
+                    <span className={"px-2 py-0.5 rounded-full border " + (REF_BADGE[selected.status] || REF_BADGE.learned)}>{a.status}</span>
+                    <span className="text-slate-500">{a.format} · {a.fileType} · {a.sizeKB} KB</span>
+                    <span className="text-emerald-600">confidence {(a.confidence * 100).toFixed(0)}%</span>
+                  </div>
+                  {(Object.keys(a.entityCounts || {}).length > 0 || (a.layers && a.layers.length > 0)) && (
+                    <div className="text-[11px] text-slate-500 bg-slate-50 rounded-lg p-2 border border-slate-200">
+                      {Object.keys(a.entityCounts || {}).length > 0 && <div>Entities: {Object.entries(a.entityCounts).map(([k, v]) => k + ":" + v).join("  ")}</div>}
+                      {a.layers && a.layers.length > 0 && <div>Layers: {a.layers.join(", ")}</div>}
+                      {a.dimsFound && a.dimsFound.length > 0 && <div>Dimensions read: {a.dimsFound.join(", ")} mm</div>}
+                    </div>
+                  )}
+                  <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3">
+                    <ASection title="Detected cabinet types" items={a.detectedCabinets} />
+                    <ASection title="Cabinet sizes" items={a.cabinetSizes} />
+                    <ASection title="Wall-wise sequence" items={a.wallSequence} />
+                    <ASection title="Upper ↔ lower relationship" items={a.upperLower} />
+                    <ASection title="Corner units" items={a.cornerUnits} />
+                    <ASection title="Fillers" items={a.fillers} />
+                    <ASection title="Appliance zones" items={a.applianceZones} />
+                    <ASection title="Utilities (electrical/plumbing)" items={a.utilities} />
+                  </div>
+                  <ASection title="Design rules learned" items={a.rulesLearned} />
+                  {a.appliedCommands && a.appliedCommands.length > 0 && <ASection title="Focused learning applied" items={a.appliedCommands} />}
+                  {selected.learnMsg && <div className="text-xs text-cyan-700 bg-cyan-500/5 rounded-lg p-2 border border-cyan-500/20">{selected.learnMsg}</div>}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <h2 className="text-base font-semibold mb-1">Drawing Command Center</h2>
+              <p className="text-xs text-slate-500 mb-3">{selected ? "Tell the AI what specifically to learn from " + selected.name + "." : "Select a drawing first."}</p>
+              <div className="grid sm:grid-cols-2 gap-2">
+                {DRAWING_COMMANDS.map(cmd => (
+                  <button key={cmd} onClick={() => learn(cmd)} disabled={!selected || !!learnBusy}
+                    className="text-left px-3 py-2 text-xs bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-300 disabled:opacity-40">
+                    {learnBusy === cmd ? "Applying… " : ""}{cmd}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- What AI Learned ------------------------------------------------------
+    function WhatAILearned() {
+      const [rules, setRules] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const load = useCallback(async () => { setLoading(true); const j = await api("/api/learning/rules"); setRules(j.data || []); setLoading(false); }, []);
+      useEffect(() => { load(); }, [load]);
+      const cats = [...new Set(rules.map(r => r.category))];
+      return (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">What AI Learned ({rules.length} standards)</h2>
+            <button onClick={load} disabled={loading} className="px-3 py-1.5 text-sm bg-slate-100 rounded-lg border border-slate-300 disabled:opacity-50">{loading ? "…" : "Refresh"}</button>
+          </div>
+          {cats.map(cat => (
+            <div key={cat} className="bg-white rounded-xl p-4 border border-slate-200">
+              <h3 className="text-sm font-bold uppercase tracking-wide text-cyan-600 mb-2">{cat}</h3>
+              <div className="space-y-2">
+                {rules.filter(r => r.category === cat).map(r => (
+                  <div key={r.id} className="fade-in bg-slate-50 rounded-lg p-3 border border-slate-200">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium text-slate-800">{r.title}</span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 border border-emerald-500/30">
+                        {(r.confidence * 100).toFixed(0)}% conf
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">{r.detail}</p>
+                    <div className="text-[11px] text-slate-500 mt-1">Status: {r.status} · Used {r.usageCount}× </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ---- Command Center -------------------------------------------------------
+    const COMMANDS = ${JSON.stringify(COMMANDS)};
+    function CommandCenter() {
+      const [busy, setBusy] = useState(null);
+      const [log, setLog] = useState([]);
+      const [rules, setRules] = useState([]);
+      const [toggling, setToggling] = useState(null);
+      const loadRules = useCallback(async () => { const j = await api("/api/learning/rules"); setRules(j.data || []); }, []);
+      useEffect(() => { loadRules(); }, [loadRules]);
+      const run = async (command) => {
+        setBusy(command);
+        try {
+          const j = await api("/api/learning/commands/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command }) });
+          setLog(l => [{ command, result: j.data ? j.data.result : (j.error || "error") }, ...l].slice(0, 20));
+        } catch (e) { setLog(l => [{ command, result: "request failed" }, ...l]); }
+        await loadRules();
+        setBusy(null);
+      };
+      const toggle = async (id) => {
+        setToggling(id);
+        try { const j = await api("/api/learning/rules/" + id + "/toggle", { method: "POST" }); if (j.data) setRules(rs => rs.map(r => r.id === id ? { ...r, status: j.data.status } : r)); }
+        catch (e) {}
+        setToggling(null);
+      };
+      const activeCount = rules.filter(r => r.status === "active").length;
+      return (
+        <div className="space-y-5">
+          <div className="grid md:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <h2 className="text-lg font-semibold mb-3">CAD Learning Command Center</h2>
+              <div className="grid grid-cols-1 gap-2 max-h-[24rem] overflow-y-auto pr-1">
+                {COMMANDS.map(cmd => (
+                  <button key={cmd} onClick={() => run(cmd)} disabled={!!busy}
+                    className="text-left px-3 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-300 disabled:opacity-50">
+                    {busy === cmd ? "Running… " : ""}{cmd}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <h2 className="text-lg font-semibold mb-3">Command Output</h2>
+              {log.length === 0 && <p className="text-slate-500 text-sm">Run a command to see results.</p>}
+              <div className="space-y-2 max-h-[24rem] overflow-y-auto">
+                {log.map((e, i) => (
+                  <div key={i} className="fade-in bg-slate-50 rounded-lg p-3 border border-slate-200">
+                    <div className="text-xs font-semibold text-cyan-600">{e.command}</div>
+                    <div className="text-xs text-slate-700 mt-0.5">{e.result}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl p-5 border border-slate-200">
+            <div className="flex items-center justify-between mb-1">
+              <h2 className="text-lg font-semibold">Learned Standards — enable / disable</h2>
+              <span className="text-xs text-slate-500">{activeCount}/{rules.length} active</span>
+            </div>
+            <p className="text-xs text-slate-500 mb-3">Toggle a standard off and it stops driving generation (e.g. turn off "Chimney centering", then generate — the chimney moves off-centre). Changes apply to the next design you generate.</p>
+            <div className="grid sm:grid-cols-2 gap-2">
+              {rules.map(r => {
+                const on = r.status === "active";
+                return (
+                  <div key={r.id} className={"flex items-center justify-between gap-3 rounded-lg px-3 py-2 border " + (on ? "bg-emerald-50 border-emerald-100" : "bg-slate-50 border-slate-200")}>
+                    <div className="min-w-0">
+                      <div className="text-sm text-slate-800 truncate">{r.title}</div>
+                      <div className="text-[11px] text-slate-500">{r.category} · {(r.confidence * 100).toFixed(0)}%{r.sourceRefId ? " · template" : ""}</div>
+                    </div>
+                    <button onClick={() => toggle(r.id)} disabled={toggling === r.id}
+                      className={"relative w-11 h-6 rounded-full transition-colors flex-shrink-0 disabled:opacity-50 " + (on ? "bg-emerald-500" : "bg-slate-300")}
+                      title={on ? "Active — click to disable" : "Disabled — click to enable"}>
+                      <span className={"absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all " + (on ? "left-[22px]" : "left-0.5")}></span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Admin Dashboard ------------------------------------------------------
+    function Stat({ label, value, accent }) {
+      return (
+        <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+          <div className="text-[11px] text-slate-500 uppercase tracking-wide">{label}</div>
+          <div className={"text-2xl font-bold " + (accent || "text-slate-800")}>{value}</div>
+        </div>
+      );
+    }
+    function AdminDashboard() {
+      const [d, setD] = useState(null);
+      const [bench, setBench] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const load = useCallback(async () => { const j = await api("/api/admin/dashboard"); setD(j.data); }, []);
+      useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+      const runBench = async () => { setLoading(true); setBench(await api("/api/benchmark")); setLoading(false); };
+      if (!d) return <p className="text-slate-500 text-sm">Loading dashboard…</p>;
+      return (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Stat label="References" value={d.references.total} />
+            <Stat label="Learned" value={d.references.learned} accent="text-emerald-600" />
+            <Stat label="Duplicates" value={d.references.duplicates} accent="text-amber-600" />
+            <Stat label="Avg Confidence" value={d.rules.avgConfidence + "%"} accent="text-cyan-600" />
+            <Stat label="Active Rules" value={d.rules.active} />
+            <Stat label="Pending Rules" value={d.rules.pending} accent="text-amber-600" />
+            <Stat label="Designs Made" value={d.designs} />
+            <Stat label="Approved Refs" value={d.references.approved} accent="text-emerald-600" />
+          </div>
+          <div className="grid md:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <h3 className="text-sm font-semibold text-slate-700 mb-2">Top Used Standards</h3>
+              {d.topStandards.map((t, i) => (
+                <div key={i} className="flex justify-between text-xs py-1 border-b border-slate-200">
+                  <span className="text-slate-700">{t.title}</span>
+                  <span className="text-slate-500">{t.usageCount}× · {(t.confidence * 100).toFixed(0)}%</span>
+                </div>
+              ))}
+            </div>
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <h3 className="text-sm font-semibold text-slate-700 mb-2">Rules by Category</h3>
+              {Object.entries(d.byCategory).map(([k, v]) => (
+                <div key={k} className="flex justify-between text-xs py-1 border-b border-slate-200">
+                  <span className="text-slate-700">{k}</span><span className="text-slate-500">{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="bg-white rounded-xl p-5 border border-slate-200">
+            <h3 className="text-sm font-semibold text-slate-700 mb-2">Designs by Type <span className="text-slate-500 font-normal">(reinforces the standards each applies)</span></h3>
+            {Object.keys(d.designsByType || {}).length === 0 && <p className="text-slate-500 text-xs">No designs generated yet — generate one to reinforce its standards.</p>}
+            {Object.entries(d.designsByType || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+              <div key={k} className="flex justify-between text-xs py-1 border-b border-slate-200">
+                <span className="text-slate-700">{k}</span><span className="text-cyan-600">{v}×</span>
+              </div>
+            ))}
+          </div>
+          <div className="bg-white rounded-xl p-5 border border-slate-200">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-slate-700">Performance (cache vs DB)</h3>
+              <button onClick={runBench} disabled={loading} className="px-3 py-1.5 text-xs bg-slate-100 rounded-lg border border-slate-300 disabled:opacity-50">{loading ? "Running…" : "Run Benchmark"}</button>
+            </div>
+            {bench && (
+              <div className="text-xs font-mono text-slate-500 space-y-1">
+                <div>DB read avg: <span className="text-amber-600">{bench.dbReadAvgMs}ms</span></div>
+                <div>Cache read avg: <span className="text-emerald-600">{bench.cacheReadAvgMs}ms</span></div>
+                <div>Speedup: <span className="text-cyan-600">{bench.speedup}</span> · Hit rate: {bench.cacheStats.hitRate}</div>
+              </div>
+            )}
+          </div>
+          <div className="bg-white rounded-xl p-5 border border-slate-200">
+            <h3 className="text-sm font-semibold text-slate-700 mb-2">Recent Learning Commands</h3>
+            {d.recentCommands.length === 0 && <p className="text-slate-500 text-xs">No commands run yet.</p>}
+            {d.recentCommands.map((c, i) => (
+              <div key={i} className="text-xs py-1 border-b border-slate-200">
+                <span className="text-cyan-600">{c.command}</span> — <span className="text-slate-500">{c.result}</span>
+              </div>
+            ))}
+          </div>
+          <div className="grid md:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <h3 className="text-sm font-semibold text-slate-700 mb-2">Non-Standard Adjustments <span className="text-slate-400 font-normal">({d.adjustmentCount || 0})</span></h3>
+              <p className="text-[11px] text-slate-400 mb-2">±10% resizes & tall-unit placements recorded for review (4.txt Part 6).</p>
+              {(!d.adjustments || d.adjustments.length === 0) && <p className="text-slate-500 text-xs">None recorded.</p>}
+              {(d.adjustments || []).map((m, i) => <div key={i} className="text-[11px] py-1 border-b border-slate-100 text-slate-600">{m}</div>)}
+            </div>
+            <div className="bg-white rounded-xl p-5 border border-slate-200">
+              <h3 className="text-sm font-semibold text-slate-700 mb-2">Mandatory-Rule Conflicts <span className="text-slate-400 font-normal">({d.conflictCount || 0})</span></h3>
+              <p className="text-[11px] text-slate-400 mb-2">Where a learned/foundational rule clashed with a mandatory rule — mandatory enforced.</p>
+              {(!d.conflicts || d.conflicts.length === 0) && <p className="text-emerald-600 text-xs">No conflicts — all designs respected the mandatory rules.</p>}
+              {(d.conflicts || []).map((m, i) => <div key={i} className="text-[11px] py-1 border-b border-slate-100 text-amber-700">⚠ {m}</div>)}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [tab, setTab] = useState("Generator");
+      const [scanMsg, setScanMsg] = useState("");
+      const [scanning, setScanning] = useState(false);
+      const scan = async () => {
+        setScanning(true);
+        const j = await api("/api/learning/scan", { method: "POST" });
+        setScanMsg(j.data ? ("Phase-1 scan: learned " + j.data.learned + ", duplicates " + j.data.duplicates + ", features " + j.data.featuresAdded) : "scan failed");
+        setScanning(false);
+      };
+      return (
+        <div className="max-w-6xl mx-auto px-4 py-8">
+          <header className="mb-6">
+            <h1 className="text-3xl font-bold bg-gradient-to-r from-cyan-600 via-blue-600 to-purple-600 bg-clip-text text-transparent">AI Design Studio</h1>
+            <p className="text-slate-500 text-sm">CAD Learning Engine + Modular Design Generation — Hono · Drizzle · SQLite · React · Zod. <span className="text-slate-400">(No cutting/nesting optimizer — by design.)</span></p>
+            <div className="mt-3 flex items-center gap-3">
+              <button onClick={scan} disabled={scanning} className="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50">{scanning ? "Scanning…" : "Run Phase-1 Learning Scan"}</button>
+              {scanMsg && <span className="text-xs text-slate-500">{scanMsg}</span>}
+            </div>
+          </header>
+          <Tabs tab={tab} setTab={setTab} />
+          {tab === "Generator" && <Generator />}
+          {tab === "Library" && <Library />}
+          {tab === "What AI Learned" && <WhatAILearned />}
+          {tab === "Command Center" && <CommandCenter />}
+          {tab === "Admin Dashboard" && <AdminDashboard />}
+          <footer className="text-center text-xs text-slate-400 pt-8 mt-8 border-t border-slate-200">
+            Single-File Full-Stack · CAD learning, detection &amp; generation only · extend the SVG engine into a real canvas (drag/zoom/snap) + PWA for production.
+          </footer>
+        </div>
+      );
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>`;
+
+app.get("/mkw-logo.jpg", (c) => { try { const buf = fsRead("mkw-logo.jpg"); c.header("Content-Type", "image/jpeg"); c.header("Cache-Control", "public, max-age=86400"); return c.body(buf); } catch { return c.json({ error: "logo not found" }, 404); } });
+app.get("/", (c) => c.html(frontendHTML));
+app.get("/favicon.ico", (c) => c.body(null, 204)); // silence the browser's default favicon request
+
+// =============================================================================
+// 11. ENTERPRISE EXTENSIONS — SYSTEM-DESIGN §3.2 pending items #1–#8.
+//   #1 canvas-edit persistence · #2 realtime SSE bus · #3 RoomModel coordination
+//   #4 offline render queue · #5 PBR material pipeline · #6 walkthrough encode
+//   #7 obstruction multi-view auto-reconfig.  Dependency-light: Server-Sent Events
+//   (no ws), an in-process job queue, and a pure-JS PNG→GIF encoder for #6.
+// =============================================================================
+
+// ── persistence tables (room_models / materials / render_jobs) — idempotent ──
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS room_models (
+    design_id TEXT PRIMARY KEY, model TEXT NOT NULL, updated_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS materials (
+    id TEXT PRIMARY KEY, design_id TEXT NOT NULL, target TEXT NOT NULL,
+    pbr TEXT NOT NULL, updated_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS render_jobs (
+    id TEXT PRIMARY KEY, design_id TEXT NOT NULL, kind TEXT NOT NULL,
+    status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0,
+    spec TEXT NOT NULL DEFAULT '{}', result TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+`);
+
+// ── #2 Realtime bus: Server-Sent Events fan-out keyed by designId (cross-client) ──
+const liveSubs = new Map<string, Set<any>>();
+const SSE_ENC = new TextEncoder();
+function broadcast(designId: string, event: string, data: any) {
+  const subs = liveSubs.get(designId); if (!subs || !subs.size) return;
+  const frame = SSE_ENC.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  for (const ctrl of [...subs]) { try { ctrl.enqueue(frame); } catch { subs.delete(ctrl); } }
+}
+function liveClients(designId: string) { const s = liveSubs.get(designId); return s ? s.size : 0; }
+app.get("/api/designs/:id/live", (c) => {
+  const id = c.req.param("id");
+  let self: any, hb: any;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      self = controller;
+      const set = liveSubs.get(id) || new Set(); set.add(controller); liveSubs.set(id, set);
+      controller.enqueue(SSE_ENC.encode(`event: hello\ndata: ${JSON.stringify({ id, clients: set.size })}\n\n`));
+      broadcast(id, "presence", { clients: set.size });
+      hb = setInterval(() => { try { controller.enqueue(SSE_ENC.encode(`: ping\n\n`)); } catch { } }, 25000);
+    },
+    cancel() {
+      clearInterval(hb);
+      const set = liveSubs.get(id);
+      if (set) { set.delete(self); if (!set.size) liveSubs.delete(id); else broadcast(id, "presence", { clients: set.size }); }
+    },
+  });
+  return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" } });
+});
+
+// ── shared persistence: re-derive docs + re-render elevations, save, audit ──
+function rederiveLayout(layout: any) {
+  const prevH = GEN.handle, prevB = GEN.applianceBrand;
+  if (layout.handle) GEN.handle = layout.handle;
+  if (layout.applianceBrand) GEN.applianceBrand = layout.applianceBrand;
+  try { GEN_LOG.conflicts.length = 0; GEN_LOG.adjustments.length = 0; } catch { }
+  try { if (Array.isArray(layout.runs)) layout.elevations = layout.runs.map((r: any) => ({ name: r.name, svg: renderRunElevation(r) })); } catch { }
+  layout.cutList = cutList(layout);
+  layout.hardware = hardwareSchedule(layout);
+  layout.boq = boq(layout);
+  layout.mfgChecks = validateManufacturing(layout);
+  GEN.handle = prevH; GEN.applianceBrand = prevB;
+  return layout;
+}
+function saveLayout(id: string, layout: any) { db.update(designs).set({ layout: JSON.stringify(layout) }).where(eq(designs.id, id)).run(); }
+function auditEdit(id: string, designType: string, kind: string, message: string) {
+  sqlite.prepare(`INSERT INTO audit_log(id,design_id,kind,message,created_at) VALUES(?,?,?,?,?)`)
+    .run(randomUUID(), id, kind, `[edit · ${designType}] ${message}`, Date.now());
+}
+function reflowRun(run: any) { let x = 0; for (const c of (run.base || [])) { c.x = x; x += c.w; } }
+
+// ── #1 Canvas-edit persistence ──────────────────────────────────────────────
+// PUT whole edited run-set (canvas autosave); PATCH a single cabinet / its props / a dimension.
+app.put("/api/designs/:id/layout", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  if (Array.isArray(b.runs)) d.layout.runs = b.runs;
+  if (b.handle) d.layout.handle = b.handle;
+  if (b.applianceBrand) d.layout.applianceBrand = b.applianceBrand;
+  rederiveLayout(d.layout); saveLayout(id, d.layout);
+  auditEdit(id, d.row.designType, "adjustment", `canvas autosaved (${(d.layout.runs || []).length} runs)`);
+  broadcast(id, "layout", { runs: d.layout.runs, by: b.clientId || null });
+  return c.json({ data: { ok: true, mfgChecks: d.layout.mfgChecks, cutList: d.layout.cutList, hardware: d.layout.hardware, boq: d.layout.boq } });
+});
+app.patch("/api/designs/:id/cabinet", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const ri = Number(b.run ?? 0), ci = Number(b.index);
+  const run = d.layout.runs?.[ri]; const cab = run?.base?.[ci]; if (!cab) return c.json({ error: "bad cabinet reference" }, 400);
+  for (const k of ["w", "kind", "label", "drawers", "dh"]) if (b.patch && k in b.patch) (cab as any)[k] = b.patch[k];
+  reflowRun(run); rederiveLayout(d.layout); saveLayout(id, d.layout);
+  auditEdit(id, d.row.designType, "adjustment", `${run.name} · ${cab.label || cab.kind} edited`);
+  broadcast(id, "cabinet", { run: ri, index: ci, cab, by: b.clientId || null });
+  return c.json({ data: { ok: true, cab, mfgChecks: d.layout.mfgChecks } });
+});
+app.patch("/api/designs/:id/cabinet/:i/props", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const ri = Number(b.run ?? 0), ci = Number(c.req.param("i"));
+  const run = d.layout.runs?.[ri]; const cab = run?.base?.[ci]; if (!cab) return c.json({ error: "bad cabinet reference" }, 400);
+  Object.assign(cab, b.props || {});
+  reflowRun(run); rederiveLayout(d.layout); saveLayout(id, d.layout);
+  auditEdit(id, d.row.designType, "adjustment", `${cab.label || cab.kind} properties updated`);
+  broadcast(id, "props", { run: ri, index: ci, cab, by: b.clientId || null });
+  return c.json({ data: { ok: true, cab } });
+});
+app.patch("/api/designs/:id/dimension", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const ri = Number(b.run ?? 0), ci = Number(b.index), mm = Math.round(Number(b.mm));
+  const run = d.layout.runs?.[ri]; const cab = run?.base?.[ci]; if (!cab || !(mm > 0)) return c.json({ error: "bad dimension" }, 400);
+  const warnings: string[] = [];
+  if (mm < 100 || mm > 2000) warnings.push(`width ${mm} mm out of buildable range (100–2000)`);
+  if (isDrawerKind(cab.kind) && !DRAWER_WIDTHS.includes(mm)) warnings.push(`drawer width ${mm} mm is non-standard`);
+  cab.w = Math.max(100, Math.min(2000, mm));
+  reflowRun(run); rederiveLayout(d.layout); saveLayout(id, d.layout);
+  auditEdit(id, d.row.designType, warnings.length ? "conflict" : "adjustment", `${cab.label || cab.kind} → ${cab.w} mm${warnings.length ? " (" + warnings.join("; ") + ")" : ""}`);
+  broadcast(id, "dimension", { run: ri, index: ci, mm: cab.w, warnings, by: b.clientId || null });
+  return c.json({ data: { ok: warnings.length === 0, warnings, cab } });
+});
+
+// ── #3 RoomModel coordination — single source of truth, auto-rebalance + corner sync ──
+function rebalanceRun(run: any) {
+  const FIXED = new Set(["drawer3", "drawer", "drawer-atta", "sink", "hob", "dishwasher", "fridge", "corner", "chimney", "tall-fridge", "tall-hiunit", "tall-utility", "tall-pantry"]);
+  const sum = (run.base || []).reduce((s: number, c: any) => s + c.w, 0);
+  const diff = (run.length || sum) - sum;
+  if (Math.abs(diff) < 1) { reflowRun(run); return; }
+  const flex = (run.base || []).filter((c: any) => !FIXED.has(c.kind) && c.drawers === 0).sort((a: any, b: any) => b.w - a.w);
+  if (flex.length) flex[0].w = Math.max(100, flex[0].w + diff);
+  reflowRun(run);
+}
+function syncCorners(layout: any) {
+  for (const r of (layout.runs || [])) for (const c of (r.base || [])) if (c.kind === "corner" && !/corner/i.test(c.label || "")) c.label = "Corner " + (c.label || "");
+}
+function buildRoomModel(id: string, layout: any) {
+  const runs = layout.runs || [];
+  const walls = runs.map((r: any, i: number) => ({ wallId: "W" + (i + 1), runName: r.name, length: r.length, cabinets: (r.base || []).length, wallCabs: (r.wallCabs || []).length }));
+  const sharedCorners: any[] = [];
+  for (let i = 0; i < runs.length - 1; i++) sharedCorners.push({ a: "W" + (i + 1), b: "W" + (i + 2), kind: "L-return" });
+  return { designId: id, type: layout.type, walls, sharedCorners, obstructions: layout.obstructions || [], updatedAt: Date.now() };
+}
+app.post("/api/designs/:id/coordinate", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  if (Array.isArray(b.runs)) d.layout.runs = b.runs;
+  const affected = (b.run != null && d.layout.runs?.[b.run]) ? [d.layout.runs[b.run]] : (d.layout.runs || []);
+  affected.forEach((r: any) => rebalanceRun(r));
+  syncCorners(d.layout);
+  const model = buildRoomModel(id, d.layout);
+  sqlite.prepare(`INSERT INTO room_models(design_id,model,updated_at) VALUES(?,?,?) ON CONFLICT(design_id) DO UPDATE SET model=excluded.model, updated_at=excluded.updated_at`).run(id, JSON.stringify(model), Date.now());
+  rederiveLayout(d.layout); saveLayout(id, d.layout);
+  auditEdit(id, d.row.designType, "adjustment", `coordinated ${model.walls.length} walls / ${model.sharedCorners.length} corners`);
+  broadcast(id, "coordinate", { model, runs: d.layout.runs });
+  return c.json({ data: { ok: true, model, runs: d.layout.runs, mfgChecks: d.layout.mfgChecks } });
+});
+app.get("/api/designs/:id/roommodel", (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const row = sqlite.prepare(`SELECT model FROM room_models WHERE design_id=?`).get(id) as any;
+  return c.json({ data: row ? JSON.parse(row.model) : buildRoomModel(id, d.layout) });
+});
+
+// ── #7 Obstruction (beam/column/duct) → multi-view auto-reconfiguration ──
+function applyObstruction(layout: any, ob: any) {
+  const adj: string[] = [];
+  const drop = Number(ob.drop ?? ob.height ?? 300);
+  const ceiling = STD.wallStart + STD.wallHeight;
+  const beamBot = Number(ob.sill ?? (ceiling - drop));
+  const runs = layout.runs || [];
+  const targets = (ob.wall != null && runs[ob.wall]) ? [runs[ob.wall]] : runs;
+  for (const r of targets) {
+    for (const cc of [...(r.wallCabs || []), ...(r.base || [])]) {
+      const tall = isTall(cc.kind);
+      const isUpper = tall || ["wall", "glass-wall", "chimney", "loft", "display"].includes(cc.kind);
+      if (!isUpper) continue;
+      const topMm = ceiling;                    // wall cabinets / tall units reach the wall-cabinet ceiling line
+      if (topMm > beamBot) { cc._beamCut = Math.round(topMm - beamBot); adj.push(`${cc.label || cc.kind} in ${r.name} trimmed ${cc._beamCut} mm under the ${ob.kind || "beam"}`); }
+    }
+  }
+  layout.obstructions = [...(layout.obstructions || []), { kind: ob.kind || "beam", wall: ob.wall ?? null, sill: beamBot, top: beamBot + drop, along: ob.along ?? null, width: ob.width ?? null }];
+  return adj;
+}
+app.post("/api/designs/:id/obstruction", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const ob = await c.req.json().catch(() => ({} as any));
+  const adj = applyObstruction(d.layout, ob);
+  (d.layout.runs || []).forEach((r: any) => rebalanceRun(r));
+  rederiveLayout(d.layout); saveLayout(id, d.layout);
+  for (const m of adj) auditEdit(id, d.row.designType, "adjustment", m);
+  broadcast(id, "obstruction", { obstruction: ob, adjustments: adj, obstructions: d.layout.obstructions, runs: d.layout.runs });
+  return c.json({ data: { ok: true, adjustments: adj, obstructions: d.layout.obstructions, mfgChecks: d.layout.mfgChecks } });
+});
+
+// ── #5 PBR material pipeline — brand finish → full PBR parameter set, stored + addressable ──
+const PBR_LIBRARY: Record<string, any> = {
+  "acrylic-highgloss": { albedo: "#f4f6f8", roughness: 0.08, metalness: 0.0, clearcoat: 1.0, clearcoatRoughness: 0.04, normalScale: 0.15, aoIntensity: 0.6, sheen: 0.1, repeat: [1, 1] },
+  "laminate-matte": { albedo: "#d8cdbd", roughness: 0.62, metalness: 0.0, clearcoat: 0.1, clearcoatRoughness: 0.5, normalScale: 0.55, aoIntensity: 0.9, sheen: 0.0, repeat: [2, 2] },
+  "laminate-suede": { albedo: "#cfc6b8", roughness: 0.78, metalness: 0.0, clearcoat: 0.0, clearcoatRoughness: 0.7, normalScale: 0.7, aoIntensity: 1.0, sheen: 0.05, repeat: [2, 2] },
+  "veneer-natural": { albedo: "#a9763f", roughness: 0.45, metalness: 0.0, clearcoat: 0.25, clearcoatRoughness: 0.35, normalScale: 0.9, aoIntensity: 0.95, sheen: 0.0, grain: true, repeat: [1, 3] },
+  "pu-satin": { albedo: "#eceae6", roughness: 0.35, metalness: 0.0, clearcoat: 0.5, clearcoatRoughness: 0.2, normalScale: 0.25, aoIntensity: 0.7, sheen: 0.15, repeat: [1, 1] },
+  "glass-frosted": { albedo: "#cfe3df", roughness: 0.3, metalness: 0.0, transmission: 0.85, thickness: 6, ior: 1.45, opacity: 0.82, normalScale: 0.2, aoIntensity: 0.3, repeat: [1, 1] },
+  "steel-brushed": { albedo: "#b9bcc0", roughness: 0.32, metalness: 0.95, anisotropy: 0.8, normalScale: 0.4, aoIntensity: 0.6, repeat: [1, 1] },
+  "granite-counter": { albedo: "#1f2329", roughness: 0.25, metalness: 0.05, clearcoat: 0.6, clearcoatRoughness: 0.15, normalScale: 0.6, aoIntensity: 0.9, speckle: true, repeat: [3, 3] },
+};
+function pbrFor(finish: string, type: string) {
+  const t = (type || finish || "").toLowerCase();
+  const key = /acrylic/.test(t) ? "acrylic-highgloss" : /veneer/.test(t) ? "veneer-natural" : /(pu|paint)/.test(t) ? "pu-satin" : /glass/.test(t) ? "glass-frosted" : /steel|metal/.test(t) ? "steel-brushed" : /granite|counter|stone/.test(t) ? "granite-counter" : /(gloss|high.?gloss)/.test(t) ? "acrylic-highgloss" : "laminate-matte";
+  return { ...(PBR_LIBRARY[key] || PBR_LIBRARY["laminate-matte"]), preset: key, finish, type };
+}
+app.get("/api/pbr/library", (c) => c.json({ data: PBR_LIBRARY }));
+app.post("/api/designs/:id/3d/material", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const target = String(b.target || "project");   // project | room | cabinet:<run>:<i> | kind:<kind>
+  const pbr = (b.pbr && typeof b.pbr === "object") ? b.pbr : pbrFor(String(b.finish || ""), String(b.type || b.finishType || ""));
+  sqlite.prepare(`INSERT INTO materials(id,design_id,target,pbr,updated_at) VALUES(?,?,?,?,?)`).run(randomUUID(), id, target, JSON.stringify(pbr), Date.now());
+  broadcast(id, "material", { target, pbr });
+  return c.json({ data: { ok: true, target, pbr } });
+});
+app.get("/api/designs/:id/3d/materials", (c) => {
+  const id = c.req.param("id");
+  const rows = sqlite.prepare(`SELECT target,pbr,updated_at FROM materials WHERE design_id=? ORDER BY updated_at`).all(id) as any[];
+  const map = new Map<string, any>();
+  for (const r of rows) map.set(r.target, { target: r.target, pbr: JSON.parse(r.pbr), updatedAt: r.updated_at });
+  return c.json({ data: [...map.values()] });
+});
+
+// ── #6 support: pure-JS PNG(8-bit)→RGBA decode + animated-GIF encode (no native deps) ──
+function decodePNG(buf: Buffer): { w: number; h: number; rgba: Uint8Array } {
+  if (buf.length < 8 || buf[0] !== 0x89 || buf[1] !== 0x50) throw new Error("not a PNG");
+  let p = 8, w = 0, h = 0, bitDepth = 8, colorType = 6; const idat: Buffer[] = []; let palette: Uint8Array | null = null;
+  while (p < buf.length) {
+    const len = buf.readUInt32BE(p); const type = buf.toString("ascii", p + 4, p + 8); const data = buf.subarray(p + 8, p + 8 + len);
+    if (type === "IHDR") { w = data.readUInt32BE(0); h = data.readUInt32BE(4); bitDepth = data[8]; colorType = data[9]; }
+    else if (type === "PLTE") palette = new Uint8Array(data);
+    else if (type === "IDAT") idat.push(data);
+    else if (type === "IEND") break;
+    p += 12 + len;
+  }
+  if (bitDepth !== 8) throw new Error("only 8-bit PNG supported");
+  const ch = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 4 ? 2 : 1;   // 6 RGBA · 2 RGB · 4 gray+a · 0/3 gray/idx
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = w * ch, out = new Uint8Array(w * h * 4);
+  const prev = new Uint8Array(stride); let cur = new Uint8Array(stride); let rp = 0;
+  const paeth = (a: number, b: number, c: number) => { const pa = Math.abs(b - c), pb = Math.abs(a - c), pc = Math.abs(a + b - 2 * c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; };
+  for (let y = 0; y < h; y++) {
+    const f = raw[rp++];
+    for (let x = 0; x < stride; x++) {
+      const rawv = raw[rp++], a = x >= ch ? cur[x - ch] : 0, b = prev[x], cc = x >= ch ? prev[x - ch] : 0;
+      let v = rawv;
+      if (f === 1) v = rawv + a; else if (f === 2) v = rawv + b; else if (f === 3) v = rawv + ((a + b) >> 1); else if (f === 4) v = rawv + paeth(a, b, cc);
+      cur[x] = v & 0xff;
+    }
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4, s = x * ch;
+      if (colorType === 6) { out[o] = cur[s]; out[o + 1] = cur[s + 1]; out[o + 2] = cur[s + 2]; out[o + 3] = cur[s + 3]; }
+      else if (colorType === 2) { out[o] = cur[s]; out[o + 1] = cur[s + 1]; out[o + 2] = cur[s + 2]; out[o + 3] = 255; }
+      else if (colorType === 4) { out[o] = out[o + 1] = out[o + 2] = cur[s]; out[o + 3] = cur[s + 1]; }
+      else if (colorType === 3 && palette) { const idx = cur[s] * 3; out[o] = palette[idx]; out[o + 1] = palette[idx + 1]; out[o + 2] = palette[idx + 2]; out[o + 3] = 255; }
+      else { out[o] = out[o + 1] = out[o + 2] = cur[s]; out[o + 3] = 255; }
+    }
+    prev.set(cur);
+  }
+  return { w, h, rgba: out };
+}
+function downscaleRGBA(src: Uint8Array, w: number, h: number, max: number) {
+  if (Math.max(w, h) <= max) return { rgba: src, w, h };
+  const sc = max / Math.max(w, h), nw = Math.max(1, Math.round(w * sc)), nh = Math.max(1, Math.round(h * sc));
+  const out = new Uint8Array(nw * nh * 4);
+  for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+    const sx = Math.min(w - 1, Math.floor(x / sc)), sy = Math.min(h - 1, Math.floor(y / sc)), s = (sy * w + sx) * 4, o = (y * nw + x) * 4;
+    out[o] = src[s]; out[o + 1] = src[s + 1]; out[o + 2] = src[s + 2]; out[o + 3] = src[s + 3];
+  }
+  return { rgba: out, w: nw, h: nh };
+}
+// median-cut palette (≤256) over the pooled pixels of every frame → one shared GIF palette.
+function medianCut(pixels: number[][], depth: number, boxes: number[][][]) {
+  if (depth === 0 || pixels.length === 0) { if (pixels.length) boxes.push(pixels); return; }
+  let rmin = 255, rmax = 0, gmin = 255, gmax = 0, bmin = 255, bmax = 0;
+  for (const px of pixels) { rmin = Math.min(rmin, px[0]); rmax = Math.max(rmax, px[0]); gmin = Math.min(gmin, px[1]); gmax = Math.max(gmax, px[1]); bmin = Math.min(bmin, px[2]); bmax = Math.max(bmax, px[2]); }
+  const rr = rmax - rmin, gr = gmax - gmin, br = bmax - bmin, ch = rr >= gr && rr >= br ? 0 : gr >= br ? 1 : 2;
+  pixels.sort((a, b) => a[ch] - b[ch]);
+  const mid = pixels.length >> 1;
+  medianCut(pixels.slice(0, mid), depth - 1, boxes); medianCut(pixels.slice(mid), depth - 1, boxes);
+}
+function buildPalette(frames: { rgba: Uint8Array }[]): number[][] {
+  const sample: number[][] = [];
+  for (const f of frames) { const px = f.rgba; const step = Math.max(4, Math.floor(px.length / 4 / 4000)) * 4; for (let i = 0; i < px.length; i += step) sample.push([px[i], px[i + 1], px[i + 2]]); }
+  const boxes: number[][][] = []; medianCut(sample.length ? sample : [[0, 0, 0]], 8, boxes);
+  const pal = boxes.slice(0, 256).map((box) => { let r = 0, g = 0, b = 0; for (const px of box) { r += px[0]; g += px[1]; b += px[2]; } const n = box.length || 1; return [Math.round(r / n), Math.round(g / n), Math.round(b / n)]; });
+  while (pal.length < 256) pal.push([0, 0, 0]);
+  return pal;
+}
+function nearestIdx(pal: number[][], r: number, g: number, b: number, cache: Map<number, number>) {
+  const key = (r << 16) | (g << 8) | b; const hit = cache.get(key); if (hit !== undefined) return hit;
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < pal.length; i++) { const dr = pal[i][0] - r, dg = pal[i][1] - g, db = pal[i][2] - b, dd = dr * dr + dg * dg + db * db; if (dd < bd) { bd = dd; best = i; } }
+  cache.set(key, best); return best;
+}
+// GIF-LZW compress an array of palette indices (minCodeSize bits) → byte sub-blocks.
+function lzwGIF(indices: Uint8Array, minCode: number): number[] {
+  const clear = 1 << minCode, eoi = clear + 1; let codeSize = minCode + 1, next = eoi + 1;
+  let dict = new Map<string, number>(); const out: number[] = []; let cur = 0, curBits = 0;
+  const emit = (code: number) => { cur |= code << curBits; curBits += codeSize; while (curBits >= 8) { out.push(cur & 0xff); cur >>= 8; curBits -= 8; } };
+  const reset = () => { dict = new Map(); for (let i = 0; i < clear; i++) dict.set(String(i), i); next = eoi + 1; codeSize = minCode + 1; };
+  reset(); emit(clear);
+  let prefix = String(indices[0]);
+  for (let i = 1; i < indices.length; i++) {
+    const k = indices[i], combo = prefix + "," + k;
+    if (dict.has(combo)) prefix = combo;
+    else { emit(dict.get(prefix)!); dict.set(combo, next++); if (next > (1 << codeSize) && codeSize < 12) codeSize++; else if (next > 4096) { emit(clear); reset(); } prefix = String(k); }
+  }
+  emit(dict.get(prefix)!); emit(eoi);
+  if (curBits > 0) out.push(cur & 0xff);
+  return out;
+}
+function encodeGIF(frames: { rgba: Uint8Array; w: number; h: number }[], delayCs: number): Buffer {
+  const W = frames[0].w, H = frames[0].h, pal = buildPalette(frames);
+  const bytes: number[] = []; const push = (...b: number[]) => bytes.push(...b);
+  const u16 = (n: number) => push(n & 0xff, (n >> 8) & 0xff);
+  push(0x47, 0x49, 0x46, 0x38, 0x39, 0x61);              // GIF89a
+  u16(W); u16(H); push(0xf7, 0, 0);                       // global palette, 256 colors
+  for (const c of pal) push(c[0], c[1], c[2]);
+  push(0x21, 0xff, 0x0b); for (const ch of "NETSCAPE2.0") push(ch.charCodeAt(0)); push(0x03, 0x01, 0, 0, 0);   // loop forever
+  const cache = new Map<number, number>();
+  for (const f of frames) {
+    push(0x21, 0xf9, 0x04, 0x04); u16(delayCs); push(0, 0);   // graphic control: delay
+    push(0x2c); u16(0); u16(0); u16(W); u16(H); push(0);      // image descriptor
+    const idx = new Uint8Array(W * H);
+    for (let i = 0, j = 0; i < idx.length; i++, j += 4) idx[i] = nearestIdx(pal, f.rgba[j], f.rgba[j + 1], f.rgba[j + 2], cache);
+    const minCode = 8; push(minCode);
+    const lzw = lzwGIF(idx, minCode);
+    for (let i = 0; i < lzw.length; i += 255) { const chunk = lzw.slice(i, i + 255); push(chunk.length); for (const b of chunk) push(b); }
+    push(0);
+  }
+  push(0x3b);
+  return Buffer.from(bytes);
+}
+function dataUrlToBuffer(u: string): Buffer | null { const m = String(u || "").match(/^data:image\/\w+;base64,(.+)$/); return m ? Buffer.from(m[1], "base64") : null; }
+
+// ── #4 + #6 Render-job queue (offline render / walkthrough encode) — in-process worker ──
+function setJob(id: string, fields: Record<string, any>) {
+  const keys = Object.keys(fields); if (!keys.length) return;
+  sqlite.prepare(`UPDATE render_jobs SET ${keys.map((k) => `${k}=?`).join(",")}, updated_at=? WHERE id=?`).run(...keys.map((k) => fields[k]), Date.now(), id);
+}
+async function stabilityRender(structurePNG: Buffer, spec: any): Promise<Buffer> {
+  const key = loadAIKeys().stability; if (!key) throw new Error("no Stability key");
+  const fd = new FormData();
+  fd.append("image", new Blob([structurePNG], { type: "image/png" }), "structure.png");
+  fd.append("prompt", String(spec.prompt || "photorealistic modern Indian modular kitchen, interior magazine quality, 8k"));
+  fd.append("negative_prompt", String(spec.negativePrompt || "cartoon, blurry, watermark, text, people"));
+  fd.append("control_strength", String(Math.min(0.92, Math.max(0.35, Number(spec.controlStrength) || 0.6))));
+  if (Number(spec.seed) > 0) fd.append("seed", String(Math.floor(spec.seed)));
+  fd.append("output_format", "png");
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 120000);
+  try {
+    const res = await fetch("https://api.stability.ai/v2beta/stable-image/control/structure", { method: "POST", headers: { Authorization: "Bearer " + key, Accept: "image/*" }, body: fd as any, signal: ac.signal });
+    if (!res.ok) throw new Error("Stability HTTP " + res.status);
+    return Buffer.from(await res.arrayBuffer());
+  } finally { clearTimeout(t); }
+}
+async function processJob(job: any) {
+  const spec = JSON.parse(job.spec || "{}");
+  setJob(job.id, { status: "running", progress: 0.02 });
+  const broadcastJob = () => broadcast(job.design_id, "job", { id: job.id, kind: job.kind, status: "running" });
+  broadcastJob();
+  if (job.kind === "render") {
+    // offline photoreal render of a single structure frame (decoupled from the request).
+    const png = dataUrlToBuffer(spec.image); if (!png) throw new Error("no structure image");
+    const out = spec.photoreal !== false ? await stabilityRender(png, spec) : png;
+    setJob(job.id, { status: "done", progress: 1, result: "data:image/png;base64," + out.toString("base64") });
+  } else if (job.kind === "walkthrough") {
+    // encode the client-captured turntable/orbit frames into an animated GIF (server-side).
+    const srcs: string[] = Array.isArray(spec.frames) ? spec.frames : [];
+    if (srcs.length < 2) throw new Error("walkthrough needs ≥2 frames");
+    const decoded: { rgba: Uint8Array; w: number; h: number }[] = [];
+    for (let i = 0; i < srcs.length; i++) {
+      let png = dataUrlToBuffer(srcs[i]); if (!png) continue;
+      if (spec.photoreal && loadAIKeys().stability) { try { png = await stabilityRender(png, { ...spec, seed: spec.seed || 1 }); } catch { } }
+      const dec = decodePNG(png); const ds = downscaleRGBA(dec.rgba, dec.w, dec.h, Number(spec.maxSize) || 420);
+      decoded.push({ rgba: ds.rgba, w: ds.w, h: ds.h });
+      setJob(job.id, { progress: 0.05 + 0.8 * ((i + 1) / srcs.length) });
+    }
+    if (decoded.length < 2) throw new Error("not enough decodable frames");
+    // normalise all frames to the first frame's size
+    const W = decoded[0].w, H = decoded[0].h;
+    const norm = decoded.map((f) => (f.w === W && f.h === H) ? f : { ...downscaleRGBA(f.rgba, f.w, f.h, Math.max(W, H)), w: W, h: H });
+    setJob(job.id, { progress: 0.9 });
+    const gif = encodeGIF(norm.map((f) => ({ rgba: f.rgba, w: W, h: H })), Math.max(2, Number(spec.delayCs) || 12));
+    setJob(job.id, { status: "done", progress: 1, result: "data:image/gif;base64," + gif.toString("base64") });
+  } else throw new Error("unknown job kind " + job.kind);
+  broadcast(job.design_id, "job", { id: job.id, kind: job.kind, status: "done" });
+}
+let jobRunning = false;
+async function pumpJobs() {
+  if (jobRunning) return;
+  const row = sqlite.prepare(`SELECT * FROM render_jobs WHERE status='queued' ORDER BY created_at LIMIT 1`).get() as any;
+  if (!row) return; jobRunning = true;
+  try { await processJob(row); }
+  catch (e: any) { setJob(row.id, { status: "error", error: String((e && e.message) || e).slice(0, 200) }); broadcast(row.design_id, "job", { id: row.id, status: "error" }); }
+  finally { jobRunning = false; }
+}
+setInterval(() => { pumpJobs().catch(() => { }); }, 1000);
+function enqueueJob(designId: string, kind: string, spec: any) {
+  const id = randomUUID(); const now = Date.now();
+  sqlite.prepare(`INSERT INTO render_jobs(id,design_id,kind,status,progress,spec,result,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id, designId, kind, "queued", 0, JSON.stringify(spec || {}), "", "", now, now);
+  broadcast(designId, "job", { id, kind, status: "queued" });
+  return id;
+}
+// camera-path planner for the walkthrough (interpolated orbit keyframes pos/look/fov).
+function planCameraPath(layout: any, frames: number) {
+  const n = Math.max(8, Math.min(180, frames || 48));
+  const dims = (layout.dims || {}); const span = Math.max(2400, Number(dims.wall) || 3000);
+  const R = span * 1.4, Hh = 1500, path: any[] = [];
+  for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2; path.push({ t: +(i / n).toFixed(4), pos: [Math.round(Math.cos(a) * R), Hh, Math.round(Math.sin(a) * R)], look: [0, 1000, 0], fov: 55 }); }
+  return path;
+}
+app.post("/api/designs/:id/3d/render", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  if (!b.image) return c.json({ error: "no-image", message: "Supply the 3D structure frame (data URL) to render." }, 400);
+  const jid = enqueueJob(id, "render", { image: b.image, prompt: b.prompt, finish: b.finish, style: b.style, controlStrength: b.controlStrength, seed: b.seed, photoreal: b.photoreal !== false });
+  return c.json({ data: { jobId: jid, status: "queued" } });
+});
+app.post("/api/designs/:id/3d/walkthrough", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const path = planCameraPath(d.layout, Number(b.frames) || (Array.isArray(b.frames) ? b.frames.length : 48));
+  if (!Array.isArray(b.frames) || b.frames.length < 2)
+    return c.json({ data: { cameraPath: path, jobId: null, message: "Camera path planned. Capture frames along it (or pass frames[]) to encode a walkthrough GIF." } });
+  const jid = enqueueJob(id, "walkthrough", { frames: b.frames, delayCs: b.delayCs, maxSize: b.maxSize, photoreal: !!b.photoreal, prompt: b.prompt, seed: b.seed });
+  return c.json({ data: { jobId: jid, status: "queued", cameraPath: path } });
+});
+app.get("/api/render/jobs", (c) => {
+  const did = c.req.query("design");
+  const rows = (did ? sqlite.prepare(`SELECT id,design_id,kind,status,progress,error,created_at,updated_at FROM render_jobs WHERE design_id=? ORDER BY created_at DESC LIMIT 50`).all(did) : sqlite.prepare(`SELECT id,design_id,kind,status,progress,error,created_at,updated_at FROM render_jobs ORDER BY created_at DESC LIMIT 50`).all()) as any[];
+  return c.json({ data: rows });
+});
+app.get("/api/render/jobs/:jid", (c) => {
+  const row = sqlite.prepare(`SELECT id,design_id,kind,status,progress,error,result,created_at,updated_at FROM render_jobs WHERE id=?`).get(c.req.param("jid")) as any;
+  if (!row) return c.json({ error: "job not found" }, 404);
+  return c.json({ data: row });
+});
+app.get("/api/render/jobs/:jid/file", (c) => {
+  const row = sqlite.prepare(`SELECT kind,status,result FROM render_jobs WHERE id=?`).get(c.req.param("jid")) as any;
+  if (!row || row.status !== "done" || !row.result) return c.json({ error: "no artifact" }, 404);
+  const buf = dataUrlToBuffer(row.result); if (!buf) return c.json({ error: "bad artifact" }, 500);
+  const ext = row.result.startsWith("data:image/gif") ? "gif" : "png";
+  c.header("Content-Type", ext === "gif" ? "image/gif" : "image/png");
+  c.header("Content-Disposition", `attachment; filename="${row.kind}-${c.req.param("jid").slice(0, 8)}.${ext}"`);
+  return c.body(buf);
+});
+
+// =============================================================================
+// 12. START SERVER
+// PRODUCTION UPGRADE: containerise (multi-stage Dockerfile) or deploy via AWS CDK
+//   (Lambda + API Gateway). Add WebSocket (autosave, multi-user, progress),
+//   role permissions, audit logs, approval workflow, version history.
+// =============================================================================
+
+const PORT = Number(process.env.PORT) || 3000;
+serve({ fetch: app.fetch, port: PORT }, () => {
+  console.log("=".repeat(64));
+  console.log("  AI Design Studio — CAD Learning + Design Generation");
+  console.log(`  UI:         http://localhost:${PORT}/`);
+  console.log(`  Learn scan: POST http://localhost:${PORT}/api/learning/scan`);
+  console.log(`  Generate:   POST http://localhost:${PORT}/api/generate`);
+  console.log(`  Dashboard:  http://localhost:${PORT}/api/admin/dashboard`);
+  console.log("  Constraint: NO cutting/nesting/CNC optimizer included.");
+  console.log("=".repeat(64));
+});

@@ -1,0 +1,61 @@
+# ── AI Design Studio .gitignore ──
+# Strategy: ignore broadly, then un-ignore the real source. Keeps `git status`
+# quiet despite the many scratch files this single-file project accumulates.
+
+# dependencies
+node_modules/
+
+# secrets — NEVER commit API keys
+ai-keys.json
+
+# databases / runtime state
+*.db
+*.db-wal
+*.db-shm
+*.prunebak
+
+# large binaries & generated artifacts
+*.pdf
+*.crdownload
+*.png
+*.jpg
+*.jpeg
+*.webm
+*.gif
+*.dxf
+*.svg
+
+# scratch / logs / Write-tool 0-byte casualties
+*.tmp.*
+_*
+sed*
+*.log
+*.out
+*.err
+*.trace
+*.txt
+*.bak-*
+index.ts.bak*
+dbg-*
+*.json
+
+# scripts: ignore the historical scratch, keep the current harnesses
+*.mjs
+*.cjs
+
+# ── keepers (un-ignored) ──
+!.gitignore
+!package.json
+!package-lock.json
+!SYSTEM-DESIGN.md
+!SYSTEM-DESIGN.html
+!AI-Design-Studio.bat
+!launch.vbs
+!mkw-logo.jpg
+!verify-ent.mjs
+!verify-ent-ui.mjs
+!verify-ent-ui3d.mjs
+
+# editor/OS
+.DS_Store
+Thumbs.db
