@@ -6028,6 +6028,84 @@ const frontendHTML = `<!DOCTYPE html>
     const MKW_BRAND = ${JSON.stringify(MKW)};
     (() => { const li = new Image(); li.onload = () => { window.__mkwLogoImg = li; }; li.src = "/mkw-logo.jpg"; })();
 
+    // ---- Structure & Production Jobs panel (§3.2 #3 coordinate · #4 render queue · #7 obstruction) ----
+    function StructurePanel({ designId, runs }) {
+      const [drop, setDrop] = useState(350);
+      const [wall, setWall] = useState("");        // "" = all walls
+      const [busy, setBusy] = useState("");
+      const [adj, setAdj] = useState(null);        // #7 beam adjustments
+      const [model, setModel] = useState(null);    // #3 RoomModel summary
+      const [jobs, setJobs] = useState([]);
+      const wallCount = (runs || []).length;
+      const refreshJobs = React.useCallback(() => {
+        if (!designId) return;
+        fetch("/api/render/jobs?design=" + designId).then((r) => r.json()).then((j) => setJobs(j.data || [])).catch(() => {});
+      }, [designId]);
+      React.useEffect(() => { refreshJobs(); const t = setInterval(refreshJobs, 4000); return () => clearInterval(t); }, [refreshJobs]);
+      const applyBeam = async () => {
+        if (!designId) return; setBusy("beam");
+        try {
+          const body = { kind: "beam", drop: Number(drop) }; if (wall !== "") body.wall = Number(wall);
+          const j = await fetch("/api/designs/" + designId + "/obstruction", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
+          setAdj((j.data && j.data.adjustments) || []);
+        } catch (e) { setAdj(["request failed: " + (e && e.message)]); }
+        setBusy("");
+      };
+      const coordinate = async () => {
+        if (!designId) return; setBusy("coord");
+        try {
+          const j = await fetch("/api/designs/" + designId + "/coordinate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }).then((r) => r.json());
+          setModel((j.data && j.data.model) || null);
+        } catch (e) { setModel(null); }
+        setBusy("");
+      };
+      const st = (s) => s === "done" ? "text-emerald-600" : s === "error" ? "text-rose-600" : s === "running" ? "text-amber-600" : "text-slate-500";
+      return (
+        <details className="text-xs rounded-lg border border-slate-200 p-2 bg-slate-50/60">
+          <summary className="text-sm font-semibold text-violet-600 cursor-pointer">🏗 Structure &amp; production jobs <span className="text-[10px] font-normal text-slate-400">— beam obstruction · coordinate · render queue</span></summary>
+          <div className="mt-2 space-y-3">
+            {/* #7 beam / obstruction */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-slate-600">Beam / obstruction:</span>
+              <label className="flex items-center gap-1 text-slate-500">drop
+                <input type="number" min="100" max="900" value={drop} onChange={(e) => setDrop(e.target.value)} className="w-16 px-1 py-0.5 border border-slate-300 rounded" /> mm</label>
+              <label className="flex items-center gap-1 text-slate-500">wall
+                <select value={wall} onChange={(e) => setWall(e.target.value)} className="px-1 py-0.5 border border-slate-300 rounded">
+                  <option value="">all</option>
+                  {Array.from({ length: wallCount }).map((_, i) => <option key={i} value={i}>{(runs[i] && runs[i].name) || ("Wall " + (i + 1))}</option>)}
+                </select>
+              </label>
+              <button disabled={busy === "beam"} onClick={applyBeam} className="px-2 py-1 rounded font-semibold text-white bg-amber-600 hover:bg-amber-500 disabled:opacity-60">{busy === "beam" ? "Applying…" : "Apply beam"}</button>
+            </div>
+            {adj && (adj.length ? <ul className="text-amber-700 ml-2 list-disc list-inside">{adj.slice(0, 8).map((m, i) => <li key={i}>{m}</li>)}</ul> : <div className="text-emerald-600 ml-2">No units intrude into the beam — nothing trimmed.</div>)}
+            {/* #3 coordinate / rebalance */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-slate-600">Coordination:</span>
+              <button disabled={busy === "coord"} onClick={coordinate} className="px-2 py-1 rounded font-semibold text-white bg-cyan-700 hover:bg-cyan-600 disabled:opacity-60">{busy === "coord" ? "Syncing…" : "Rebalance + sync corners"}</button>
+              {model && <span className="text-slate-500">{model.walls.length} walls · {model.sharedCorners.length} shared corners synced</span>}
+            </div>
+            {/* #4 render-job queue */}
+            <div>
+              <div className="flex items-center gap-2 mb-1"><span className="font-semibold text-slate-600">Render queue ({jobs.length}):</span>
+                <button onClick={refreshJobs} className="px-1.5 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-600">↻ refresh</button></div>
+              {jobs.length === 0 ? <div className="text-slate-400 ml-2">No jobs yet — use ✨ Photoreal or 🎞 Walkthrough GIF in the 3D view.</div> : (
+                <ul className="ml-2 space-y-0.5 max-h-32 overflow-auto">
+                  {jobs.slice(0, 12).map((jb) => (
+                    <li key={jb.id} className="flex items-center gap-2">
+                      <span className="text-slate-500">{jb.kind}</span>
+                      <span className={"font-semibold " + st(jb.status)}>{jb.status}{jb.status === "running" ? " " + Math.round((jb.progress || 0) * 100) + "%" : ""}</span>
+                      {jb.status === "done" && <a href={"/api/render/jobs/" + jb.id + "/file"} download className="text-violet-600 underline">⬇ download</a>}
+                      {jb.status === "error" && <span className="text-rose-500 truncate">{jb.error}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </details>
+      );
+    }
+
     // ---- Generator -----------------------------------------------------------
     const TYPES = ${JSON.stringify(DESIGN_TYPES)};
     function Generator() {
@@ -6806,6 +6884,7 @@ const frontendHTML = `<!DOCTYPE html>
                     </ul>
                   </div>
                 )}
+                {result.id && <StructurePanel designId={result.id} runs={liveRuns || result.runs} />}
                 {result.cutList && result.cutList.length > 0 && (
                   <details className="text-xs">
                     <summary className="text-sm font-semibold text-emerald-600 cursor-pointer">Production cut list ({result.cutList.length} panels) — click to view</summary>

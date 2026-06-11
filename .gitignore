@@ -55,6 +55,7 @@ dbg-*
 !verify-ent.mjs
 !verify-ent-ui.mjs
 !verify-ent-ui3d.mjs
+!verify-ent-struct.mjs
 
 # editor/OS
 .DS_Store
