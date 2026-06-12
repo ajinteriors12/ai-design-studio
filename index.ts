@@ -6081,7 +6081,25 @@ const frontendHTML = `<!DOCTYPE html>
       const [viewJob, setViewJob] = useState(null);   // #4: inline artifact viewer (render PNG / walkthrough GIF)
       const [versions, setVersions] = useState([]);   // design version history (snapshot / restore)
       const [vlabel, setVlabel] = useState("");
+      const [rates, setRates] = useState(null);        // 💰 quotation rate-card
+      const [quote, setQuote] = useState(null);        // priced BOQ
       const wallCount = (runs || []).length;
+      const refreshQuote = React.useCallback(() => {
+        if (!designId) return;
+        fetch("/api/designs/" + designId + "/rate-card").then((r) => r.json()).then((j) => setRates(j.data || null)).catch(() => {});
+        fetch("/api/designs/" + designId + "/quote").then((r) => r.json()).then((j) => setQuote(j.data || null)).catch(() => {});
+      }, [designId]);
+      React.useEffect(() => { refreshQuote(); }, [refreshQuote]);
+      const setRate = (k, v) => setRates((p) => ({ ...(p || {}), [k]: v }));
+      const recalcQuote = async () => {
+        if (!designId) return; setBusy("quote");
+        try {
+          const j = await fetch("/api/designs/" + designId + "/rate-card", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rates || {}) }).then((r) => r.json());
+          if (j.data) { setRates(j.data.rates); setQuote(j.data.quote); }
+        } catch (e) {}
+        setBusy("");
+      };
+      const inr = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
       const refreshVersions = React.useCallback(() => {
         if (!designId) return;
         fetch("/api/designs/" + designId + "/versions").then((r) => r.json()).then((j) => setVersions(j.data || [])).catch(() => {});
@@ -6186,6 +6204,37 @@ const frontendHTML = `<!DOCTYPE html>
                     </li>
                   ))}
                 </ul>
+              )}
+            </div>
+            {/* 💰 priced quotation — rate-card × BOQ → INR estimate with margin + GST */}
+            <div>
+              <div className="flex flex-wrap items-center gap-2 mb-1">
+                <span className="font-semibold text-slate-600">💰 Estimate{quote ? <span className="ml-1 text-emerald-700 font-bold">{inr(quote.total)} <span className="text-[10px] font-normal text-slate-400">incl. GST</span></span> : null}</span>
+                <button disabled={busy === "quote"} onClick={recalcQuote} className="px-2 py-1 rounded font-semibold text-white bg-indigo-700 hover:bg-indigo-600 disabled:opacity-60">{busy === "quote" ? "Pricing…" : "Recalculate"}</button>
+                {quote && <a href={"/api/designs/" + designId + "/quote.csv"} download className="text-violet-600 underline">⬇ quote CSV</a>}
+              </div>
+              {rates && (
+                <div className="flex flex-wrap items-center gap-2 ml-2 mb-1 text-slate-500">
+                  <label className="flex items-center gap-1">board ₹/sq.ft<input type="number" min="0" value={rates.board_sqft} onChange={(e) => setRate("board_sqft", e.target.value)} className="w-16 px-1 py-0.5 border border-slate-300 rounded" /></label>
+                  <label className="flex items-center gap-1">margin %<input type="number" min="0" value={rates.margin_pct} onChange={(e) => setRate("margin_pct", e.target.value)} className="w-14 px-1 py-0.5 border border-slate-300 rounded" /></label>
+                  <label className="flex items-center gap-1">GST %<input type="number" min="0" value={rates.gst_pct} onChange={(e) => setRate("gst_pct", e.target.value)} className="w-14 px-1 py-0.5 border border-slate-300 rounded" /></label>
+                </div>
+              )}
+              {quote && (
+                <div className="ml-2 rounded-lg border border-slate-200 bg-white overflow-hidden">
+                  <table className="w-full text-[11px]">
+                    <thead><tr className="bg-slate-100 text-slate-500"><th className="text-left px-2 py-0.5">Item</th><th className="text-right px-2">Qty</th><th className="text-right px-2">Rate</th><th className="text-right px-2 py-0.5">Amount</th></tr></thead>
+                    <tbody>
+                      {quote.lines.filter((l) => l.amount > 0).map((l, i) => (
+                        <tr key={i} className="border-t border-slate-100"><td className="px-2 text-slate-600 truncate" style={{ maxWidth: 180 }}>{l.item}</td><td className="px-2 text-right text-slate-500">{l.qty} {l.unit}</td><td className="px-2 text-right text-slate-500">{inr(l.rate)}</td><td className="px-2 text-right text-slate-700">{inr(l.amount)}</td></tr>
+                      ))}
+                      <tr className="border-t border-slate-200"><td className="px-2 text-slate-500" colSpan={3}>Subtotal</td><td className="px-2 text-right text-slate-700">{inr(quote.subtotal)}</td></tr>
+                      <tr><td className="px-2 text-slate-500" colSpan={3}>Margin ({quote.marginPct}%)</td><td className="px-2 text-right text-slate-700">{inr(quote.margin)}</td></tr>
+                      <tr><td className="px-2 text-slate-500" colSpan={3}>GST ({quote.gstPct}%)</td><td className="px-2 text-right text-slate-700">{inr(quote.gst)}</td></tr>
+                      <tr className="border-t border-slate-300 bg-emerald-50 font-bold"><td className="px-2 text-emerald-800" colSpan={3}>Total</td><td className="px-2 text-right text-emerald-800">{inr(quote.total)}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           </div>
@@ -7949,6 +7998,102 @@ app.post("/api/designs/:id/restore/:vid", async (c) => {
   broadcast(id, "layout", { runs: restored.runs, by: null });
   broadcast(id, "version", { action: "restore", label: row.label });
   return c.json({ data: { ok: true, label: row.label, runs: restored.runs, mfgChecks: restored.mfgChecks } });
+});
+
+// ── Priced quotation ("Estimate") — rate-card × BOQ → client-ready INR quote ──
+//   Deterministic, no external API. Reuses boq()/hardwareSchedule(); price is
+//   derived on read (never stored in layout) so it stays orthogonal to autosave.
+sqlite.exec(`CREATE TABLE IF NOT EXISTS rate_cards (
+  design_id TEXT PRIMARY KEY, rates TEXT NOT NULL, updated_at INTEGER NOT NULL);`);
+
+const DEFAULT_RATES: Record<string, number> = {
+  board_sqft: 250, edgeband_m: 25, carcass_labour_per_cab: 1200, drawer_front: 350,
+  hinge: 90, glass_hinge: 220, drawer_slide: 450, handle: 180, knob: 60, gola_m: 350,
+  push_catch: 250, pullout_basket: 2500, corner_mech: 6500, waste_bin: 1200,
+  gtpt_basket: 3500, pantry_pullout: 9000, hi_unit: 1500, cutlery_tray: 900,
+  accessory_default: 1500, margin_pct: 18, gst_pct: 18,
+};
+// Map a BOQ row's item label to its rate-card key (keyword match, hardware-aware).
+function rateKeyFor(item: string): string {
+  const s = item.toLowerCase();
+  if (item === "Cabinets (carcasses)") return "carcass_labour_per_cab";
+  if (item === "Board area (18 mm)") return "board_sqft";
+  if (item === "Edge banding (approx)") return "edgeband_m";
+  if (item === "Drawer fronts") return "drawer_front";
+  if (item === "Panels to cut") return "_free";           // priced via board area
+  if (/glass hinge/.test(s)) return "glass_hinge";
+  if (/hinge/.test(s)) return "hinge";
+  if (/drawer slide/.test(s)) return "drawer_slide";
+  if (/gola|j profile/.test(s)) return "gola_m";
+  if (/knob/.test(s)) return "knob";
+  if (/handle/.test(s)) return "handle";
+  if (/push-to-open/.test(s)) return "push_catch";
+  if (/pull-out basket/.test(s)) return "pullout_basket";
+  if (/mechanism/.test(s)) return "corner_mech";
+  if (/waste bin/.test(s)) return "waste_bin";
+  if (/gtpt/.test(s)) return "gtpt_basket";
+  if (/pantry pull-out/.test(s)) return "pantry_pullout";
+  if (/hi-unit/.test(s)) return "hi_unit";
+  if (/cutlery tray/.test(s)) return "cutlery_tray";
+  return "accessory_default";
+}
+function priceQuote(layout: any, rates: Record<string, number>) {
+  const r = { ...DEFAULT_RATES, ...(rates || {}) };
+  const lines = boq(layout).map((row) => {
+    const key = rateKeyFor(row.item);
+    const rate = key === "_free" ? 0 : Math.round((r[key] ?? 0) * 100) / 100;
+    const amount = Math.round(row.qty * rate);
+    return { item: row.item, qty: row.qty, unit: row.unit, rate, amount };
+  });
+  const subtotal = lines.reduce((s, l) => s + l.amount, 0);
+  const marginPct = r.margin_pct ?? 0, gstPct = r.gst_pct ?? 0;
+  const margin = Math.round(subtotal * marginPct / 100);
+  const taxable = subtotal + margin;
+  const gst = Math.round(taxable * gstPct / 100);
+  const total = taxable + gst;
+  return { lines, subtotal, marginPct, margin, taxable, gstPct, gst, total, currency: "INR" };
+}
+function quoteRates(id: string): Record<string, number> {
+  const row = sqlite.prepare(`SELECT rates FROM rate_cards WHERE design_id=?`).get(id) as any;
+  return row ? { ...DEFAULT_RATES, ...JSON.parse(row.rates) } : { ...DEFAULT_RATES };
+}
+function quoteCsv(q: ReturnType<typeof priceQuote>): string {
+  const out = ["S.No,Item,Qty,Unit,Rate (INR),Amount (INR)"];
+  q.lines.forEach((l, i) => out.push(`${i + 1},"${l.item.replace(/"/g, '""')}",${l.qty},${l.unit},${l.rate},${l.amount}`));
+  out.push(`,,,,Subtotal,${q.subtotal}`);
+  out.push(`,,,,Margin (${q.marginPct}%),${q.margin}`);
+  out.push(`,,,,Taxable,${q.taxable}`);
+  out.push(`,,,,GST (${q.gstPct}%),${q.gst}`);
+  out.push(`,,,,Total,${q.total}`);
+  return out.join("\n");
+}
+app.get("/api/rate-card/default", (c) => c.json({ data: DEFAULT_RATES }));
+app.get("/api/designs/:id/rate-card", (c) => {
+  const d = loadDesign(c.req.param("id")); if (!d) return c.json({ error: "Design not found" }, 404);
+  return c.json({ data: quoteRates(c.req.param("id")) });
+});
+app.put("/api/designs/:id/rate-card", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const merged: Record<string, number> = { ...quoteRates(id) };
+  for (const k of Object.keys(DEFAULT_RATES)) if (b[k] != null && isFinite(Number(b[k]))) merged[k] = Math.max(0, Number(b[k]));
+  sqlite.prepare(`INSERT INTO rate_cards(design_id,rates,updated_at) VALUES(?,?,?)
+    ON CONFLICT(design_id) DO UPDATE SET rates=excluded.rates, updated_at=excluded.updated_at`).run(id, JSON.stringify(merged), Date.now());
+  auditEdit(id, d.row.designType, "adjustment", "rate-card updated");
+  const quote = priceQuote(d.layout, merged);
+  broadcast(id, "quote", { total: quote.total });
+  return c.json({ data: { ok: true, rates: merged, quote } });
+});
+app.get("/api/designs/:id/quote", (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  return c.json({ data: priceQuote(d.layout, quoteRates(id)) });
+});
+app.get("/api/designs/:id/quote.csv", (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-quote.csv`;
+  c.header("Content-Type", "text/csv");
+  c.header("Content-Disposition", `attachment; filename="${fname}"`);
+  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id))));
 });
 
 // =============================================================================

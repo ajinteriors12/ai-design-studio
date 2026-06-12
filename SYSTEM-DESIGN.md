@@ -146,6 +146,10 @@ erDiagram
 | `GET /api/designs/:id/export.dxf` | Real-mm R12 DXF with discipline layers |
 | `GET /api/designs/:id/cutlist.csv` | Cut list: S.No, Height, Width, Qty, Description |
 | `GET /api/designs/:id/hardware.csv` | Hardware schedule |
+| `GET /api/rate-card/default` | Built-in INR rate-card defaults (board/edgeband/hardware/margin/GST) |
+| `GET·PUT /api/designs/:id/rate-card` | Per-design rate-card (upsert `rate_cards`); PUT re-prices + broadcasts `quote` |
+| `GET /api/designs/:id/quote` | Priced quotation — rate-card × BOQ → INR lines + subtotal/margin/GST/total (deterministic, derived on read) |
+| `GET /api/designs/:id/quote.csv` | Quotation as CSV (line items + Subtotal/Margin/Taxable/GST/Total) |
 | `GET /api/admin/dashboard` | designsByType, topStandards, conflict panels |
 | `POST /api/ai/stream` | ReadableStream reasoning |
 
