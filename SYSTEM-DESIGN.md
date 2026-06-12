@@ -149,7 +149,7 @@ erDiagram
 | `GET /api/rate-card/default` | Built-in INR rate-card defaults (board/edgeband/hardware/margin/GST) |
 | `GET·PUT /api/designs/:id/rate-card` | Per-design rate-card (upsert `rate_cards`); PUT re-prices + broadcasts `quote` |
 | `GET /api/designs/:id/quote` | Priced quotation — rate-card × BOQ → INR lines + subtotal/margin/GST/total (deterministic, derived on read) |
-| `GET /api/designs/:id/quote.csv` | Quotation as CSV (line items + Subtotal/Margin/Taxable/GST/Total) |
+| `GET /api/designs/:id/quote.csv` | Quotation as CSV (line items + Subtotal/Margin/Taxable/GST/Total). Also exportable as a branded, auto-paginated **PDF** client-side (StructurePanel ⬇ quote PDF, jsPDF). |
 | `GET /api/admin/dashboard` | designsByType, topStandards, conflict panels |
 | `POST /api/ai/stream` | ReadableStream reasoning |
 

@@ -3628,6 +3628,57 @@ const frontendHTML = `<!DOCTYPE html>
       }
       await saveBlobAs(pdf.output("blob"), fname);
     };
+    // Branded, auto-paginated PDF quotation from the priced BOQ (client-side jsPDF).
+    // jsPDF's core helvetica has no ₹ glyph, so money is printed as "Rs.".
+    const exportQuotePdf = async (quote, type) => {
+      const jsPDF = window.jspdf && window.jspdf.jsPDF;
+      if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
+      if (!quote || !quote.lines) { alert("No quotation yet — click Recalculate first."); return; }
+      const rs = (n) => "Rs. " + Number(n || 0).toLocaleString("en-IN");
+      const W = 595, H = 842;                                  // portrait A4 (pt)
+      const snX = 40, itemX = 66, qtyX = 330, rateX = 440, amtX = 555;
+      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [W, H] });
+      const items = quote.lines.filter((l) => l.amount > 0);
+      const perPage = 28;
+      const pages = Math.max(1, Math.ceil(items.length / perPage));
+      for (let p = 0; p < pages; p++) {
+        if (p > 0) pdf.addPage([W, H], "portrait");
+        pdf.setFillColor(67, 56, 202); pdf.rect(0, 0, W, 66, "F");   // indigo header band
+        pdf.setFont("helvetica", "bold"); pdf.setFontSize(20); pdf.setTextColor(255, 255, 255);
+        pdf.text("QUOTATION", 40, 40);
+        pdf.setFont("helvetica", "normal"); pdf.setFontSize(10); pdf.setTextColor(224, 231, 255);
+        pdf.text((type || "Modular Kitchen") + (pages > 1 ? "  ·  page " + (p + 1) + "/" + pages : ""), 40, 57);
+        pdf.setFont("helvetica", "bold"); pdf.setFontSize(9); pdf.setTextColor(71, 85, 105);
+        pdf.text("S.No", snX, 92); pdf.text("Item", itemX, 92);
+        pdf.text("Qty", qtyX, 92, { align: "right" }); pdf.text("Rate", rateX, 92, { align: "right" }); pdf.text("Amount", amtX, 92, { align: "right" });
+        pdf.setDrawColor(148, 163, 184); pdf.line(40, 98, W - 40, 98);
+        pdf.setFont("helvetica", "normal"); pdf.setTextColor(15, 23, 42);
+        const slice = items.slice(p * perPage, (p + 1) * perPage);
+        slice.forEach((l, ri) => {
+          const y = 116 + ri * 18, n = p * perPage + ri + 1;
+          pdf.text(String(n), snX, y);
+          pdf.text(String(l.item).slice(0, 40), itemX, y);
+          pdf.text(l.qty + " " + l.unit, qtyX, y, { align: "right" });
+          pdf.text(rs(l.rate), rateX, y, { align: "right" });
+          pdf.text(rs(l.amount), amtX, y, { align: "right" });
+        });
+        if (p === pages - 1) {                                  // totals block on the final page
+          let ty = 116 + slice.length * 18 + 14;
+          pdf.setDrawColor(148, 163, 184); pdf.line(qtyX, ty - 8, W - 40, ty - 8);
+          const row = (label, val, bold) => { pdf.setFont("helvetica", bold ? "bold" : "normal"); pdf.text(label, rateX, ty, { align: "right" }); pdf.text(rs(val), amtX, ty, { align: "right" }); ty += 18; };
+          row("Subtotal", quote.subtotal);
+          row("Margin (" + quote.marginPct + "%)", quote.margin);
+          row("Taxable", quote.taxable);
+          row("GST (" + quote.gstPct + "%)", quote.gst);
+          pdf.setFillColor(236, 253, 245); pdf.rect(qtyX, ty - 13, W - 40 - qtyX, 20, "F");
+          pdf.setTextColor(6, 95, 70); row("Grand Total", quote.total, true);
+          pdf.setTextColor(100, 116, 139); pdf.setFont("helvetica", "italic"); pdf.setFontSize(8);
+          pdf.text("Estimate only · subject to site measurement · valid 15 days · prices in INR.", 40, H - 40);
+        }
+      }
+      const safe = (type || "kitchen").replace(/[^\\w-]+/g, "_").replace(/^_+|_+$/g, "") || "kitchen";
+      await saveBlobAs(pdf.output("blob"), safe + "-quotation.pdf");
+    };
     // Cabinet Schedule — one row per cabinet of the live model (run, row, type, W×H×D, fronts, props)
     const CAB_SCHED_HEADERS = ["S.No", "Run", "Row", "Cabinet", "Width (mm)", "Height (mm)", "Depth (mm)", "Fronts", "Material", "Finish", "Code"];
     const cabinetScheduleRows = (runs) => {
@@ -6071,7 +6122,7 @@ const frontendHTML = `<!DOCTYPE html>
     (() => { const li = new Image(); li.onload = () => { window.__mkwLogoImg = li; }; li.src = "/mkw-logo.jpg"; })();
 
     // ---- Structure & Production Jobs panel (§3.2 #3 coordinate · #4 render queue · #7 obstruction) ----
-    function StructurePanel({ designId, runs }) {
+    function StructurePanel({ designId, runs, dtype }) {
       const [drop, setDrop] = useState(350);
       const [wall, setWall] = useState("");        // "" = all walls
       const [busy, setBusy] = useState("");
@@ -6228,6 +6279,7 @@ const frontendHTML = `<!DOCTYPE html>
                 <span className="font-semibold text-slate-600">💰 Estimate{quote ? <span className="ml-1 text-emerald-700 font-bold">{inr(quote.total)} <span className="text-[10px] font-normal text-slate-400">incl. GST</span></span> : null}</span>
                 <button disabled={busy === "quote"} onClick={recalcQuote} className="px-2 py-1 rounded font-semibold text-white bg-indigo-700 hover:bg-indigo-600 disabled:opacity-60">{busy === "quote" ? "Pricing…" : "Recalculate"}</button>
                 {quote && <a href={"/api/designs/" + designId + "/quote.csv"} download className="text-violet-600 underline">⬇ quote CSV</a>}
+                {quote && <button onClick={() => exportQuotePdf(quote, dtype)} className="text-rose-600 underline">⬇ quote PDF</button>}
               </div>
               {rates && (
                 <div className="flex flex-wrap items-center gap-2 ml-2 mb-1 text-slate-500">
@@ -7040,7 +7092,7 @@ const frontendHTML = `<!DOCTYPE html>
                     </ul>
                   </div>
                 )}
-                {result.id && <StructurePanel designId={result.id} runs={liveRuns || result.runs} />}
+                {result.id && <StructurePanel designId={result.id} runs={liveRuns || result.runs} dtype={type} />}
                 {result.cutList && result.cutList.length > 0 && (
                   <details className="text-xs">
                     <summary className="text-sm font-semibold text-emerald-600 cursor-pointer">Production cut list ({result.cutList.length} panels) — click to view</summary>
