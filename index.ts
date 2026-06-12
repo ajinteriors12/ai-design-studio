@@ -6137,6 +6137,15 @@ const frontendHTML = `<!DOCTYPE html>
         } catch (e) { setModel(null); }
         setBusy("");
       };
+      const [prop, setProp] = useState(null);   // multi-view propagation report
+      const propagate = async () => {
+        if (!designId) return; setBusy("prop");
+        try {
+          const j = await fetch("/api/designs/" + designId + "/propagate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }).then((r) => r.json());
+          setProp((j.data && j.data.report) || null);
+        } catch (e) { setProp(null); }
+        setBusy("");
+      };
       const st = (s) => s === "done" ? "text-emerald-600" : s === "error" ? "text-rose-600" : s === "running" ? "text-amber-600" : "text-slate-500";
       return (
         <details className="text-xs rounded-lg border border-slate-200 p-2 bg-slate-50/60">
@@ -6162,6 +6171,13 @@ const frontendHTML = `<!DOCTYPE html>
               <button disabled={busy === "coord"} onClick={coordinate} className="px-2 py-1 rounded font-semibold text-white bg-cyan-700 hover:bg-cyan-600 disabled:opacity-60">{busy === "coord" ? "Syncing…" : "Rebalance + sync corners"}</button>
               {model && <span className="text-slate-500">{model.walls.length} walls · {model.sharedCorners.length} shared corners synced</span>}
             </div>
+            {/* full multi-view propagation — single source-of-truth, idempotent */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-slate-600">Multi-view propagation:</span>
+              <button disabled={busy === "prop"} onClick={propagate} className="px-2 py-1 rounded font-semibold text-white bg-fuchsia-700 hover:bg-fuchsia-600 disabled:opacity-60">{busy === "prop" ? "Propagating…" : "🔗 Propagate → all views"}</button>
+              {prop && <span className="text-slate-500">{prop.corners.length} corners reconciled · {prop.changedViews.length} views updated · {prop.idempotent ? "idempotent ✓" : "⚠ not idempotent"}</span>}
+            </div>
+            {prop && prop.snapped && prop.snapped.length > 0 && <ul className="text-fuchsia-700 ml-2 list-disc list-inside">{prop.snapped.slice(0, 6).map((m, i) => <li key={i}>{m}</li>)}</ul>}
             {/* #4 render-job queue */}
             <div>
               <div className="flex items-center gap-2 mb-1"><span className="font-semibold text-slate-600">Render queue ({jobs.length}):</span>
@@ -7670,6 +7686,77 @@ app.get("/api/designs/:id/roommodel", (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
   const row = sqlite.prepare(`SELECT model FROM room_models WHERE design_id=?`).get(id) as any;
   return c.json({ data: row ? JSON.parse(row.model) : buildRoomModel(id, d.layout) });
+});
+
+// ── Full multi-view propagation engine — single source-of-truth RoomModel ──
+//   An edit on any one view is lifted into the shared runs model, every shared
+//   corner is reconciled to the canonical blind-corner depth (STD.baseDepth),
+//   each run is re-flowed + rebalanced, then ALL elevations + production docs
+//   are re-derived. The pass is IDEMPOTENT: running it again changes nothing.
+// Signature of the structural state (widths/kinds/lengths) — view-independent.
+function layoutSig(layout: any): string {
+  return JSON.stringify((layout.runs || []).map((r: any) => ({
+    n: r.name, L: Math.round(r.length || 0),
+    b: (r.base || []).map((c: any) => [c.kind, Math.round(c.w)]),
+    w: (r.wallCabs || []).map((c: any) => [c.kind, Math.round(c.w)]),
+  })));
+}
+// Reconcile every corner unit to the canonical depth (corners are fixed blind
+// boxes); report what drifted, and describe each shared-wall corner.
+function reconcileCorners(layout: any) {
+  const depth = STD.baseDepth;
+  const snapped: string[] = [];
+  for (const r of (layout.runs || [])) for (const c of (r.base || [])) {
+    if (c.kind === "corner" && Math.round(c.w) !== depth) { snapped.push(`${r.name} · ${c.label || "corner"} ${Math.round(c.w)}→${depth} mm`); c.w = depth; }
+  }
+  const runs = layout.runs || [];
+  const corners: any[] = [];
+  for (let i = 0; i < runs.length - 1; i++) {
+    const aHas = (runs[i].base || []).some((c: any) => c.kind === "corner");
+    const bHas = (runs[i + 1].base || []).some((c: any) => c.kind === "corner");
+    corners.push({ a: "W" + (i + 1), b: "W" + (i + 2), kind: "L-return", depth, owner: aHas ? "W" + (i + 1) : (bHas ? "W" + (i + 2) : null), present: aHas || bHas });
+  }
+  return { snapped, corners };
+}
+// Apply a single-view edit to the shared model (resize/retype a unit, or set a wall length).
+function applyPropEdit(layout: any, edit: any) {
+  if (!edit) return null;
+  const r = layout.runs?.[edit.wall ?? edit.run]; if (!r) return null;
+  if (edit.length != null && isFinite(Number(edit.length))) r.length = Math.max(300, Math.round(Number(edit.length)));
+  const cab = r.base?.[Number(edit.index)];
+  if (cab) {
+    if (edit.w != null && isFinite(Number(edit.w))) cab.w = Math.max(100, Math.round(Number(edit.w)));
+    if (edit.kind) cab.kind = edit.kind;
+    if (edit.label) cab.label = edit.label;
+  }
+  return r;
+}
+app.post("/api/designs/:id/propagate", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  if (Array.isArray(b.runs)) d.layout.runs = b.runs;
+  const before = (d.layout.elevations || []).map((e: any) => e.svg);   // per-view snapshot
+  applyPropEdit(d.layout, b.edit);
+  (d.layout.runs || []).forEach((r: any) => reflowRun(r));
+  const rec = reconcileCorners(d.layout);
+  (d.layout.runs || []).forEach((r: any) => rebalanceRun(r));
+  syncCorners(d.layout);
+  rederiveLayout(d.layout);   // re-renders all elevations + cutList/hardware/boq/mfgChecks
+  // idempotency probe: re-run the structural pass on a clone; the signature must be stable.
+  const sig1 = layoutSig(d.layout);
+  const probe = JSON.parse(JSON.stringify(d.layout));
+  reconcileCorners(probe); (probe.runs || []).forEach((r: any) => rebalanceRun(r));
+  const idempotent = layoutSig(probe) === sig1;
+  const after = (d.layout.elevations || []).map((e: any) => e.svg);
+  const changedViews: string[] = [];
+  for (let i = 0; i < after.length; i++) if (after[i] !== before[i]) changedViews.push((d.layout.runs?.[i]?.name) || ("Wall " + (i + 1)));
+  const model: any = buildRoomModel(id, d.layout); model.corners = rec.corners;
+  sqlite.prepare(`INSERT INTO room_models(design_id,model,updated_at) VALUES(?,?,?) ON CONFLICT(design_id) DO UPDATE SET model=excluded.model, updated_at=excluded.updated_at`).run(id, JSON.stringify(model), Date.now());
+  saveLayout(id, d.layout);
+  auditEdit(id, d.row.designType, idempotent ? "adjustment" : "conflict", `propagated edit → ${changedViews.length} views, ${rec.corners.length} corners${rec.snapped.length ? " (" + rec.snapped.length + " snapped)" : ""}`);
+  broadcast(id, "coordinate", { model, runs: d.layout.runs });
+  broadcast(id, "layout", { runs: d.layout.runs, by: b.clientId || null });
+  return c.json({ data: { ok: true, report: { changedViews, corners: rec.corners, snapped: rec.snapped, idempotent }, model, runs: d.layout.runs, mfgChecks: d.layout.mfgChecks } });
 });
 
 // ── #7 Obstruction (beam/column/duct) → multi-view auto-reconfiguration ──

@@ -165,6 +165,7 @@ The features below are **implemented in the browser** (canvas editor + Three.js 
 | `WS /api/designs/:id/live` | Real-time multi-elevation propagation | ~ single-client multi-view sync ships; cross-client WS = 3D |
 | `POST /api/designs/:id/obstruction` | Beam/column/duct -> auto reconfiguration | OK client-side (beam `clearBeam`; doors/windows/beams in 2D+3D) |
 | `POST /api/designs/:id/coordinate` | Multi-elevation coordination | ~ corner sync + plan↔elevation ship; full RoomModel = 3D |
+| `POST /api/designs/:id/propagate` | **Full multi-view propagation engine** — lift a single-view edit into the source-of-truth runs model, reconcile every shared corner to canonical `STD.baseDepth`, reflow + rebalance all runs, re-derive every elevation + production doc; **idempotent** (re-running changes nothing); returns a per-view change report | **OK** |
 | `POST /api/designs/:id/3d` | 2D-to-3D generation | OK client-side (`Room3D` extrusion) |
 | `GET/PATCH /api/designs/:id/3d/objects` | Parametric 3D component management | OK client-side (meshes linked to cabinet ids; server CRUD = 3D) |
 | `POST /api/designs/:id/3d/render` | Trigger render job | ~ realtime WebGL + PNG export ship; offline render queue = 3D |
@@ -289,7 +290,7 @@ beamWorkflow(input): drop/soffit-height/width/distance -> clearBeam on init ->
   dashed band in elevation + plan strip + "N trimmed" note; propagate to section+3D
 ```
 
-### 4.11 Multi-elevation coordination engine (partial — corner sync + plan↔elevation OK; full RoomModel roadmap)
+### 4.11 Multi-elevation coordination engine (OK — full RoomModel propagation shipped via `POST /api/designs/:id/propagate`; idempotent corner reconciliation + per-view change report. Cross-client WS fan-out remains roadmap.)
 ```
 RoomModel = {walls[], runs[]<->wallId, sharedCorners[], obstructions[]}
 propagate(change):
