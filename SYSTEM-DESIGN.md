@@ -151,6 +151,9 @@ erDiagram
 | `GET /api/designs/:id/quote` | Priced quotation — rate-card × BOQ → INR lines + subtotal/margin/GST/total (deterministic, derived on read) |
 | `GET /api/designs/:id/quote.csv` | Quotation as CSV (line items + Subtotal/Margin/Taxable/GST/Total, prefixed with the Bill To block). Also exportable client-side (jsPDF) as a branded **quotation PDF** (⬇ quote PDF) or a complete **proposal PDF** — cover + plan/elevations/sections drawings + quotation in one document (📋 Full proposal PDF). |
 | `GET·PUT /api/designs/:id/client` | Per-design **client / "Bill To"** details (name/phone/email/site/ref/notes; `design_clients` table). Addressed onto the quote CSV header, the quote-PDF header band, and the proposal cover. |
+| `GET /api/designs` | **My Designs gallery** — recent saved designs (id, type, createdAt, runs, cabinets; newest first, cap 100). |
+| `GET /api/designs/:id` | Reopen a saved design — returns the full `{ id, ...layout }` (same shape as `/api/generate`, drops straight into the editor). |
+| `DELETE /api/designs/:id` | Delete a design + cascade its rate-card / client / room-model / versions / materials / render-jobs / audit rows. |
 | `GET /api/admin/dashboard` | designsByType, topStandards, conflict panels |
 | `POST /api/ai/stream` | ReadableStream reasoning |
 

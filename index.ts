@@ -3394,6 +3394,28 @@ app.get("/api/designs/:id/hardware.csv", (c) => {
   c.header("Content-Disposition", `attachment; filename="${fname}"`);
   return c.body(hardwareCsv(d.layout));
 });
+// ── My Designs gallery — list / reopen / delete saved designs ──
+app.get("/api/designs", (c) => {
+  const rows = db.select().from(designs).orderBy(desc(designs.createdAt)).all();
+  const list = rows.slice(0, 100).map((r) => {
+    let runs = 0, cabs = 0;
+    try { const ly = JSON.parse(r.layout); runs = (ly.runs || []).length; cabs = (ly.runs || []).reduce((s: number, rr: any) => s + ((rr.base || []).length + (rr.wallCabs || []).length), 0); } catch { }
+    return { id: r.id, designType: r.designType, createdAt: r.createdAt, runs, cabinets: cabs };
+  });
+  return c.json({ data: list });
+});
+app.get("/api/designs/:id", (c) => {
+  const d = loadDesign(c.req.param("id")); if (!d) return c.json({ error: "Design not found" }, 404);
+  return c.json({ data: { id: d.row.id, ...d.layout } });   // same shape as /api/generate → reopen drops straight into the editor
+});
+app.delete("/api/designs/:id", (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  for (const t of ["rate_cards", "design_clients", "room_models", "design_versions", "materials", "render_jobs", "audit_log"]) {
+    try { sqlite.prepare(`DELETE FROM ${t} WHERE design_id=?`).run(id); } catch { }
+  }
+  db.delete(designs).where(eq(designs.id, id)).run();
+  return c.json({ data: { ok: true, id } });
+});
 
 // =============================================================================
 // 9. AI STREAMING ENDPOINT — Web Standard ReadableStream (design reasoning)
@@ -6572,6 +6594,18 @@ const frontendHTML = `<!DOCTYPE html>
         setLoading(false);
       };
 
+      // 📂 My Designs — list / reopen / delete saved designs.
+      const [gallery, setGallery] = useState(null);   // null = closed; [] = open
+      const refreshGallery = async () => { try { const j = await fetch("/api/designs").then((r) => r.json()); setGallery(j.data || []); } catch (e) { setGallery([]); } };
+      const toggleGallery = () => { if (gallery === null) refreshGallery(); else setGallery(null); };
+      const reopenDesign = async (id) => {
+        setLoading(true);
+        try { const j = await fetch("/api/designs/" + id).then((r) => r.json()); if (j.data && !j.data.error) { setResult(j.data); setLiveRuns((j.data.runs || []).map((r) => ({ ...r }))); setActiveView(0); if (j.data.designType) setType(j.data.designType); setGallery(null); } }
+        catch (e) {}
+        setLoading(false);
+      };
+      const deleteDesign = async (id, ev) => { ev && ev.stopPropagation(); try { await fetch("/api/designs/" + id, { method: "DELETE" }); } catch (e) {} refreshGallery(); };
+
       // §7.9: an elevation lifts its edited cabinets here; 3D / plan read the shared model.
       const updateLiveRun = React.useCallback((i, base, wallCabs) => {
         setLiveRuns((prev) => {
@@ -6824,6 +6858,27 @@ const frontendHTML = `<!DOCTYPE html>
               className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg font-medium disabled:opacity-50">
               {loading ? "Generating…" : (designMode === "consensus" ? "Generate (AI Consensus)" : "Generate Design")}
             </button>
+            <button onClick={toggleGallery}
+              className="w-full px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium">
+              📂 My Designs{gallery === null ? "" : " ✕"}
+            </button>
+            {gallery !== null && (
+              <div className="fade-in bg-white rounded-lg border border-slate-200 p-2 max-h-64 overflow-auto">
+                <div className="flex items-center justify-between mb-1"><span className="text-xs font-semibold text-slate-600">Saved designs ({gallery.length})</span><button onClick={refreshGallery} className="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-600">↻ refresh</button></div>
+                {gallery.length === 0 ? <div className="text-xs text-slate-400 py-3 text-center">No saved designs yet — generate one above.</div> : (
+                  <ul className="space-y-0.5">
+                    {gallery.map((g) => (
+                      <li key={g.id} onClick={() => reopenDesign(g.id)} title="Click to reopen" className="flex items-center gap-2 px-2 py-1 rounded hover:bg-cyan-50 cursor-pointer text-xs">
+                        <span className="font-semibold text-slate-700 truncate" style={{ maxWidth: 150 }}>{g.designType}</span>
+                        <span className="text-slate-400">{g.runs}r · {g.cabinets}cab</span>
+                        <span className="text-slate-300 ml-auto font-mono">{String(g.id).slice(0, 8)}</span>
+                        <button onClick={(e) => deleteDesign(g.id, e)} title="Delete" className="text-rose-500 hover:text-rose-700">🗑</button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
             <button onClick={streamReasoning} disabled={streaming}
               className="w-full px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-medium disabled:opacity-50">
               {streaming ? "Streaming…" : "Stream AI Reasoning"}
