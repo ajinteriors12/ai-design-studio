@@ -3630,19 +3630,19 @@ const frontendHTML = `<!DOCTYPE html>
     };
     // Branded, auto-paginated PDF quotation from the priced BOQ (client-side jsPDF).
     // jsPDF's core helvetica has no ₹ glyph, so money is printed as "Rs.".
-    const exportQuotePdf = async (quote, type) => {
-      const jsPDF = window.jspdf && window.jspdf.jsPDF;
-      if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
-      if (!quote || !quote.lines) { alert("No quotation yet — click Recalculate first."); return; }
+    const slugName = (type) => (type || "kitchen").replace(/[^\\w-]+/g, "_").replace(/^_+|_+$/g, "") || "kitchen";
+    // Render the quotation onto the pdf (A4 portrait, auto-paginated). When freshDoc
+    // is true the first page reuses the document's initial blank page; otherwise a
+    // new page is added (so it can be appended after drawings in a full proposal).
+    const renderQuotePages = (pdf, quote, type, freshDoc) => {
       const rs = (n) => "Rs. " + Number(n || 0).toLocaleString("en-IN");
-      const W = 595, H = 842;                                  // portrait A4 (pt)
+      const W = 595, H = 842;
       const snX = 40, itemX = 66, qtyX = 330, rateX = 440, amtX = 555;
-      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [W, H] });
       const items = quote.lines.filter((l) => l.amount > 0);
       const perPage = 28;
       const pages = Math.max(1, Math.ceil(items.length / perPage));
       for (let p = 0; p < pages; p++) {
-        if (p > 0) pdf.addPage([W, H], "portrait");
+        if (p > 0 || !freshDoc) pdf.addPage([W, H], "portrait");
         pdf.setFillColor(67, 56, 202); pdf.rect(0, 0, W, 66, "F");   // indigo header band
         pdf.setFont("helvetica", "bold"); pdf.setFontSize(20); pdf.setTextColor(255, 255, 255);
         pdf.text("QUOTATION", 40, 40);
@@ -3676,8 +3676,50 @@ const frontendHTML = `<!DOCTYPE html>
           pdf.text("Estimate only · subject to site measurement · valid 15 days · prices in INR.", 40, H - 40);
         }
       }
-      const safe = (type || "kitchen").replace(/[^\\w-]+/g, "_").replace(/^_+|_+$/g, "") || "kitchen";
-      await saveBlobAs(pdf.output("blob"), safe + "-quotation.pdf");
+    };
+    const exportQuotePdf = async (quote, type) => {
+      const jsPDF = window.jspdf && window.jspdf.jsPDF;
+      if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
+      if (!quote || !quote.lines) { alert("No quotation yet — click Recalculate first."); return; }
+      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [595, 842] });
+      renderQuotePages(pdf, quote, type, true);
+      await saveBlobAs(pdf.output("blob"), slugName(type) + "-quotation.pdf");
+    };
+    // Full client proposal = cover page + all design drawings + the quotation, one PDF.
+    const exportProposalPdf = async (result, quote, type) => {
+      const jsPDF = window.jspdf && window.jspdf.jsPDF;
+      if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
+      if (!result) { alert("No design to export yet."); return; }
+      const W = 595, H = 842;
+      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [W, H] });
+      // ── cover page ──
+      pdf.setFillColor(67, 56, 202); pdf.rect(0, 0, W, 150, "F");
+      pdf.setFont("helvetica", "bold"); pdf.setFontSize(30); pdf.setTextColor(255, 255, 255);
+      pdf.text("DESIGN PROPOSAL", 40, 90);
+      pdf.setFont("helvetica", "normal"); pdf.setFontSize(13); pdf.setTextColor(224, 231, 255);
+      pdf.text(type || "Modular Kitchen", 40, 122);
+      const runs = (result.runs) || [];
+      const cabs = runs.reduce((s, r) => s + ((r.base || []).length + (r.wallCabs || []).length), 0);
+      let y = 200; pdf.setTextColor(15, 23, 42); pdf.setFontSize(13); pdf.setFont("helvetica", "bold");
+      pdf.text("Project summary", 40, y); y += 24; pdf.setFont("helvetica", "normal"); pdf.setFontSize(11);
+      const li = (t) => { pdf.text("•  " + t, 48, y); y += 19; };
+      li(runs.length + " wall runs · " + cabs + " cabinets");
+      if (quote) li("Estimated total: Rs. " + Number(quote.total || 0).toLocaleString("en-IN") + " (incl. GST)");
+      li("Drawings: plan, elevations" + ((result.sections && result.sections.length) ? ", sections" : "") + (quote ? ", and an itemised quotation" : "") + " follow.");
+      pdf.setFontSize(8); pdf.setTextColor(100, 116, 139); pdf.setFont("helvetica", "italic");
+      pdf.text("Estimate only · subject to site measurement · valid 15 days · prices in INR.", 40, H - 40);
+      // ── drawing pages (SVG → PNG, sized to each drawing) ──
+      const svgs = [result.planSvg, ...(result.elevations || []).map((e) => e.svg), ...((result.sections || []).map((s) => s.svg))];
+      const legend = cornerLegendSvg(result); if (legend) svgs.push(legend);
+      for (const svg of svgs) {
+        if (!svg) continue;
+        const { dataUrl, w, h } = await svgToPng(svg, 2);
+        pdf.addPage([w, h], w >= h ? "landscape" : "portrait");
+        pdf.addImage(dataUrl, "PNG", 0, 0, w, h);
+      }
+      // ── quotation pages (appended) ──
+      if (quote && quote.lines) renderQuotePages(pdf, quote, type, false);
+      await saveBlobAs(pdf.output("blob"), slugName(type) + "-proposal.pdf");
     };
     // Cabinet Schedule — one row per cabinet of the live model (run, row, type, W×H×D, fronts, props)
     const CAB_SCHED_HEADERS = ["S.No", "Run", "Row", "Cabinet", "Width (mm)", "Height (mm)", "Depth (mm)", "Fronts", "Material", "Finish", "Code"];
@@ -6122,7 +6164,7 @@ const frontendHTML = `<!DOCTYPE html>
     (() => { const li = new Image(); li.onload = () => { window.__mkwLogoImg = li; }; li.src = "/mkw-logo.jpg"; })();
 
     // ---- Structure & Production Jobs panel (§3.2 #3 coordinate · #4 render queue · #7 obstruction) ----
-    function StructurePanel({ designId, runs, dtype }) {
+    function StructurePanel({ designId, runs, dtype, dresult }) {
       const [drop, setDrop] = useState(350);
       const [wall, setWall] = useState("");        // "" = all walls
       const [busy, setBusy] = useState("");
@@ -6280,6 +6322,7 @@ const frontendHTML = `<!DOCTYPE html>
                 <button disabled={busy === "quote"} onClick={recalcQuote} className="px-2 py-1 rounded font-semibold text-white bg-indigo-700 hover:bg-indigo-600 disabled:opacity-60">{busy === "quote" ? "Pricing…" : "Recalculate"}</button>
                 {quote && <a href={"/api/designs/" + designId + "/quote.csv"} download className="text-violet-600 underline">⬇ quote CSV</a>}
                 {quote && <button onClick={() => exportQuotePdf(quote, dtype)} className="text-rose-600 underline">⬇ quote PDF</button>}
+                {quote && <button onClick={() => exportProposalPdf(dresult, quote, dtype)} className="px-2 py-0.5 rounded font-semibold text-white bg-indigo-700 hover:bg-indigo-600">📋 Full proposal PDF</button>}
               </div>
               {rates && (
                 <div className="flex flex-wrap items-center gap-2 ml-2 mb-1 text-slate-500">
@@ -7092,7 +7135,7 @@ const frontendHTML = `<!DOCTYPE html>
                     </ul>
                   </div>
                 )}
-                {result.id && <StructurePanel designId={result.id} runs={liveRuns || result.runs} dtype={type} />}
+                {result.id && <StructurePanel designId={result.id} runs={liveRuns || result.runs} dtype={type} dresult={result} />}
                 {result.cutList && result.cutList.length > 0 && (
                   <details className="text-xs">
                     <summary className="text-sm font-semibold text-emerald-600 cursor-pointer">Production cut list ({result.cutList.length} panels) — click to view</summary>
