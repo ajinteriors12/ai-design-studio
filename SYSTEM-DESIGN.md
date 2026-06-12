@@ -149,7 +149,8 @@ erDiagram
 | `GET /api/rate-card/default` | Built-in INR rate-card defaults (board/edgeband/hardware/margin/GST) |
 | `GET·PUT /api/designs/:id/rate-card` | Per-design rate-card (upsert `rate_cards`); PUT re-prices + broadcasts `quote` |
 | `GET /api/designs/:id/quote` | Priced quotation — rate-card × BOQ → INR lines + subtotal/margin/GST/total (deterministic, derived on read) |
-| `GET /api/designs/:id/quote.csv` | Quotation as CSV (line items + Subtotal/Margin/Taxable/GST/Total). Also exportable client-side (jsPDF) as a branded **quotation PDF** (⬇ quote PDF) or a complete **proposal PDF** — cover + plan/elevations/sections drawings + quotation in one document (📋 Full proposal PDF). |
+| `GET /api/designs/:id/quote.csv` | Quotation as CSV (line items + Subtotal/Margin/Taxable/GST/Total, prefixed with the Bill To block). Also exportable client-side (jsPDF) as a branded **quotation PDF** (⬇ quote PDF) or a complete **proposal PDF** — cover + plan/elevations/sections drawings + quotation in one document (📋 Full proposal PDF). |
+| `GET·PUT /api/designs/:id/client` | Per-design **client / "Bill To"** details (name/phone/email/site/ref/notes; `design_clients` table). Addressed onto the quote CSV header, the quote-PDF header band, and the proposal cover. |
 | `GET /api/admin/dashboard` | designsByType, topStandards, conflict panels |
 | `POST /api/ai/stream` | ReadableStream reasoning |
 

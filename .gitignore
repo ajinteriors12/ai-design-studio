@@ -63,6 +63,7 @@ dbg-*
 !verify-propagate.mjs
 !verify-quote-pdf.mjs
 !verify-proposal-pdf.mjs
+!verify-client.mjs
 
 # editor/OS
 .DS_Store

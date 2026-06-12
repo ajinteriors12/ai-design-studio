@@ -3634,7 +3634,7 @@ const frontendHTML = `<!DOCTYPE html>
     // Render the quotation onto the pdf (A4 portrait, auto-paginated). When freshDoc
     // is true the first page reuses the document's initial blank page; otherwise a
     // new page is added (so it can be appended after drawings in a full proposal).
-    const renderQuotePages = (pdf, quote, type, freshDoc) => {
+    const renderQuotePages = (pdf, quote, type, freshDoc, client) => {
       const rs = (n) => "Rs. " + Number(n || 0).toLocaleString("en-IN");
       const W = 595, H = 842;
       const snX = 40, itemX = 66, qtyX = 330, rateX = 440, amtX = 555;
@@ -3648,6 +3648,13 @@ const frontendHTML = `<!DOCTYPE html>
         pdf.text("QUOTATION", 40, 40);
         pdf.setFont("helvetica", "normal"); pdf.setFontSize(10); pdf.setTextColor(224, 231, 255);
         pdf.text((type || "Modular Kitchen") + (pages > 1 ? "  ·  page " + (p + 1) + "/" + pages : ""), 40, 57);
+        if (client && (client.name || client.phone || client.email || client.site || client.ref)) {   // Bill To on the band
+          pdf.setFontSize(9);
+          if (client.name) pdf.text(("Bill To: " + client.name).slice(0, 48), W - 40, 30, { align: "right" });
+          const sub = [client.phone, client.site].filter(Boolean).join(" · ");
+          if (sub) pdf.text(sub.slice(0, 52), W - 40, 44, { align: "right" });
+          if (client.ref) pdf.text(("Ref: " + client.ref).slice(0, 36), W - 40, 58, { align: "right" });
+        }
         pdf.setFont("helvetica", "bold"); pdf.setFontSize(9); pdf.setTextColor(71, 85, 105);
         pdf.text("S.No", snX, 92); pdf.text("Item", itemX, 92);
         pdf.text("Qty", qtyX, 92, { align: "right" }); pdf.text("Rate", rateX, 92, { align: "right" }); pdf.text("Amount", amtX, 92, { align: "right" });
@@ -3677,16 +3684,16 @@ const frontendHTML = `<!DOCTYPE html>
         }
       }
     };
-    const exportQuotePdf = async (quote, type) => {
+    const exportQuotePdf = async (quote, type, client) => {
       const jsPDF = window.jspdf && window.jspdf.jsPDF;
       if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
       if (!quote || !quote.lines) { alert("No quotation yet — click Recalculate first."); return; }
       const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [595, 842] });
-      renderQuotePages(pdf, quote, type, true);
+      renderQuotePages(pdf, quote, type, true, client);
       await saveBlobAs(pdf.output("blob"), slugName(type) + "-quotation.pdf");
     };
     // Full client proposal = cover page + all design drawings + the quotation, one PDF.
-    const exportProposalPdf = async (result, quote, type) => {
+    const exportProposalPdf = async (result, quote, type, client) => {
       const jsPDF = window.jspdf && window.jspdf.jsPDF;
       if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
       if (!result) { alert("No design to export yet."); return; }
@@ -3706,6 +3713,15 @@ const frontendHTML = `<!DOCTYPE html>
       li(runs.length + " wall runs · " + cabs + " cabinets");
       if (quote) li("Estimated total: Rs. " + Number(quote.total || 0).toLocaleString("en-IN") + " (incl. GST)");
       li("Drawings: plan, elevations" + ((result.sections && result.sections.length) ? ", sections" : "") + (quote ? ", and an itemised quotation" : "") + " follow.");
+      if (client && (client.name || client.phone || client.email || client.site || client.ref)) {   // Bill To / Prepared for
+        y += 14; pdf.setFont("helvetica", "bold"); pdf.setFontSize(13); pdf.setTextColor(15, 23, 42); pdf.text("Prepared for", 40, y); y += 24;
+        pdf.setFont("helvetica", "normal"); pdf.setFontSize(11);
+        if (client.name) li(client.name);
+        if (client.phone) li("Phone: " + client.phone);
+        if (client.email) li("Email: " + client.email);
+        if (client.site) li("Site: " + client.site);
+        if (client.ref) li("Quote ref: " + client.ref);
+      }
       pdf.setFontSize(8); pdf.setTextColor(100, 116, 139); pdf.setFont("helvetica", "italic");
       pdf.text("Estimate only · subject to site measurement · valid 15 days · prices in INR.", 40, H - 40);
       // ── drawing pages (SVG → PNG, sized to each drawing) ──
@@ -3718,7 +3734,7 @@ const frontendHTML = `<!DOCTYPE html>
         pdf.addImage(dataUrl, "PNG", 0, 0, w, h);
       }
       // ── quotation pages (appended) ──
-      if (quote && quote.lines) renderQuotePages(pdf, quote, type, false);
+      if (quote && quote.lines) renderQuotePages(pdf, quote, type, false, client);
       await saveBlobAs(pdf.output("blob"), slugName(type) + "-proposal.pdf");
     };
     // Cabinet Schedule — one row per cabinet of the live model (run, row, type, W×H×D, fronts, props)
@@ -6176,12 +6192,20 @@ const frontendHTML = `<!DOCTYPE html>
       const [vlabel, setVlabel] = useState("");
       const [rates, setRates] = useState(null);        // 💰 quotation rate-card
       const [quote, setQuote] = useState(null);        // priced BOQ
+      const [client, setClient] = useState({});        // 🧾 Bill To / client details
       const wallCount = (runs || []).length;
       const refreshQuote = React.useCallback(() => {
         if (!designId) return;
         fetch("/api/designs/" + designId + "/rate-card").then((r) => r.json()).then((j) => setRates(j.data || null)).catch(() => {});
         fetch("/api/designs/" + designId + "/quote").then((r) => r.json()).then((j) => setQuote(j.data || null)).catch(() => {});
+        fetch("/api/designs/" + designId + "/client").then((r) => r.json()).then((j) => setClient(j.data || {})).catch(() => {});
       }, [designId]);
+      const setClientField = (k, v) => setClient((p) => ({ ...(p || {}), [k]: v }));
+      const saveClient = async () => {
+        if (!designId) return; setBusy("client");
+        try { const j = await fetch("/api/designs/" + designId + "/client", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(client || {}) }).then((r) => r.json()); if (j.data && j.data.client) setClient(j.data.client); } catch (e) {}
+        setBusy("");
+      };
       React.useEffect(() => { refreshQuote(); }, [refreshQuote]);
       const setRate = (k, v) => setRates((p) => ({ ...(p || {}), [k]: v }));
       const recalcQuote = async () => {
@@ -6321,9 +6345,21 @@ const frontendHTML = `<!DOCTYPE html>
                 <span className="font-semibold text-slate-600">💰 Estimate{quote ? <span className="ml-1 text-emerald-700 font-bold">{inr(quote.total)} <span className="text-[10px] font-normal text-slate-400">incl. GST</span></span> : null}</span>
                 <button disabled={busy === "quote"} onClick={recalcQuote} className="px-2 py-1 rounded font-semibold text-white bg-indigo-700 hover:bg-indigo-600 disabled:opacity-60">{busy === "quote" ? "Pricing…" : "Recalculate"}</button>
                 {quote && <a href={"/api/designs/" + designId + "/quote.csv"} download className="text-violet-600 underline">⬇ quote CSV</a>}
-                {quote && <button onClick={() => exportQuotePdf(quote, dtype)} className="text-rose-600 underline">⬇ quote PDF</button>}
-                {quote && <button onClick={() => exportProposalPdf(dresult, quote, dtype)} className="px-2 py-0.5 rounded font-semibold text-white bg-indigo-700 hover:bg-indigo-600">📋 Full proposal PDF</button>}
+                {quote && <button onClick={() => exportQuotePdf(quote, dtype, client)} className="text-rose-600 underline">⬇ quote PDF</button>}
+                {quote && <button onClick={() => exportProposalPdf(dresult, quote, dtype, client)} className="px-2 py-0.5 rounded font-semibold text-white bg-indigo-700 hover:bg-indigo-600">📋 Full proposal PDF</button>}
               </div>
+              {/* 🧾 Bill To / client details — addressed onto the quotation + proposal */}
+              <details className="ml-2 mb-1 text-slate-500">
+                <summary className="cursor-pointer text-slate-600 font-semibold">🧾 Bill To / client details{client && client.name ? <span className="ml-1 font-normal text-slate-400">— {client.name}</span> : null}</summary>
+                <div className="mt-1 flex flex-wrap items-center gap-1">
+                  <input value={client.name || ""} onChange={(e) => setClientField("name", e.target.value)} placeholder="Client name" className="px-1.5 py-0.5 border border-slate-300 rounded w-36" />
+                  <input value={client.phone || ""} onChange={(e) => setClientField("phone", e.target.value)} placeholder="Phone" className="px-1.5 py-0.5 border border-slate-300 rounded w-28" />
+                  <input value={client.email || ""} onChange={(e) => setClientField("email", e.target.value)} placeholder="Email" className="px-1.5 py-0.5 border border-slate-300 rounded w-40" />
+                  <input value={client.site || ""} onChange={(e) => setClientField("site", e.target.value)} placeholder="Site address" className="px-1.5 py-0.5 border border-slate-300 rounded w-48" />
+                  <input value={client.ref || ""} onChange={(e) => setClientField("ref", e.target.value)} placeholder="Quote ref" className="px-1.5 py-0.5 border border-slate-300 rounded w-28" />
+                  <button disabled={busy === "client"} onClick={saveClient} className="px-2 py-0.5 rounded font-semibold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-60">{busy === "client" ? "Saving…" : "Save"}</button>
+                </div>
+              </details>
               {rates && (
                 <div className="flex flex-wrap items-center gap-2 ml-2 mb-1 text-slate-500">
                   <label className="flex items-center gap-1">board ₹/sq.ft<input type="number" min="0" value={rates.board_sqft} onChange={(e) => setRate("board_sqft", e.target.value)} className="w-16 px-1 py-0.5 border border-slate-300 rounded" /></label>
@@ -8239,8 +8275,28 @@ function quoteRates(id: string): Record<string, number> {
   const row = sqlite.prepare(`SELECT rates FROM rate_cards WHERE design_id=?`).get(id) as any;
   return row ? { ...DEFAULT_RATES, ...JSON.parse(row.rates) } : { ...DEFAULT_RATES };
 }
-function quoteCsv(q: ReturnType<typeof priceQuote>): string {
-  const out = ["S.No,Item,Qty,Unit,Rate (INR),Amount (INR)"];
+// Per-design client / "Bill To" details (customer + project), flowed into quote CSV/PDF + proposal.
+sqlite.exec(`CREATE TABLE IF NOT EXISTS design_clients (
+  design_id TEXT PRIMARY KEY, client TEXT NOT NULL, updated_at INTEGER NOT NULL);`);
+const CLIENT_FIELDS = ["name", "phone", "email", "site", "ref", "notes"];
+function quoteClient(id: string): Record<string, string> {
+  const row = sqlite.prepare(`SELECT client FROM design_clients WHERE design_id=?`).get(id) as any;
+  return row ? JSON.parse(row.client) : {};
+}
+function hasClient(cl: any): boolean { return !!(cl && (cl.name || cl.phone || cl.email || cl.site || cl.ref)); }
+function quoteCsv(q: ReturnType<typeof priceQuote>, client?: any): string {
+  const out: string[] = [];
+  const cl = client || {};
+  if (hasClient(cl)) {
+    const f = (label: string, v: string) => out.push(`${label},"${String(v || "").replace(/"/g, '""')}"`);
+    if (cl.name) f("Bill To", cl.name);
+    if (cl.phone) f("Phone", cl.phone);
+    if (cl.email) f("Email", cl.email);
+    if (cl.site) f("Site", cl.site);
+    if (cl.ref) f("Quote Ref", cl.ref);
+    out.push("");
+  }
+  out.push("S.No,Item,Qty,Unit,Rate (INR),Amount (INR)");
   q.lines.forEach((l, i) => out.push(`${i + 1},"${l.item.replace(/"/g, '""')}",${l.qty},${l.unit},${l.rate},${l.amount}`));
   out.push(`,,,,Subtotal,${q.subtotal}`);
   out.push(`,,,,Margin (${q.marginPct}%),${q.margin}`);
@@ -8275,7 +8331,23 @@ app.get("/api/designs/:id/quote.csv", (c) => {
   const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-quote.csv`;
   c.header("Content-Type", "text/csv");
   c.header("Content-Disposition", `attachment; filename="${fname}"`);
-  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id))));
+  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id)), quoteClient(id)));
+});
+// Client / "Bill To" details — persisted per design, addressed onto the quote + proposal.
+app.get("/api/designs/:id/client", (c) => {
+  const d = loadDesign(c.req.param("id")); if (!d) return c.json({ error: "Design not found" }, 404);
+  return c.json({ data: quoteClient(c.req.param("id")) });
+});
+app.put("/api/designs/:id/client", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const merged: Record<string, string> = { ...quoteClient(id) };
+  for (const k of CLIENT_FIELDS) if (typeof b[k] === "string") merged[k] = b[k].slice(0, 200);
+  sqlite.prepare(`INSERT INTO design_clients(design_id,client,updated_at) VALUES(?,?,?)
+    ON CONFLICT(design_id) DO UPDATE SET client=excluded.client, updated_at=excluded.updated_at`).run(id, JSON.stringify(merged), Date.now());
+  auditEdit(id, d.row.designType, "adjustment", `client details updated${merged.name ? " — " + merged.name : ""}`);
+  broadcast(id, "client", { client: merged });
+  return c.json({ data: { ok: true, client: merged } });
 });
 
 // =============================================================================
