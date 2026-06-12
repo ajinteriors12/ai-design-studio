@@ -59,6 +59,7 @@ dbg-*
 !verify-ent-pbr.mjs
 !verify-ent-view.mjs
 !verify-ent-ver.mjs
+!verify-quote.mjs
 
 # editor/OS
 .DS_Store
