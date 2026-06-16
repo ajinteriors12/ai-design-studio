@@ -379,6 +379,7 @@ function runLearningScan(opts: { approvedOnly?: boolean; ignoreDuplicates?: bool
 //   (Tesseract), and convert DWG via ODA File Converter — see Output #3A.
 // =============================================================================
 
+interface PanelRow { cabinet: string; panel: string; qty: number; w: number; h: number; material: string; }
 interface DrawingAnalysis {
   fileType: string; sizeKB: number; format: string;
   entityCounts: Record<string, number>; layers: string[]; textSamples: string[]; dimsFound: number[];
@@ -386,10 +387,145 @@ interface DrawingAnalysis {
   upperLower: string[]; cornerUnits: string[]; fillers: string[]; applianceZones: string[];
   utilities: string[]; rulesLearned: string[]; confidence: number; status: string;
   appliedCommands: string[];
+  // Vision-reader additions (2.txt upgrade — read REAL dimensions from images/PDFs).
+  unitType?: string;            // detected from the drawing itself (kitchen | wardrobe | …)
+  engine?: string;              // who read it: "Claude vision" | "GPT-4o vision" | "vector parser" | "filename heuristic"
+  extractionMethod?: string;    // "ai-vision" | "vector-parsed" | "heuristic"
+  panels?: PanelRow[];          // production cut list computed from the real cabinet sizes
+  warnings?: string[];          // caveats the user must see (e.g. "AI-read — verify before cutting")
 }
 
-function analyzeDrawing(name: string, fileType: string, category: string, buf: Buffer): DrawingAnalysis {
+// 18 mm carcass + 6 mm back — derive a standard panel cut list from one cabinet's outer W×H×D (mm).
+// PRODUCTION UPGRADE: pull thickness/edge-band per the rate master instead of these constants.
+const CARCASS_THK = 18, BACK_THK = 6;
+function panelsForCabinet(label: string, W: number, H: number, D: number): PanelRow[] {
+  const w = Math.max(0, Math.round(W)), h = Math.max(0, Math.round(H)), d = Math.max(0, Math.round(D || 600));
+  if (!w || !h) return [];
+  const innerW = Math.max(0, w - 2 * CARCASS_THK);
+  const shutters = w > 1200 ? 3 : w > 600 ? 2 : 1;          // 11/12.pdf shutter-by-width rule
+  const shelves = h > 1400 ? 3 : h > 700 ? 2 : 1;
+  const rows: PanelRow[] = [
+    { cabinet: label, panel: "Side",   qty: 2,        w: d,      h: h,                  material: CARCASS_THK + " mm board" },
+    { cabinet: label, panel: "Top",    qty: 1,        w: innerW, h: d,                  material: CARCASS_THK + " mm board" },
+    { cabinet: label, panel: "Bottom", qty: 1,        w: innerW, h: d,                  material: CARCASS_THK + " mm board" },
+    { cabinet: label, panel: "Shelf",  qty: shelves,  w: innerW, h: Math.max(0, d - 20), material: CARCASS_THK + " mm board" },
+    { cabinet: label, panel: "Back",   qty: 1,        w: w,      h: h,                  material: BACK_THK + " mm panel" },
+    { cabinet: label, panel: "Shutter", qty: shutters, w: Math.max(0, Math.round(w / shutters) - 4), h: Math.max(0, h - 4), material: CARCASS_THK + " mm front" },
+  ];
+  return rows;
+}
+
+// Anthropic / OpenAI accept jpeg, png, gif, webp for vision; PDF is Anthropic-only (document block).
+function visionMediaType(fileType: string, name: string): string | null {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (fileType === "pdf" || ext === "pdf") return "application/pdf";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "png") return "image/png";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  return null;   // bmp / dwg / skp etc. — not vision-readable here
+}
+
+// Read a REAL drawing (image or PDF) with a vision model and extract the unit type + cabinet sizes +
+// dimensions actually printed on it. Prefers Claude (handles PDF natively); falls back to GPT-4o for
+// images. Returns the parsed object or null (→ caller uses the labelled heuristic).
+async function visionReadDrawing(name: string, fileType: string, category: string, buf: Buffer): Promise<{ data: any; engine: string } | null> {
+  const media = visionMediaType(fileType, name);
+  if (!media) return null;
+  const keys = loadAIKeys();
+  const b64 = buf.toString("base64");
+  const ask =
+    "You are a senior modular-furniture production engineer reading a shop drawing (kitchen / wardrobe / crockery / TV unit / vanity). " +
+    "Read ONLY the dimensions and labels actually printed on this drawing — never invent numbers. All sizes in millimetres. " +
+    "Filename: " + name + (category ? ", user-tagged category: " + category : "") + ". " +
+    "Reply with COMPACT JSON only, no prose, EXACTLY this shape: " +
+    '{"unitType":"kitchen|wardrobe|crockery|tv-unit|vanity|other","readable":true|false,' +
+    '"cabinets":[{"label":"short name","widthMm":number,"heightMm":number,"depthMm":number}],' +
+    '"rawDimensionsMm":[numbers you can read on the drawing],' +
+    '"wallSequence":["left-to-right order of units, if shown"],' +
+    '"notes":["anything important you read (materials, hardware, finishes)"],"confidence":0-1}. ' +
+    "If a dimension is not legible, omit it rather than guessing. Set readable=false only if you can read nothing.";
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 60000);
+  try {
+    // ── Claude vision (handles both images and PDF) ──
+    if (keys.anthropic) {
+      const block = media === "application/pdf"
+        ? { type: "document", source: { type: "base64", media_type: media, data: b64 } }
+        : { type: "image", source: { type: "base64", media_type: media, data: b64 } };
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": keys.anthropic, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: "claude-opus-4-8", max_tokens: 2000, messages: [{ role: "user", content: [block, { type: "text", text: ask }] }] }),
+        signal: ac.signal,
+      });
+      if (res.ok) {
+        const j: any = await res.json();
+        const txt = (j.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+        const parsed = extractLastJson(txt);
+        if (parsed && (Array.isArray(parsed.cabinets) || Array.isArray(parsed.rawDimensionsMm))) return { data: parsed, engine: "Claude vision" };
+      } else { console.error("Claude vision HTTP", res.status, (await res.text().catch(() => "")).slice(0, 120)); }
+    }
+    // ── GPT-4o vision (images only — chat/completions can't take a PDF) ──
+    if (keys.openai && media !== "application/pdf") {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + keys.openai },
+        body: JSON.stringify({
+          model: "gpt-4o", max_tokens: 2000,
+          messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: "data:" + media + ";base64," + b64 } }] }],
+        }),
+        signal: ac.signal,
+      });
+      if (res.ok) {
+        const j: any = await res.json();
+        const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
+        const parsed = extractLastJson(txt);
+        if (parsed && (Array.isArray(parsed.cabinets) || Array.isArray(parsed.rawDimensionsMm))) return { data: parsed, engine: "GPT-4o vision" };
+      } else { console.error("GPT-4o vision HTTP", res.status, (await res.text().catch(() => "")).slice(0, 120)); }
+    }
+  } catch (e: any) { console.error("vision read failed:", String((e && e.message) || e).slice(0, 120)); }
+  finally { clearTimeout(t); }
+  return null;
+}
+
+// Turn a vision-model reading into the DrawingAnalysis the dashboard renders — real cabinet sizes +
+// a computed production panel cut list.
+function analysisFromVision(fileType: string, sizeKB: number, vis: { data: any; engine: string }): DrawingAnalysis {
+  const d = vis.data || {};
+  const cabs: any[] = Array.isArray(d.cabinets) ? d.cabinets.slice(0, 40) : [];
+  const detectedCabinets = cabs.map((c) => String(c.label || "Unit")).filter(Boolean);
+  const cabinetSizes = cabs
+    .filter((c) => c.widthMm || c.heightMm)
+    .map((c) => String(c.label || "Unit") + ": " + Math.round(c.widthMm || 0) + " × " + Math.round(c.heightMm || 0) + " × " + Math.round(c.depthMm || 0) + " mm (W×H×D)");
+  const panels: PanelRow[] = [];
+  for (const c of cabs) for (const p of panelsForCabinet(String(c.label || "Unit"), +c.widthMm || 0, +c.heightMm || 0, +c.depthMm || 0)) panels.push(p);
+  const dims = (Array.isArray(d.rawDimensionsMm) ? d.rawDimensionsMm : []).map((n: any) => Math.round(+n)).filter((n: number) => n > 0);
+  const conf = Math.max(0.3, Math.min(0.97, +d.confidence || 0.75));
+  return {
+    fileType, sizeKB, format: "AI-read from drawing",
+    entityCounts: {}, layers: [], textSamples: [], dimsFound: [...new Set<number>(dims)].slice(0, 12),
+    detectedCabinets: detectedCabinets.length ? detectedCabinets : ["(none detected)"],
+    cabinetSizes: cabinetSizes.length ? cabinetSizes : ["No legible cabinet dimensions on this drawing"],
+    wallSequence: Array.isArray(d.wallSequence) ? d.wallSequence.map(String).slice(0, 12) : [],
+    upperLower: [], cornerUnits: [], fillers: [], applianceZones: [],
+    utilities: [], rulesLearned: Array.isArray(d.notes) ? d.notes.map(String).slice(0, 12) : [],
+    confidence: conf, status: "learned", appliedCommands: [],
+    unitType: String(d.unitType || "other"), engine: vis.engine, extractionMethod: "ai-vision", panels: panels.slice(0, 240),
+    warnings: ["Sizes were READ from your drawing by " + vis.engine + ". Verify against the original before cutting — AI can misread faint or hand-written dimensions."],
+  };
+}
+
+
+async function analyzeDrawing(name: string, fileType: string, category: string, buf: Buffer): Promise<DrawingAnalysis> {
   const sizeKB = +(buf.length / 1024).toFixed(1);
+
+  // ── Images & PDFs: READ the drawing with a vision model first (real dimensions), not a filename guess. ──
+  if (fileType === "image" || fileType === "pdf") {
+    const vis = await visionReadDrawing(name, fileType, category, buf);
+    if (vis) return analysisFromVision(fileType, sizeKB, vis);
+    // no vision key / unreadable → fall through to the heuristic, but it is LABELLED as a guess below.
+  }
+
   const entityCounts: Record<string, number> = {};
   let layers: string[] = []; let textSamples: string[] = []; const dimsFound: number[] = [];
   let parsedReal = false;
@@ -445,11 +581,17 @@ function analyzeDrawing(name: string, fileType: string, category: string, buf: B
   const entityBonus = Math.min(0.15, (Object.values(entityCounts).reduce((a, b) => a + b, 0)) / 2000);
   const confidence = +Math.min(0.97, base + entityBonus).toFixed(2);
 
+  const warnings = parsedReal
+    ? ["Entities, layers and dimensions were parsed from the vector file. The cabinet sizes shown are the studio's STANDARD modules, not sizes read from this specific drawing."]
+    : ["No vision reader ran on this file, so nothing was measured from it. The lists below are a TEMPLATE inferred from the filename/category — NOT your drawing. Upload a DXF/SVG, or add a Claude or OpenAI key to ai-keys.json, to extract the real cabinet and panel sizes from an image/PDF."];
   return {
     fileType, sizeKB, format: parsedReal ? "vector-parsed" : "heuristic",
     entityCounts, layers, textSamples, dimsFound: [...new Set(dimsFound)].slice(0, 8),
     detectedCabinets, cabinetSizes, wallSequence, upperLower, cornerUnits, fillers,
     applianceZones, utilities, rulesLearned, confidence, status: "learned", appliedCommands: [],
+    unitType: isKitchen ? "kitchen" : isWardrobe ? "wardrobe" : "other",
+    engine: parsedReal ? "vector parser" : "filename heuristic",
+    extractionMethod: parsedReal ? "vector-parsed" : "heuristic", panels: [], warnings,
   };
 }
 
@@ -1776,12 +1918,13 @@ const MKW = {
 const MKW_LOGO_B64: string = (() => { try { return "data:image/jpeg;base64," + fsRead("mkw-logo.jpg").toString("base64"); } catch { return ""; } })();
 
 const AI_KEYS_FILE = "ai-keys.json";
-function loadAIKeys(): { openai?: string; deepseek?: string; stability?: string } {
+function loadAIKeys(): { openai?: string; deepseek?: string; stability?: string; anthropic?: string } {
   const k: any = {};
   if (process.env.OPENAI_API_KEY) k.openai = process.env.OPENAI_API_KEY;
   if (process.env.DEEPSEEK_API_KEY) k.deepseek = process.env.DEEPSEEK_API_KEY;
   if (process.env.STABILITY_API_KEY) k.stability = process.env.STABILITY_API_KEY;   // Stability AI — photoreal render
-  try { if (fsExists(AI_KEYS_FILE)) { const f = JSON.parse(fsRead(AI_KEYS_FILE, "utf8")); if (f.openai) k.openai = f.openai; if (f.deepseek) k.deepseek = f.deepseek; if (f.stability) k.stability = f.stability; } } catch { /* no/invalid key file — fine */ }
+  if (process.env.ANTHROPIC_API_KEY) k.anthropic = process.env.ANTHROPIC_API_KEY;    // Claude — vision drawing reader
+  try { if (fsExists(AI_KEYS_FILE)) { const f = JSON.parse(fsRead(AI_KEYS_FILE, "utf8")); if (f.openai) k.openai = f.openai; if (f.deepseek) k.deepseek = f.deepseek; if (f.stability) k.stability = f.stability; if (f.anthropic) k.anthropic = f.anthropic; } } catch { /* no/invalid key file — fine */ }
   return k;
 }
 const AI_PROVIDERS: Record<string, { url: string; model: string; keyName: "openai" | "deepseek"; label: string; jsonMode?: boolean; noThink?: boolean }> = {
@@ -2996,7 +3139,7 @@ app.post("/api/references/upload", async (c) => {
     const buf = Buffer.from(await (file as any).arrayBuffer());
     const hash = createHash("sha256").update(buf).digest("hex").slice(0, 16); // hash CONTENT (true dedup)
     const dup = db.select().from(references).where(eq(references.contentHash, hash)).get();
-    const analysis = analyzeDrawing(name, fileType, category, buf);
+    const analysis = await analyzeDrawing(name, fileType, category, buf);
     if (dup) analysis.status = "duplicate";
 
     const id = randomUUID();
@@ -7409,9 +7552,16 @@ const frontendHTML = `<!DOCTYPE html>
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="font-mono text-slate-800">{selected.name}</span>
                     <span className={"px-2 py-0.5 rounded-full border " + (REF_BADGE[selected.status] || REF_BADGE.learned)}>{a.status}</span>
+                    {a.unitType && <span className="px-2 py-0.5 rounded-full border border-slate-300 bg-slate-50 text-slate-700 capitalize">{a.unitType}</span>}
+                    {a.engine && <span className={"px-2 py-0.5 rounded-full border " + (a.extractionMethod === "ai-vision" ? "border-emerald-300 bg-emerald-50 text-emerald-700" : a.extractionMethod === "vector-parsed" ? "border-cyan-300 bg-cyan-50 text-cyan-700" : "border-amber-300 bg-amber-50 text-amber-700")}>{a.extractionMethod === "ai-vision" ? "✓ read by " + a.engine : a.engine}</span>}
                     <span className="text-slate-500">{a.format} · {a.fileType} · {a.sizeKB} KB</span>
                     <span className="text-emerald-600">confidence {(a.confidence * 100).toFixed(0)}%</span>
                   </div>
+                  {a.warnings && a.warnings.length > 0 && (
+                    <div className={"text-xs rounded-lg p-2 border " + (a.extractionMethod === "heuristic" ? "bg-amber-50 border-amber-300 text-amber-800" : "bg-slate-50 border-slate-200 text-slate-600")}>
+                      {a.warnings.map((w, i) => <div key={i}>{a.extractionMethod === "heuristic" ? "⚠ " : "ℹ "}{w}</div>)}
+                    </div>
+                  )}
                   {(Object.keys(a.entityCounts || {}).length > 0 || (a.layers && a.layers.length > 0)) && (
                     <div className="text-[11px] text-slate-500 bg-slate-50 rounded-lg p-2 border border-slate-200">
                       {Object.keys(a.entityCounts || {}).length > 0 && <div>Entities: {Object.entries(a.entityCounts).map(([k, v]) => k + ":" + v).join("  ")}</div>}
@@ -7429,6 +7579,25 @@ const frontendHTML = `<!DOCTYPE html>
                     <ASection title="Appliance zones" items={a.applianceZones} />
                     <ASection title="Utilities (electrical/plumbing)" items={a.utilities} />
                   </div>
+                  {a.panels && a.panels.length > 0 && (
+                    <div>
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">Panel cut list ({a.panels.length} rows · computed from the read sizes)</h3>
+                      <div className="overflow-x-auto rounded-lg border border-slate-200">
+                        <table className="w-full text-[11px]">
+                          <thead><tr className="bg-slate-50 text-slate-500 text-left">
+                            <th className="px-2 py-1 font-medium">Cabinet</th><th className="px-2 py-1 font-medium">Panel</th><th className="px-2 py-1 font-medium text-right">Qty</th><th className="px-2 py-1 font-medium text-right">W (mm)</th><th className="px-2 py-1 font-medium text-right">H (mm)</th><th className="px-2 py-1 font-medium">Material</th>
+                          </tr></thead>
+                          <tbody>
+                            {a.panels.map((p, i) => (
+                              <tr key={i} className="border-t border-slate-100">
+                                <td className="px-2 py-1 text-slate-700">{p.cabinet}</td><td className="px-2 py-1 text-slate-700">{p.panel}</td><td className="px-2 py-1 text-right">{p.qty}</td><td className="px-2 py-1 text-right">{p.w}</td><td className="px-2 py-1 text-right">{p.h}</td><td className="px-2 py-1 text-slate-500">{p.material}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                   <ASection title="Design rules learned" items={a.rulesLearned} />
                   {a.appliedCommands && a.appliedCommands.length > 0 && <ASection title="Focused learning applied" items={a.appliedCommands} />}
                   {selected.learnMsg && <div className="text-xs text-cyan-700 bg-cyan-500/5 rounded-lg p-2 border border-cyan-500/20">{selected.learnMsg}</div>}
