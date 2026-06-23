@@ -3681,46 +3681,53 @@ function kitchenCompareSheet(): string {
 // ── Production panel cut list (12.pdf §5.7.12) — per-cabinet carcass panels for
 //    factory cutting (NOT sheet-nesting/optimization, which is forbidden). Each
 //    row: Height × Width × Qty × Description, 18 mm board, 3 mm shutter gaps. ──
-interface CutRow { h: number; w: number; qty: number; desc: string; }
+interface CutRow { h: number; w: number; qty: number; desc: string; scope?: string; face?: boolean; }
 function cutList(layout: any): CutRow[] {
   const rows: CutRow[] = [], t = 18, gap = 3, red = handleReduction(layout.handle || "D Handle");
-  const add = (h: number, w: number, qty: number, desc: string) => { if (w > 0 && h > 0) rows.push({ h: Math.round(h), w: Math.round(w), qty, desc }); };
-  const carcass = (rn: string, c: any, Hc: number, D: number, prefix: string) => {
+  // scope = base|wall|tall (which finish applies), face = true for visible fronts
+  // (shutters/drawer fronts → finish material), false for carcass panels (→ ply).
+  const add = (h: number, w: number, qty: number, desc: string, scope: string, face: boolean) => { if (w > 0 && h > 0) rows.push({ h: Math.round(h), w: Math.round(w), qty, desc, scope, face }); };
+  const carcass = (rn: string, c: any, Hc: number, D: number, prefix: string, scope: string) => {
     const W = c.w;
-    add(Hc, D, 2, `${rn}: ${prefix}${c.label} — Side Panel`);
-    add(D, W - 2 * t, 1, `${rn}: ${prefix}${c.label} — Bottom`);
-    add(D, W - 2 * t, 1, `${rn}: ${prefix}${c.label} — Top / Rail`);
-    add(Hc, W, 1, `${rn}: ${prefix}${c.label} — Back`);
+    add(Hc, D, 2, `${rn}: ${prefix}${c.label} — Side Panel`, scope, false);
+    add(D, W - 2 * t, 1, `${rn}: ${prefix}${c.label} — Bottom`, scope, false);
+    add(D, W - 2 * t, 1, `${rn}: ${prefix}${c.label} — Top / Rail`, scope, false);
+    add(Hc, W, 1, `${rn}: ${prefix}${c.label} — Back`, scope, false);
   };
   for (const run of layout.runs || []) {
     const rn = run.name;
     for (const c of run.base || []) {
-      if (c.kind === "filler") { add(720, c.w, 1, `${rn}: Filler Panel`); continue; }
+      if (c.kind === "filler") { add(720, c.w, 1, `${rn}: Filler Panel`, "base", false); continue; }
       if (c.kind === "sidepanel" || c.kind === "chimney" || c.kind === "hob") continue;
-      const tall = isTall(c.kind), Hc = tall ? 2100 : 720, D = 560;
-      carcass(rn, c, Hc, D, "");
+      const tall = isTall(c.kind), Hc = tall ? 2100 : 720, D = 560, scope = tall ? "tall" : "base";
+      carcass(rn, c, Hc, D, "", scope);
       if (isDrawerKind(c.kind) && c.drawers > 0) {
         const dh = c.dh && c.dh.length === c.drawers ? c.dh : Array(c.drawers).fill(1);
         const tot = dh.reduce((a: number, b: number) => a + b, 0);
-        dh.forEach((dv: number, i: number) => add(dv / tot * Hc - 6 - red, c.w - 6, 1, `${rn}: ${c.label} — Drawer Front ${i + 1}`));
+        dh.forEach((dv: number, i: number) => add(dv / tot * Hc - 6 - red, c.w - 6, 1, `${rn}: ${c.label} — Drawer Front ${i + 1}`, scope, true));
       } else if (c.kind === "open-shelf") {
-        add(D - 20, c.w - 2 * t, 3, `${rn}: ${c.label} — Shelf`);
+        add(D - 20, c.w - 2 * t, 3, `${rn}: ${c.label} — Shelf`, scope, false);
       } else {
         const n = shutterCount(c.w);
-        add(Hc - 6 - red, (c.w - (n + 1) * gap) / n, n, `${rn}: ${c.label} — Shutter`);
-        if (tall) add(D - 20, c.w - 2 * t, c.kind === "tall-hiunit" ? 2 : 5, `${rn}: ${c.label} — Shelf`);
+        add(Hc - 6 - red, (c.w - (n + 1) * gap) / n, n, `${rn}: ${c.label} — Shutter`, scope, true);
+        if (tall) add(D - 20, c.w - 2 * t, c.kind === "tall-hiunit" ? 2 : 5, `${rn}: ${c.label} — Shelf`, scope, false);
       }
     }
     for (const c of run.wallCabs || []) {
       if (c.kind === "chimney" || c.kind === "sidepanel") continue;
       const Hc = 720, D = 320;
-      carcass(rn, c, Hc, D, "Wall ");
+      carcass(rn, c, Hc, D, "Wall ", "wall");
       const n = shutterCount(c.w);
-      add(Hc - 6 - red, (c.w - (n + 1) * gap) / n, n, `${rn}: Wall ${c.label} — Shutter`);
-      if (c.kind !== "gtpt") add(D - 20, c.w - 2 * t, 2, `${rn}: Wall ${c.label} — Shelf`);
+      add(Hc - 6 - red, (c.w - (n + 1) * gap) / n, n, `${rn}: Wall ${c.label} — Shutter`, "wall", true);
+      if (c.kind !== "gtpt") add(D - 20, c.w - 2 * t, 2, `${rn}: Wall ${c.label} — Shelf`, "wall", false);
     }
   }
   return rows;
+}
+// Material label for a scope (falls back to the primary finish, else generic).
+function materialLabelFor(scopes: any, scope: string): string {
+  const m = scopes && (scopes[scope] || primaryMaterial(scopes));
+  return m ? [m.brand, m.colorName].filter(Boolean).join(" ") + (m.code ? " (" + m.code + ")" : "") : "";
 }
 // Manufacturing practicality validation (11.pdf / 12.pdf "Automatic Manufacturing
 // Validation") — clearance / interference / standards checks run before approval.
@@ -3838,11 +3845,32 @@ function validateManufacturing(layout: any): { name: string; ok: boolean; note: 
   }
   return checks;
 }
-function cutListCsv(layout: any): string {
+function cutListCsv(layout: any, scopes?: any): string {
   const rows = cutList(layout);
-  const lines = ["S.No,Height(mm),Width(mm),Qty,Description"];
-  rows.forEach((r, i) => lines.push(`${i + 1},${r.h},${r.w},${r.qty},"${r.desc.replace(/"/g, '""')}"`));
+  const lines = ["S.No,Height(mm),Width(mm),Qty,Material,Description"];
+  rows.forEach((r, i) => { const mat = r.face ? (materialLabelFor(scopes, r.scope || "base") || "Finish: laminate / acrylic / PU") : "18 mm BWP ply"; lines.push(`${i + 1},${r.h},${r.w},${r.qty},"${mat.replace(/"/g, '""')}","${r.desc.replace(/"/g, '""')}"`); });
   return lines.join("\n");
+}
+// Production data with the chosen MATERIAL joined per scope — cut list (face panels
+// get the finish material, carcass panels get 18 mm ply) + cabinet schedule.
+function productionData(layout: any, scopes: any): { cutList: any[]; cabinetSchedule: any[] } {
+  const shN = (w: number) => (w <= 600 ? 1 : w <= 1200 ? 2 : 3);
+  const cl = (layout.cutList || cutList(layout)).map((r: any) => ({ h: r.h, w: r.w, qty: r.qty, desc: r.desc, material: r.face ? (materialLabelFor(scopes, r.scope || "base") || "Finish: laminate / acrylic / PU") : "18 mm BWP ply" }));
+  const cab: any[] = []; let n = 0;
+  const matCols = (m: any) => [m ? [m.brand, m.colorName].filter(Boolean).join(" ") : "", m ? (m.finishType || "") : "", m ? (m.code || "") : ""];
+  for (const r of (layout.runs || [])) {
+    for (const c of (r.base || [])) {
+      if (c.kind === "filler" || c.kind === "sidepanel") continue;
+      const tall = isTall(c.kind), m = scopes && (scopes[tall ? "tall" : "base"] || primaryMaterial(scopes));
+      cab.push([++n, r.name || "", tall ? "Tall" : "Base", c.label || c.kind, Math.round(c.w), tall ? (STD.wallStart + STD.wallHeight) : STD.baseHeight, STD.baseDepth, c.drawers > 0 ? c.drawers + " drawer fronts" : (c.kind === "open-shelf" ? "open" : shN(c.w) + " shutter" + (shN(c.w) > 1 ? "s" : "")), ...matCols(m)]);
+    }
+    for (const c of (r.wallCabs || [])) {
+      if (c.kind === "filler" || c.kind === "sidepanel" || c.kind === "chimney") continue;
+      const m = scopes && (scopes.wall || primaryMaterial(scopes));
+      cab.push([++n, r.name || "", "Wall", c.label || c.kind, Math.round(c.w), STD.wallHeight, STD.wallDepth, c.kind === "open-shelf" ? "open" : shN(c.w) + " shutter" + (shN(c.w) > 1 ? "s" : ""), ...matCols(m)]);
+    }
+  }
+  return { cutList: cl, cabinetSchedule: cab };
 }
 
 // ── Hardware schedule (12.pdf master rule) — soft-close hinges, drawer slides,
@@ -4632,7 +4660,13 @@ app.get("/api/designs/:id/cutlist.csv", (c) => {
   const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-cutlist.csv`;
   c.header("Content-Type", "text/csv");
   c.header("Content-Disposition", `attachment; filename="${fname}"`);
-  return c.body(cutListCsv(d.layout));
+  return c.body(cutListCsv(d.layout, materialScopes(d.row.id)));
+});
+// Production data (cut list + cabinet schedule) with the chosen material joined.
+app.get("/api/designs/:id/production", (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  return c.json({ data: productionData(d.layout, materialScopes(d.row.id)) });
 });
 app.get("/api/designs/:id/hardware.csv", (c) => {
   const d = loadDesign(c.req.param("id"));
@@ -7784,6 +7818,8 @@ const frontendHTML = `<!DOCTYPE html>
       const [specBusy, setSpecBusy] = useState(false);
       const openSpecSheet = async (result) => { setSpecBusy(true); try { setSpecSvg(await fetchSpecSheet(result)); } catch (e) { alert("Spec sheet failed: " + (e && e.message)); } setSpecBusy(false); };
       const openKitchenCompare = async () => { setSpecBusy(true); try { const r = await fetch("/api/spec-sheet/kitchens.svg?inline=1"); if (!r.ok) throw new Error("HTTP " + r.status); setSpecSvg(await r.text()); } catch (e) { alert("4-type sheet failed: " + (e && e.message)); } setSpecBusy(false); };
+      // production data with the chosen material joined (cut list + cabinet schedule)
+      const loadProduction = () => fetch("/api/designs/" + result.id + "/production").then((r) => r.json()).then((j) => j.data).catch(() => null);
       // ── Material Catalog browser (Material Management Module, Phase 1) ──
       const [matOpen, setMatOpen] = useState(false);
       const [matCat, setMatCat] = useState("pu");
@@ -8563,15 +8599,15 @@ const frontendHTML = `<!DOCTYPE html>
                   {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/hardware.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/hardware.csv", (type + "-" + result.id.slice(0, 8) + "-hardware.csv").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white rounded-lg">⬇ Hardware (CSV)</a>}
                   {/* 18.pdf §6: standalone production documents — Cut List PDF · BOQ Excel/PDF · Cabinet Schedule Excel/PDF */}
-                  {result.cutList && result.cutList.length > 0 && <button onClick={() => exportTablePdf("Production Cut List — " + type, ["S.No", "Height (mm)", "Width (mm)", "Qty", "Description"], [40, 100, 190, 280, 350], result.cutList.map((r, i) => [i + 1, r.h, r.w, r.qty, r.desc]), (type + "-cutlist.pdf").replace(/[^\\w.-]/g, "_"))}
+                  {result.cutList && result.cutList.length > 0 && <button onClick={async () => { const pd = await loadProduction(); if (!pd) return; exportTablePdf("Production Cut List — " + type, ["S.No", "Height (mm)", "Width (mm)", "Qty", "Material", "Description"], [40, 95, 175, 255, 310, 470], pd.cutList.map((r, i) => [i + 1, r.h, r.w, r.qty, r.material, r.desc]), (type + "-cutlist.pdf").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg">⬇ Cut List (PDF)</button>}
                   {result.boq && result.boq.length > 0 && <button onClick={() => saveCsvAs(["Item", "Qty", "Unit"], result.boq.map((r) => [r.item, r.qty, r.unit]), (type + "-boq.csv").replace(/[^\\w.-]/g, "_"))}
                     className="px-3 py-1.5 text-xs font-medium bg-sky-600 hover:bg-sky-500 text-white rounded-lg">⬇ BOQ (Excel)</button>}
                   {result.boq && result.boq.length > 0 && <button onClick={() => exportTablePdf("BOQ Summary — " + type, ["Item", "Qty", "Unit"], [40, 420, 520], result.boq.map((r) => [r.item, r.qty, r.unit]), (type + "-boq.pdf").replace(/[^\\w.-]/g, "_"))}
                     className="px-3 py-1.5 text-xs font-medium bg-sky-700 hover:bg-sky-600 text-white rounded-lg">⬇ BOQ (PDF)</button>}
-                  {type.indexOf("Kitchen") >= 0 && <button onClick={() => saveCsvAs(CAB_SCHED_HEADERS, cabinetScheduleRows(liveRuns || result.runs), (type + "-cabinet-schedule.csv").replace(/[^\\w.-]/g, "_"))}
+                  {type.indexOf("Kitchen") >= 0 && <button onClick={async () => { const pd = await loadProduction(); if (!pd) return; saveCsvAs(CAB_SCHED_HEADERS, pd.cabinetSchedule, (type + "-cabinet-schedule.csv").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white rounded-lg">⬇ Cabinet Schedule (Excel)</button>}
-                  {type.indexOf("Kitchen") >= 0 && <button onClick={() => exportTablePdf("Cabinet Schedule — " + type, CAB_SCHED_HEADERS, [40, 80, 175, 230, 360, 425, 495, 555, 640, 705, 775], cabinetScheduleRows(liveRuns || result.runs), (type + "-cabinet-schedule.pdf").replace(/[^\\w.-]/g, "_"))}
+                  {type.indexOf("Kitchen") >= 0 && <button onClick={async () => { const pd = await loadProduction(); if (!pd) return; exportTablePdf("Cabinet Schedule — " + type, CAB_SCHED_HEADERS, [40, 80, 175, 230, 360, 425, 495, 555, 640, 705, 775], pd.cabinetSchedule, (type + "-cabinet-schedule.pdf").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-violet-700 hover:bg-violet-600 text-white rounded-lg">⬇ Cabinet Schedule (PDF)</button>}
                   {/* 5.13: separate Production Cut List page (View) + Print-only */}
                   {type.indexOf("Kitchen") >= 0 && result.cutList && result.cutList.length > 0 && <button onClick={() => setCutListPage(true)}
