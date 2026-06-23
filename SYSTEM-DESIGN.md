@@ -142,7 +142,9 @@ erDiagram
 | `POST /api/references/:id/learn` | Per-drawing commands; "store as standard template" -> active rule |
 | `POST /api/learning/scan` | Batch learning scan |
 | `POST /api/learning/rules/:id/toggle` | Enable/disable a learned standard |
-| `GET /api/designs/:id/export.svg` | Combined SVG (plan + elevations + corner legend) |
+| `GET /api/designs/:id/export.svg` | Combined SVG (plan + elevations + corner legend) — the engineering CAD set |
+| `GET /api/designs/:id/spec-sheet.svg` | **Presentation spec sheet** (StudioNuvique-style 2D drawing): banner, annotated hero elevation (numbered component schedule), dimensioned plan + elevation, internal-layout/section (wardrobe inside view + depth section; mandir/wall-panel side views), construction **detailing drawings** (base/wall cabinet, L-corner, countertop+backsplash, sliding track), material-palette swatches, specifications, **cutting list + hardware** (furniture), key features, notes, branded footer. `?inline=1` for the in-app preview; else download. Client: **📄 Spec Sheet** preview modal + **⬇ Spec Sheet PDF** (single-page raster). Works for every design type. |
+| `GET /api/spec-sheet/kitchens.svg` | **4-Type Modular Kitchen** comparison sheet — Straight/Parallel/L/U side by side (plan + elevation thumbnails + notes) with shared detailing + material palette + key features. Client: **📐 4-Type Kitchen Sheet**. |
 | `GET /api/designs/:id/export.dxf` | Real-mm R12 DXF with discipline layers |
 | `GET /api/designs/:id/cutlist.csv` | Cut list: S.No, Height, Width, Qty, Description |
 | `GET /api/designs/:id/hardware.csv` | Hardware schedule |
