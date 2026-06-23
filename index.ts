@@ -4803,6 +4803,13 @@ const frontendHTML = `<!DOCTYPE html>
       }
       pdf.setFontSize(8); pdf.setTextColor(100, 116, 139); pdf.setFont("helvetica", "italic");
       pdf.text("Estimate only · subject to site measurement · valid 15 days · prices in INR.", 40, H - 40);
+      // ── presentation spec sheet as the first visual page (the polished 2D-drawing sheet) ──
+      try {
+        const ssvg = await fetchSpecSheet(result);
+        const { dataUrl: sd, w: sw, h: sh } = await svgToPng(ssvg, 2);
+        pdf.addPage([sw, sh], sw >= sh ? "landscape" : "portrait");
+        pdf.addImage(sd, "PNG", 0, 0, sw, sh);
+      } catch (e) { /* spec sheet optional — proposal still builds without it */ }
       // ── drawing pages (SVG → PNG, sized to each drawing) ──
       const svgs = [result.planSvg, ...(result.elevations || []).map((e) => e.svg), ...((result.sections || []).map((s) => s.svg))];
       const legend = cornerLegendSvg(result); if (legend) svgs.push(legend);
@@ -4851,9 +4858,14 @@ const frontendHTML = `<!DOCTYPE html>
       const jsPDF = window.jspdf && window.jspdf.jsPDF;
       if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
       const svg = await fetchSpecSheet(result);
-      const { dataUrl, w, h } = await svgToPng(svg, 2);
-      const pdf = new jsPDF({ orientation: w >= h ? "landscape" : "portrait", unit: "pt", format: [w, h] });
-      pdf.addImage(dataUrl, "PNG", 0, 0, w, h);
+      const { dataUrl, w, h } = await svgToPng(svg, 3);   // 3x raster → crisp on print
+      // Print-ready: fit the sheet onto a standard A3 page with a margin + thin frame.
+      const portrait = h >= w, pageW = portrait ? 842 : 1191, pageH = portrait ? 1191 : 842, margin = 20;
+      const sc = Math.min((pageW - margin * 2) / w, (pageH - margin * 2) / h);
+      const dw = w * sc, dh = h * sc, ox = (pageW - dw) / 2, oy = (pageH - dh) / 2;
+      const pdf = new jsPDF({ orientation: portrait ? "portrait" : "landscape", unit: "pt", format: "a3" });
+      pdf.addImage(dataUrl, "PNG", ox, oy, dw, dh);
+      pdf.setDrawColor(210, 210, 210); pdf.rect(ox - 2, oy - 2, dw + 4, dh + 4);
       await saveBlobAs(pdf.output("blob"), (type + "-" + ((result.id || "design") + "").slice(0, 8) + "-spec-sheet.pdf").replace(/[^\\w.-]/g, "_"));
     };
     const exportDesignPdf = async (result, type) => {

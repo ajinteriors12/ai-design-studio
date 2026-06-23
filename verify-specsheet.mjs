@@ -71,6 +71,12 @@ try {
   ok("SVG has MATERIAL PALETTE", svgInfo.pal);
   ok("SVG has DETAILING DRAWINGS", svgInfo.det);
   ok("SVG has SPECIFICATIONS", svgInfo.spec);
+  // Phase 8: the Spec Sheet PDF (A3, 3x raster) builds and downloads without error.
+  await page.evaluate(() => { window.__adsSaveSilent = true; window.__pdfDl = []; const od = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) window.__pdfDl.push(this.download); return od.apply(this, arguments); }; });
+  await clickByText(page, /⬇ PDF/);
+  let pdfDl = false;
+  for (let i = 0; i < 30; i++) { await sleep(400); pdfDl = await page.evaluate(() => (window.__pdfDl || []).some((n) => /spec-sheet\.pdf$/.test(n))); if (pdfDl) break; }
+  ok("Spec Sheet PDF builds + downloads", pdfDl);
   await clickByText(page, /✕ Close/);
   await sleep(300);
   ok("modal closes", await page.evaluate(() => !/Presentation Spec Sheet/.test(document.body.innerText)));
