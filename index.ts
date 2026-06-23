@@ -3415,35 +3415,42 @@ function specSheet(layout: any, meta: { type?: string; id?: string; finish?: str
   const heroW = Math.round(innerW * 0.62), rcX = M + heroW + gut, rcW = innerW - heroW - gut;
   const heroH = 360;
   const heroSvg = (layout.elevations && layout.elevations[0] && layout.elevations[0].svg) || layout.planSvg || "";
-  parts.push(ssCard(M, y, heroW, heroH, "Annotated Elevation"));
-  // embed area + numbered component schedule
-  const ex = M + 12, ey = y + 38, ew = heroW - 24, eh = heroH - 84;
-  parts.push(ssEmbed(heroSvg, ex, ey, ew, eh));
+  const usingRender = !!meta.heroDataUrl;
+  parts.push(ssCard(M, y, heroW, heroH, usingRender ? "Rendered View" : "Annotated Elevation"));
+  const ex = M + 12, ew = heroW - 24;
   const sched = ssSchedule(type, layout);
-  if (heroSvg && sched.length) {
-    const mt = ssMeet(heroSvg, ex, ey, ew, eh);
-    const t = (type || "").toLowerCase();
-    const isKit = t.includes("kitchen");
-    const padL = isKit ? 60 : 50, padSum = isKit ? 190 : 80;
-    const drawPx = mt.w - padSum;
-    sched.forEach((s, i) => {
-      const sx = mt.ox + (padL + s.frac * drawPx) * mt.k;
-      const topY = mt.oy + 6;
-      parts.push(`<line x1="${sx.toFixed(1)}" y1="${topY.toFixed(1)}" x2="${sx.toFixed(1)}" y2="${(topY + 16).toFixed(1)}" stroke="${SS.accent}" stroke-width="0.8"/>`);
-      parts.push(`<circle cx="${sx.toFixed(1)}" cy="${topY.toFixed(1)}" r="8" fill="${SS.band}"/>`);
-      parts.push(ssText(sx, topY + 3.2, String(i + 1), 9, "#fff", "700", "middle"));
-    });
-    // legend strip along the card bottom
-    const lyY = y + heroH - 32;
-    parts.push(`<line x1="${M + 13}" y1="${lyY - 8}" x2="${M + heroW - 13}" y2="${lyY - 8}" stroke="${SS.hair}" stroke-width="1"/>`);
-    const perRow = Math.ceil(sched.length / 2), colW = (heroW - 26) / perRow;
-    sched.forEach((s, i) => {
-      const row = Math.floor(i / perRow), col = i % perRow;
-      const lx = M + 15 + col * colW, ly = lyY + row * 15;
-      parts.push(`<circle cx="${lx + 6}" cy="${ly - 3}" r="6.5" fill="${SS.band}"/>`);
-      parts.push(ssText(lx + 6, ly - 0.2, String(i + 1), 8, "#fff", "700", "middle"));
-      parts.push(ssText(lx + 17, ly, s.label, 9, SS.ink, "400", "start", ssFit(s.label, 9, colW - 26)));
-    });
+  if (usingRender) {
+    // Rendered 3D / photoreal hero image (data-URL validated raster) + numbered legend.
+    const imgH = heroH - (sched.length ? 80 : 50);
+    parts.push(`<image x="${ex}" y="${y + 38}" width="${ew}" height="${imgH}" href="${meta.heroDataUrl}" preserveAspectRatio="xMidYMid meet"/>`);
+    if (sched.length) {
+      const lyY = y + heroH - 30, perRow = Math.ceil(sched.length / 2), colW = (heroW - 26) / perRow;
+      parts.push(`<line x1="${M + 13}" y1="${lyY - 8}" x2="${M + heroW - 13}" y2="${lyY - 8}" stroke="${SS.hair}" stroke-width="1"/>`);
+      sched.forEach((s, i) => {
+        const row = Math.floor(i / perRow), col = i % perRow, lx = M + 15 + col * colW, ly = lyY + row * 15;
+        parts.push(`<circle cx="${lx + 6}" cy="${ly - 3}" r="6.5" fill="${SS.band}"/>`);
+        parts.push(ssText(lx + 6, ly - 0.2, String(i + 1), 8, "#fff", "700", "middle"));
+        parts.push(ssText(lx + 17, ly, s.label, 9, SS.ink, "400", "start", ssFit(s.label, 9, colW - 26)));
+      });
+    }
+  } else {
+    // Annotated line elevation with TRUE leader-line callouts — names in a top band,
+    // each connected by a fanning leader to its component on the elevation.
+    const bandY0 = y + 34, elevY = y + 80, elevH = heroH - 92;
+    parts.push(ssEmbed(heroSvg, ex, elevY, ew, elevH));
+    if (heroSvg && sched.length) {
+      const mt = ssMeet(heroSvg, ex, elevY, ew, elevH);
+      const t = (type || "").toLowerCase(), isKit = t.includes("kitchen");
+      const padL = isKit ? 60 : 50, padSum = isKit ? 190 : 80, drawPx = mt.w - padSum;
+      const n = sched.length, slot = (ew - 20) / n, trackY = elevY + 4;
+      sched.forEach((s, i) => {
+        const sx = mt.ox + (padL + s.frac * drawPx) * mt.k;             // component x on the elevation
+        const lx = ex + 10 + slot * (i + 0.5), row = i % 2, labY = bandY0 + 8 + row * 15;
+        parts.push(ssText(lx, labY, s.label, 7.6, SS.ink, "600", "middle", ssFit(s.label, 7.6, slot - 2)));
+        parts.push(`<path d="M${lx.toFixed(1)} ${(labY + 3).toFixed(1)} L${lx.toFixed(1)} ${(trackY - 6).toFixed(1)} L${sx.toFixed(1)} ${(trackY + 4).toFixed(1)}" fill="none" stroke="${SS.accent}" stroke-width="0.7"/>`);
+        parts.push(`<circle cx="${sx.toFixed(1)}" cy="${(trackY + 4).toFixed(1)}" r="2.4" fill="${SS.band}"/>`);
+      });
+    }
   }
   // right column: material palette
   const mats = ssMaterials(type, layout, meta.finish);
@@ -4398,10 +4405,16 @@ app.get("/api/designs/:id/spec-sheet.svg", (c) => {
 app.post("/api/designs/:id/spec-sheet.svg", async (c) => {
   const d = loadDesign(c.req.param("id"));
   if (!d) return c.json({ error: "Design not found" }, 404);
+  // Reject oversized bodies before buffering (modest memory-amplification guard).
+  const clen = Number(c.req.header("content-length") || 0);
+  if (clen && clen > 11_000_000) return c.json({ error: "Payload too large" }, 413);
   let body: any = {};
   try { body = await c.req.json(); } catch { /* no body — fine */ }
   const finish = typeof body.finish === "string" ? body.finish.slice(0, 60) : undefined;
-  const heroDataUrl = typeof body.hero === "string" && body.hero.startsWith("data:image/") && body.hero.length < 9_000_000 ? body.hero : undefined;
+  // Hero must be a strict RASTER image data-URL (base64 only). SVG-in-SVG is rejected
+  // (it could carry <script> → stored XSS); the regex structurally forbids quotes/angle
+  // brackets so it is safe to embed in an <image href="…"> attribute.
+  const heroDataUrl = typeof body.hero === "string" && body.hero.length < 9_000_000 && /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/]+=*$/.test(body.hero) ? body.hero : undefined;
   return emitSpecSheet(c, d, { finish, heroDataUrl });
 });
 // 4-type modular kitchen comparison sheet (standalone — generates the four shapes).
