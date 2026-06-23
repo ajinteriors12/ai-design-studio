@@ -15,6 +15,16 @@ for (const t of ["L-Shape Kitchen", "U-Shape Kitchen", "Wardrobe", "Vanity Unit"
   const svg = await r.text();
   ok("spec sheet — " + t, r.status === 200 && svg.startsWith("<svg") && /MATERIAL PALETTE/.test(svg) && /SPECIFICATIONS/.test(svg));
 }
+{ // furniture sheets carry a cutting list + hardware block
+  const d = (await post("/api/generate", { designType: "Vanity Unit", wall: 1000, wallB: 1200 })).data;
+  const svg = await (await fetch(B + "/api/designs/" + d.id + "/spec-sheet.svg?inline=1")).text();
+  ok("furniture sheet has CUTTING LIST + HARDWARE", /CUTTING LIST/.test(svg) && /HARDWARE REQUIRED/.test(svg));
+}
+{ // 4-type modular kitchen comparison sheet
+  const r = await fetch(B + "/api/spec-sheet/kitchens.svg?inline=1");
+  const svg = await r.text();
+  ok("4-type kitchen comparison sheet", r.status === 200 && /4-TYPE MODULAR KITCHEN/.test(svg) && /STRAIGHT/.test(svg) && /U-SHAPE/.test(svg) && /DETAILING DRAWINGS/.test(svg));
+}
 
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: "new", protocol: "pipe", args: ["--no-sandbox", "--disable-dev-shm-usage", "--headless=new", "--use-gl=angle", "--use-angle=swiftshader", "--ignore-gpu-blocklist"], timeout: 60000 });
 try {

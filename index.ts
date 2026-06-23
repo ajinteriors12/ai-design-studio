@@ -3344,6 +3344,34 @@ function ssDetails(type: string, layout: any): { title: string; svg: string }[] 
   return [{ title: "Carcass", svg: detailCarcassSection() }];
 }
 
+// Furniture cutting list (carcass + per-kind parts) — the reference sheets' "CUTTING LIST".
+function furnitureCutList(unit: FurnitureUnit): [string, number, string][] {
+  const D = Math.round(unit.depthMM), H = Math.round(unit.heightMM), W = Math.round(unit.widthMM);
+  const cols = unit.columns.length, avgW = Math.round(W / Math.max(1, cols));
+  const PARTLBL: Record<string, string> = { shelf: "Shelf", drawer: "Drawer Front", mirror: "Mirror", door: "Shutter", glass: "Glass Shutter", open: "Open Shelf", jali: "Jali Panel", puja: "Marble Back", fluted: "Fluted Panel", marble: "Marble Sheet", niche: "Niche Shelf", floatshelf: "Floating Shelf", tv: "TV Back Panel", basin: "Counter Top", hang: "Hanging Rod" };
+  const count: Record<string, number> = {};
+  for (const c of unit.columns) for (const cell of (c.cells || [])) if (PARTLBL[cell.kind]) count[cell.kind] = (count[cell.kind] || 0) + 1;
+  const rows: [string, number, string][] = [];
+  rows.push(["Side / Divider Panel", cols + 1, H + " × " + D]);
+  rows.push(["Top Panel", 1, W + " × " + D]);
+  rows.push(["Bottom Panel", 1, W + " × " + D]);
+  for (const k of Object.keys(count)) {
+    const sz = k === "hang" ? avgW + " mm rod" : k === "drawer" ? avgW + " × 150" : k === "floatshelf" ? Math.round(W * 0.6) + " × 250" : k === "marble" || k === "fluted" ? avgW + " × " + H : avgW + " × " + D;
+    rows.push([PARTLBL[k], count[k], sz]);
+  }
+  rows.push(["Back Panel", 1, W + " × " + H]);
+  return rows;
+}
+function furnitureHardware(type: string): string[] {
+  const t = (type || "").toLowerCase();
+  const base = ["Soft-close hinges", "Telescopic drawer channels", "1 mm PVC edge band", "Profile / handle", "Confirmat screws"];
+  if (t.includes("wardrobe")) return ["Sliding / openable track", "Hanging rod (Alu)", ...base];
+  if (t.includes("mandir") || t.includes("temple")) return ["LED profile light (2–3 m)", "Brass knob", "CNC jali panel", "Mirror / acrylic adhesive", ...base.slice(0, 3)];
+  if (t.includes("wall panel") || t.includes("cladding")) return ["LED profile light (2–3 m)", "Floating-shelf brackets", "WPC / panel adhesive", "PVC edge band", "Confirmat screws"];
+  if (t.includes("vanity") || t.includes("dress")) return ["Designer mirror (5 mm)", "LED profile light", "Telescopic channels", ...base.slice(0, 3)];
+  if (t.includes("lcd") || t.includes("tv")) return ["LED strip (warm white)", "Cable manager", "Soft-close hinges", "Premium drawer channels", "PVC edge band"];
+  return base;
+}
 const SHEET_W = 1240;        // fixed presentation-sheet width (px)
 // Build the full presentation spec sheet for a generated layout.
 function specSheet(layout: any, meta: { type?: string; id?: string } = {}): string {
@@ -3496,6 +3524,30 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
   });
   y += specH + gut;
 
+  // ── 5b. Cutting list + hardware required (furniture types) ────────────────
+  if (layout.furniture) {
+    const cuts = furnitureCutList(layout.furniture), hw = furnitureHardware(type);
+    const chH = Math.max(170, 56 + Math.max(cuts.length, hw.length) * 17);
+    parts.push(ssCard(M, y, halfW, chH, "Cutting List"));
+    parts.push(ssText(M + 16, y + 44, "PART", 8.5, SS.sub, "700"));
+    parts.push(ssText(M + halfW * 0.62, y + 44, "QTY", 8.5, SS.sub, "700", "middle"));
+    parts.push(ssText(M + halfW - 16, y + 44, "SIZE (mm)", 8.5, SS.sub, "700", "end"));
+    parts.push(`<line x1="${M + 16}" y1="${y + 48}" x2="${M + halfW - 16}" y2="${y + 48}" stroke="${SS.line}" stroke-width="0.8"/>`);
+    cuts.forEach((r, i) => {
+      const ry = y + 62 + i * 17;
+      parts.push(ssText(M + 16, ry, r[0], 9, SS.ink, "400", "start", ssFit(r[0], 9, halfW * 0.55)));
+      parts.push(ssText(M + halfW * 0.62, ry, String(r[1]), 9, SS.ink, "400", "middle"));
+      parts.push(ssText(M + halfW - 16, ry, r[2], 9, SS.ink, "400", "end"));
+    });
+    parts.push(ssCard(nX, y, halfW, chH, "Hardware Required"));
+    hw.forEach((h, i) => {
+      const ry = y + 58 + i * 19;
+      parts.push(ssCheck(nX + 20, ry - 3.5, 6));
+      parts.push(ssText(nX + 34, ry, h, 9.5, SS.ink, "400", "start", ssFit(h, 9.5, halfW - 50)));
+    });
+    y += chH + gut;
+  }
+
   // ── 6. Branded title footer ──────────────────────────────────────────────
   const fH = 50, today = new Date().toISOString().slice(0, 10);
   const idS = meta.id ? meta.id.slice(0, 8).toUpperCase() : "";
@@ -3509,6 +3561,77 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
 
   const H = y;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="${SS.font}"><rect width="${W}" height="${H}" fill="${SS.bg}"/>${parts.join("")}</svg>`;
+}
+
+// 4-TYPE MODULAR KITCHEN comparison sheet (the reference "4 Type Modular Kitchen").
+// Generates the four canonical kitchen shapes and lays them side by side — plan +
+// elevation thumbnails + a one-line note each — plus shared detailing + materials.
+function kitchenCompareSheet(): string {
+  const defs = [
+    { type: "Straight Kitchen", dims: { wall: 3000 } as any, desc: "Ideal for compact spaces — efficient, minimal single-wall layout." },
+    { type: "Parallel Kitchen", dims: { wall: 3000, wallB: 3000 } as any, desc: "Two parallel platforms — maximum efficiency & worktop." },
+    { type: "L-Shape Kitchen", dims: { wall: 3000, wallB: 2400 } as any, desc: "Uses corner space; natural ergonomic work-triangle." },
+    { type: "U-Shape Kitchen", dims: { wall: 3000, wallB: 2400, wallC: 2400 } as any, desc: "Best for larger rooms — ample storage & work area." },
+  ];
+  const items = defs.map((d) => { try { return { ...d, layout: buildLayout(d.type, d.dims) }; } catch { return { ...d, layout: null }; } });
+  const W = SHEET_W, M = 22, gut = 16, innerW = W - M * 2;
+  const parts: string[] = []; let y = M;
+  // banner
+  const bH = 78;
+  parts.push(`<rect x="${M}" y="${y}" width="${innerW}" height="${bH}" rx="3" fill="${SS.band}"/>`);
+  parts.push(ssText(M + 22, y + 38, "4-TYPE MODULAR KITCHEN", 28, SS.bandInk, "800"));
+  parts.push(ssText(M + 23, y + 60, "Straight · Parallel · L-Shape · U-Shape — smart storage with an efficient workflow", 11.5, "#c9c0ad"));
+  parts.push(ssText(W - M - 18, y + 32, MKW.name, 12, "#e9e1cd", "700", "end"));
+  parts.push(ssText(W - M - 18, y + 50, "Comparison 2D Drawing Sheet", 9.5, "#b3a98f", "400", "end"));
+  y += bH + gut;
+  // four type columns
+  const colW = (innerW - gut * 3) / 4, colH = 386;
+  items.forEach((it, i) => {
+    const cx = M + i * (colW + gut);
+    parts.push(ssCard(cx, y, colW, colH, "Type " + (i + 1)));
+    parts.push(ssText(cx + colW / 2, y + 48, it.type.replace(" Kitchen", "").toUpperCase(), 13, SS.accent, "800", "middle"));
+    if (it.layout) {
+      parts.push(ssText(cx + 12, y + 66, "PLAN", 8, SS.sub, "700"));
+      parts.push(ssEmbed(it.layout.planSvg, cx + 8, y + 70, colW - 16, 120));
+      parts.push(ssText(cx + 12, y + 200, "ELEVATION", 8, SS.sub, "700"));
+      parts.push(ssEmbed((it.layout.elevations[0] || {}).svg || "", cx + 8, y + 204, colW - 16, 110));
+    }
+    // wrap the description over up to 3 lines
+    const words = it.desc.split(" "); let line = "", ln = 0;
+    for (const w of words) { if ((line + " " + w).length * 5.0 > colW - 24 && line) { parts.push(ssText(cx + 12, y + 330 + ln * 12, line, 8.4, SS.ink)); line = w; ln++; if (ln > 2) break; } else line = line ? line + " " + w : w; }
+    if (ln <= 2) parts.push(ssText(cx + 12, y + 330 + ln * 12, line, 8.4, SS.ink));
+  });
+  y += colH + gut;
+  // shared detailing drawings
+  const details = ssDetails("L-Shape Kitchen", {});
+  const dwH = 220;
+  parts.push(ssCard(M, y, innerW, dwH, "Detailing Drawings"));
+  { const n = details.length, cw = (innerW - 28 - (n - 1) * 12) / n;
+    for (let i = 0; i < n; i++) { const cx = M + 14 + i * (cw + 12); parts.push(ssEmbed(details[i].svg, cx, y + 36, cw, dwH - 50)); if (i < n - 1) parts.push(`<line x1="${(cx + cw + 6).toFixed(1)}" y1="${y + 42}" x2="${(cx + cw + 6).toFixed(1)}" y2="${y + dwH - 14}" stroke="${SS.hair}" stroke-width="1"/>`); } }
+  y += dwH + gut;
+  // materials + key features strip
+  const halfW = (innerW - gut) / 2, mats = ssMaterials("Kitchen", {}), feats = ssFeatures("Kitchen");
+  const sH = 150;
+  parts.push(ssCard(M, y, halfW, sH, "Material Palette"));
+  const swPerRow = 5, swGap = 8, swW = (halfW - 26 - swGap * (swPerRow - 1)) / swPerRow;
+  mats.slice(0, 5).forEach((m, i) => { const sx = M + 13 + i * (swW + swGap), sy = y + 42;
+    parts.push(`<rect x="${sx.toFixed(1)}" y="${sy}" width="${swW.toFixed(1)}" height="48" rx="2" fill="${m.fill}" stroke="${SS.line}" stroke-width="0.8"/>`);
+    if (m.flute) for (let f = 1; f < 6; f++) parts.push(`<line x1="${(sx + swW * f / 6).toFixed(1)}" y1="${sy}" x2="${(sx + swW * f / 6).toFixed(1)}" y2="${sy + 48}" stroke="#00000022" stroke-width="1"/>`);
+    parts.push(ssText(sx, sy + 60, m.name, 8, SS.ink, "700", "start", ssFit(m.name, 8, swW))); parts.push(ssText(sx, sy + 70, m.sub, 7.6, SS.sub)); });
+  parts.push(ssCard(M + halfW + gut, y, halfW, sH, "Key Features"));
+  feats.slice(0, 6).forEach((f, i) => { const r = i % 3, col = Math.floor(i / 3); const fx = M + halfW + gut + 18 + col * (halfW / 2); const fy = y + 50 + r * 26;
+    parts.push(ssCheck(fx, fy - 3.5)); parts.push(ssText(fx + 14, fy, f, 9, SS.ink, "400", "start", ssFit(f, 9, halfW / 2 - 28))); });
+  y += sH + gut;
+  // footer
+  const fH = 50, today = new Date().toISOString().slice(0, 10);
+  parts.push(`<rect x="${M}" y="${y}" width="${innerW}" height="${fH}" rx="3" fill="${SS.band}"/>`);
+  if (MKW_LOGO_B64) parts.push(`<image x="${M + 12}" y="${y + 7}" width="40" height="36" preserveAspectRatio="xMidYMid meet" href="${MKW_LOGO_B64}"/>`);
+  parts.push(ssText(M + 62, y + 22, MKW.name, 12.5, SS.bandInk, "700"));
+  parts.push(ssText(M + 62, y + 39, MKW.phone + "  ·  " + MKW.email + "  ·  " + MKW.cta, 9.5, "#c9c0ad"));
+  parts.push(ssText(W - M - 16, y + 22, "4-Type Modular Kitchen", 11, "#e9e1cd", "700", "end"));
+  parts.push(ssText(W - M - 16, y + 39, "DATE " + today + "   ·   COMPARISON 2D", 9, "#b3a98f", "400", "end"));
+  y += fH + M;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${y}" viewBox="0 0 ${W} ${y}" font-family="${SS.font}"><rect width="${W}" height="${y}" fill="${SS.bg}"/>${parts.join("")}</svg>`;
 }
 
 // ── Production panel cut list (12.pdf §5.7.12) — per-cabinet carcass panels for
@@ -4244,6 +4367,13 @@ app.get("/api/designs/:id/spec-sheet.svg", (c) => {
     const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-spec-sheet.svg`;
     c.header("Content-Disposition", `attachment; filename="${fname}"`);
   }
+  return c.body(svg);
+});
+// 4-type modular kitchen comparison sheet (standalone — generates the four shapes).
+app.get("/api/spec-sheet/kitchens.svg", (c) => {
+  const svg = kitchenCompareSheet();
+  c.header("Content-Type", "image/svg+xml");
+  if (c.req.query("inline") !== "1") c.header("Content-Disposition", `attachment; filename="4-Type-Modular-Kitchen.svg"`);
   return c.body(svg);
 });
 app.get("/api/designs/:id/export.dxf", (c) => {
@@ -7385,6 +7515,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [specSvg, setSpecSvg] = useState(null);     // presentation spec-sheet preview SVG
       const [specBusy, setSpecBusy] = useState(false);
       const openSpecSheet = async (result) => { setSpecBusy(true); try { setSpecSvg(await fetchSpecSheet(result)); } catch (e) { alert("Spec sheet failed: " + (e && e.message)); } setSpecBusy(false); };
+      const openKitchenCompare = async () => { setSpecBusy(true); try { const r = await fetch("/api/spec-sheet/kitchens.svg?inline=1"); if (!r.ok) throw new Error("HTTP " + r.status); setSpecSvg(await r.text()); } catch (e) { alert("4-type sheet failed: " + (e && e.message)); } setSpecBusy(false); };
       const [editRun, setEditRun] = useState(0);
       const [activeView, setActiveView] = useState(0);   // Project Tree selection: 'plan' | run index
       React.useEffect(() => { if (activeView !== "3d") last2dRef.current = activeView; }, [activeView]);   // 5.12: remember last 2D view
@@ -7950,6 +8081,8 @@ const frontendHTML = `<!DOCTYPE html>
                     className="px-3 py-1.5 text-xs font-medium bg-amber-700 hover:bg-amber-600 text-white rounded-lg disabled:opacity-50">{specBusy ? "Building…" : "📄 Spec Sheet"}</button>
                   <button onClick={async () => { setSpecBusy(true); try { await exportSpecSheetPdf(result, type); } catch (e) { console.error(e); } setSpecBusy(false); }} disabled={specBusy}
                     className="px-3 py-1.5 text-xs font-medium bg-amber-800 hover:bg-amber-700 text-white rounded-lg disabled:opacity-50">⬇ Spec Sheet PDF</button>
+                  {type.indexOf("Kitchen") >= 0 && <button onClick={openKitchenCompare} disabled={specBusy}
+                    className="px-3 py-1.5 text-xs font-medium bg-yellow-700 hover:bg-yellow-600 text-white rounded-lg disabled:opacity-50">📐 4-Type Kitchen Sheet</button>}
                   {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/cutlist.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/cutlist.csv", (type + "-" + result.id.slice(0, 8) + "-cutlist.csv").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg">⬇ Cut List (CSV)</a>}
                   {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/hardware.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/hardware.csv", (type + "-" + result.id.slice(0, 8) + "-hardware.csv").replace(/[^\\w.-]/g, "_")); }}
