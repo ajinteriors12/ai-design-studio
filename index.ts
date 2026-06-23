@@ -7699,6 +7699,25 @@ const frontendHTML = `<!DOCTYPE html>
         setMatPicked(m);
         try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...m, scope: matScope }) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); }); } catch (e) {}   // persist (scoped) → flows into quote + sheet
       };
+      // §12 Theme creator
+      const [themes, setThemes] = useState([]);
+      const [themeSel, setThemeSel] = useState("");
+      const loadThemes = () => fetch("/api/themes").then((r) => r.json()).then((j) => setThemes(j.data || [])).catch(() => {});
+      React.useEffect(() => { if (matOpen) loadThemes(); }, [matOpen]);
+      const applyTheme = () => {
+        if (!themeSel || !result || !result.id) return;
+        fetch("/api/designs/" + result.id + "/apply-theme", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ themeId: themeSel }) }).then((r) => r.json()).then((j) => {
+          const t = themes.find((x) => x.id === themeSel) || {}; const pm = (j.data && j.data.primary) || (t.scopes && t.scopes.base) || {};
+          try { window.__adsFinish = t.name + " theme"; window.__adsFinishColor = pm.colorCode || null; } catch (e) {}
+          setMatPicked({ brand: "Theme", colorName: t.name || "", code: "applied", colorCode: pm.colorCode || "#6366f1" });
+          if (typeof refreshQuote === "function") refreshQuote();
+        }).catch(() => {});
+      };
+      const saveTheme = () => {
+        if (!result || !result.id) { alert("Generate / pick a material first."); return; }
+        const name = window.prompt("Save current materials as a Theme — name:", "My Theme"); if (!name) return;
+        fetch("/api/themes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, designId: result.id }) }).then((r) => r.json()).then((j) => { if (j.error) alert(j.error); else loadThemes(); }).catch(() => {});
+      };
       const [editRun, setEditRun] = useState(0);
       const [activeView, setActiveView] = useState(0);   // Project Tree selection: 'plan' | run index
       React.useEffect(() => { if (activeView !== "3d") last2dRef.current = activeView; }, [activeView]);   // 5.12: remember last 2D view
@@ -8263,7 +8282,16 @@ const frontendHTML = `<!DOCTYPE html>
                         </label>
                         <span className="text-xs text-slate-500 self-center whitespace-nowrap">{matRows.length} shown</span>
                       </div>
-                      <div style={{ maxHeight: "58vh", overflow: "auto" }} className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+                      <div className="flex gap-2 mb-3 items-center text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1.5">
+                        <span className="text-slate-500 whitespace-nowrap">📦 Theme</span>
+                        <select value={themeSel} onChange={(e) => setThemeSel(e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs text-slate-700">
+                          <option value="">Choose a theme…</option>
+                          {themes.map((t) => <option key={t.id} value={t.id}>{t.name}{t.builtin ? " (built-in)" : ""}</option>)}
+                        </select>
+                        <button onClick={applyTheme} disabled={!themeSel} className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-40">Apply theme</button>
+                        <button onClick={saveTheme} className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded">💾 Save current as Theme</button>
+                      </div>
+                      <div style={{ maxHeight: "52vh", overflow: "auto" }} className="grid grid-cols-4 sm:grid-cols-6 gap-2">
                         {matRows.map((m) => <button key={m.materialId} onClick={() => pickMaterial(m)} title={m.brand + " · " + m.collection} className={"text-left border rounded-md overflow-hidden hover:ring-2 hover:ring-teal-400 " + (matPicked && matPicked.materialId === m.materialId ? "ring-2 ring-teal-600 border-teal-600" : "border-slate-200")}>
                           <div style={{ background: m.colorCode, height: 44 }}></div>
                           <div className="px-1.5 py-1">
@@ -9743,6 +9771,46 @@ app.put("/api/designs/:id/material", async (c) => {
   auditEdit(id, d.row.designType, "adjustment", "material [" + scope + "]: " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
   broadcast(id, "material", { code: m.code || "", scope });
   return c.json({ data: { ok: true, scope, scopes: cur } });
+});
+
+// ── §12 Theme creator — reusable bundles of per-scope material assignments. ──
+sqlite.exec(`CREATE TABLE IF NOT EXISTS themes (id TEXT PRIMARY KEY, name TEXT NOT NULL, theme TEXT NOT NULL, created_at INTEGER NOT NULL);`);
+function matByCode(code: string): any { return MATERIAL_CATALOG.find((m) => m.code === code) || null; }
+const BUILTIN_THEMES = [
+  { id: "builtin-modern-luxury", name: "Modern Luxury", base: "N-04", wall: "N-15", tall: "N-04" },
+  { id: "builtin-warm-earth", name: "Warm Earth", base: "E-01", wall: "E-15", tall: "E-01" },
+  { id: "builtin-classic-white", name: "Classic White", base: "ACR-FW", wall: "ACR-FW", tall: "ACR-FW" },
+  { id: "builtin-bold-accent", name: "Bold Accent", base: "R-06", wall: "N-16", tall: "N-16" },
+  { id: "builtin-forest-calm", name: "Forest Calm", base: "G-05", wall: "N-15", tall: "G-05" },
+].map((t) => ({ id: t.id, name: t.name, builtin: true, scopes: { base: matByCode(t.base), wall: matByCode(t.wall), tall: matByCode(t.tall) } }));
+function listThemes(): any[] {
+  const saved = (sqlite.prepare(`SELECT id,name,theme,created_at FROM themes ORDER BY created_at DESC`).all() as any[]).map((r) => ({ id: r.id, name: r.name, builtin: false, ...JSON.parse(r.theme) }));
+  return [...BUILTIN_THEMES, ...saved];
+}
+app.get("/api/themes", (c) => c.json({ data: listThemes() }));
+app.post("/api/themes", async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const name = (String(b.name || "").trim().slice(0, 60)) || "Theme";
+  let scopes: any = {};
+  if (b.designId) { const d = loadDesign(b.designId); if (d) scopes = materialScopes(b.designId); }
+  if (b.scopes && typeof b.scopes === "object") scopes = b.scopes;
+  if (!primaryMaterial(scopes)) return c.json({ error: "No material assigned to save as a theme" }, 400);
+  const id = randomUUID();
+  sqlite.prepare(`INSERT INTO themes(id,name,theme,created_at) VALUES(?,?,?,?)`).run(id, name, JSON.stringify({ scopes }), Date.now());
+  return c.json({ data: { id, name, scopes } });
+});
+app.delete("/api/themes/:id", (c) => { const id = c.req.param("id"); if (id.startsWith("builtin-")) return c.json({ error: "cannot delete a built-in theme" }, 400); sqlite.prepare(`DELETE FROM themes WHERE id=?`).run(id); return c.json({ data: { ok: true } }); });
+app.post("/api/designs/:id/apply-theme", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const theme = listThemes().find((t) => t.id === b.themeId); if (!theme) return c.json({ error: "Theme not found" }, 404);
+  const sc = theme.scopes || {};
+  sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
+    ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify({ base: sc.base, wall: sc.wall, tall: sc.tall }), Date.now());
+  auditEdit(id, d.row.designType, "adjustment", "theme applied: " + theme.name);
+  broadcast(id, "material", { theme: theme.name });
+  const quote = priceQuote(d.layout, quoteRates(id), materialScopes(id));
+  return c.json({ data: { ok: true, theme: theme.name, primary: primaryMaterial(sc), total: quote.total } });
 });
 // Client / "Bill To" details — persisted per design, addressed onto the quote + proposal.
 app.get("/api/designs/:id/client", (c) => {

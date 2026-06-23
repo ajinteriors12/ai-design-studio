@@ -97,6 +97,21 @@ try {
     if (selOk) break;
   }
   ok("picking a material sets the finish + shows selection", selOk);
+  // §12 Theme creator — select a built-in theme and apply it
+  const themed = await page.evaluate(() => {
+    const sel = [...document.querySelectorAll("select")].find((s) => [...s.options].some((o) => /Modern Luxury/.test(o.textContent || "")));
+    if (!sel) return false;
+    const opt = [...sel.options].find((o) => /Modern Luxury/.test(o.textContent || ""));
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+    setter.call(sel, opt.value); sel.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  });
+  ok("themes loaded in the catalog", themed);
+  await sleep(250);
+  await clickByText(page, /Apply theme/);
+  let themeOk = false;
+  for (let i = 0; i < 12; i++) { await sleep(250); themeOk = await page.evaluate(() => /Modern Luxury/.test(document.body.innerText)); if (themeOk) break; }
+  ok("applying a theme updates the design", themeOk);
   await clickByText(page, /✕ Close/);
   ok("no console/page errors", errors.length === 0, errors.slice(0, 2).join(" | "));
 } finally { try { await browser.close(); } catch (e) { /* pipe-protocol close can throw on Windows — teardown only, ignore */ } }
