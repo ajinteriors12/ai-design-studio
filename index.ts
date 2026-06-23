@@ -3131,7 +3131,7 @@ function ssMaterials(type: string, layout: any, finish?: string, finishColor?: s
 }
 
 // Specifications rows (label, value) derived from the layout (+ the chosen material).
-function ssSpecs(type: string, layout: any, material?: any): [string, string][] {
+function ssSpecs(type: string, layout: any, material?: any, scopes?: any): [string, string][] {
   const t = (type || "").toLowerCase();
   const rows: [string, string][] = [];
   if (t.includes("kitchen")) {
@@ -3162,8 +3162,15 @@ function ssSpecs(type: string, layout: any, material?: any): [string, string][] 
     rows.push(["Finish", "Matte laminate / wood texture"]);
     rows.push(["Lighting", "Warm-white LED profile (optional)"]);
   }
-  // Selected material (from the catalog) — overrides the generic shutter/finish lines.
-  if (material && (material.brand || material.colorName)) {
+  // Selected material (from the catalog). If scopes carry DIFFERENT materials per
+  // area, list a per-scope schedule (§4 Apply-To); else the single finish.
+  const sc = scopes || {};
+  const codeOf = (m: any) => m ? (m.code || m.colorCode || "") : "";
+  const distinct = [sc.base, sc.wall, sc.tall].filter(Boolean).map(codeOf);
+  const mixed = new Set(distinct).size > 1;
+  if (mixed) {
+    for (const s of ["base", "wall", "tall"]) { const m = sc[s]; if (m) rows.push([({ base: "Base finish", wall: "Wall finish", tall: "Tall-unit finish" } as any)[s], ([m.brand, m.colorName].filter(Boolean).join(" ") + (m.code ? " (" + m.code + ")" : "")).slice(0, 40)]); }
+  } else if (material && (material.brand || material.colorName)) {
     rows.push(["Finish material", [material.brand, material.colorName].filter(Boolean).join(" ").slice(0, 42)]);
     if (material.code || material.colorCode) rows.push(["Colour code", String(material.code || material.colorCode)]);
     if (material.finishType) rows.push(["Finish type", String(material.finishType)]);
@@ -3399,7 +3406,7 @@ const SHEET_W = 1240;        // fixed presentation-sheet width (px)
 // meta.finish = the user's actual chosen 3D finish (palette reflects it);
 // meta.client = Bill-To dict (shows "Prepared for"); meta.heroDataUrl = a rendered
 // 3D / photoreal image to use as the hero instead of the line elevation.
-function specSheet(layout: any, meta: { type?: string; id?: string; finish?: string; finishColor?: string; client?: any; material?: any; heroDataUrl?: string } = {}): string {
+function specSheet(layout: any, meta: { type?: string; id?: string; finish?: string; finishColor?: string; client?: any; material?: any; materialScopes?: any; heroDataUrl?: string } = {}): string {
   const type = meta.type || layout.designType || layout.type || "Modular Kitchen";
   const W = SHEET_W, M = 22, gut = 16;
   const innerW = W - M * 2;
@@ -3541,7 +3548,7 @@ function specSheet(layout: any, meta: { type?: string; id?: string; finish?: str
   }
 
   // ── 5. Specifications + Key features / notes ──────────────────────────────
-  const specRows = ssSpecs(type, layout, meta.material), notes = ssNotes(type);
+  const specRows = ssSpecs(type, layout, meta.material, meta.materialScopes), notes = ssNotes(type);
   const specH = Math.max(190, 52 + specRows.length * 19);
   const halfW = (innerW - gut) / 2;
   parts.push(ssCard(M, y, halfW, specH, "Specifications & Materials"));
@@ -4400,11 +4407,12 @@ app.get("/api/designs/:id/export.svg", (c) => {
 // the hero can be the rendered 3D / photoreal view.
 function emitSpecSheet(c: any, d: any, extra: { finish?: string; finishColor?: string; heroDataUrl?: string }) {
   const client = (() => { try { return quoteClient(d.row.id); } catch { return {}; } })();
-  const material = (() => { try { return designMaterial(d.row.id); } catch { return null; } })();
+  const scopes = (() => { try { return materialScopes(d.row.id); } catch { return {}; } })();
+  const material = primaryMaterial(scopes);
   // the persisted material seeds the finish name/colour when the client didn't POST a live one
   const finish = extra.finish || (material ? [material.brand, material.colorName].filter(Boolean).join(" ") + (material.code ? " (" + material.code + ")" : "") : undefined);
   const finishColor = extra.finishColor || (material && /^#[0-9a-fA-F]{6}$/.test(material.colorCode || "") ? material.colorCode : undefined);
-  const svg = specSheet(d.layout, { type: d.row.designType, id: d.row.id, client, material, heroDataUrl: extra.heroDataUrl, finish, finishColor });
+  const svg = specSheet(d.layout, { type: d.row.designType, id: d.row.id, client, material, materialScopes: scopes, heroDataUrl: extra.heroDataUrl, finish, finishColor });
   c.header("Content-Type", "image/svg+xml");
   if (c.req.query("inline") !== "1") {
     const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-spec-sheet.svg`;
@@ -7676,6 +7684,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [matRows, setMatRows] = useState([]);
       const [matFacets, setMatFacets] = useState(null);
       const [matPicked, setMatPicked] = useState(null);
+      const [matScope, setMatScope] = useState("all");   // §4 Apply-To: all | base | wall | tall
       React.useEffect(() => { if (!matFacets) fetch("/api/materials/facets").then((r) => r.json()).then((j) => setMatFacets(j.data)).catch(() => {}); }, [matFacets]);
       React.useEffect(() => {
         if (!matOpen) return;
@@ -7688,7 +7697,7 @@ const frontendHTML = `<!DOCTYPE html>
       const pickMaterial = (m) => {
         try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {}
         setMatPicked(m);
-        try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(m) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); }); } catch (e) {}   // persist → flows into quote + sheet
+        try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...m, scope: matScope }) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); }); } catch (e) {}   // persist (scoped) → flows into quote + sheet
       };
       const [editRun, setEditRun] = useState(0);
       const [activeView, setActiveView] = useState(0);   // Project Tree selection: 'plan' | run index
@@ -8238,12 +8247,20 @@ const frontendHTML = `<!DOCTYPE html>
                       <div className="flex flex-wrap gap-1 mb-2">
                         {(matFacets ? matFacets.categories : []).map((c) => <button key={c.category} onClick={() => { setMatCat(c.category); setMatBrand(""); }} className={"px-2 py-1 text-xs rounded font-medium " + (matCat === c.category ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")}>{c.category.toUpperCase()} ({c.count})</button>)}
                       </div>
-                      <div className="flex gap-2 mb-3">
+                      <div className="flex gap-2 mb-3 flex-wrap items-center">
                         <select value={matBrand} onChange={(e) => setMatBrand(e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs text-slate-700">
                           <option value="">All brands</option>
                           {((matFacets && matFacets.brandsByCategory[matCat]) || []).map((b) => <option key={b} value={b}>{b}</option>)}
                         </select>
-                        <input value={matQ} onChange={(e) => setMatQ(e.target.value)} placeholder="Search colour name / code / brand…" className="px-2 py-1 border border-slate-300 rounded text-xs flex-1" />
+                        <input value={matQ} onChange={(e) => setMatQ(e.target.value)} placeholder="Search colour name / code / brand…" className="px-2 py-1 border border-slate-300 rounded text-xs flex-1" style={{ minWidth: 160 }} />
+                        <label className="text-xs text-slate-500 flex items-center gap-1 whitespace-nowrap">Apply to
+                          <select value={matScope} onChange={(e) => setMatScope(e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs text-slate-700">
+                            <option value="all">Whole unit</option>
+                            <option value="base">Base cabinets</option>
+                            <option value="wall">Wall cabinets</option>
+                            <option value="tall">Tall units</option>
+                          </select>
+                        </label>
                         <span className="text-xs text-slate-500 self-center whitespace-nowrap">{matRows.length} shown</span>
                       </div>
                       <div style={{ maxHeight: "58vh", overflow: "auto" }} className="grid grid-cols-4 sm:grid-cols-6 gap-2">
@@ -8256,7 +8273,7 @@ const frontendHTML = `<!DOCTYPE html>
                           </div>
                         </button>)}
                       </div>
-                      {matPicked && <div className="mt-3 text-xs text-emerald-700 flex items-center gap-2"><span style={{ background: matPicked.colorCode, width: 14, height: 14, borderRadius: 3, display: "inline-block", border: "1px solid #cbd5e1" }}></span>✓ Selected <b>{matPicked.brand} {matPicked.colorName}</b> ({matPicked.code}) — appears on the next Spec Sheet palette. <button onClick={() => setMatOpen(false)} className="underline ml-1">Done</button></div>}
+                      {matPicked && <div className="mt-3 text-xs text-emerald-700 flex items-center gap-2"><span style={{ background: matPicked.colorCode, width: 14, height: 14, borderRadius: 3, display: "inline-block", border: "1px solid #cbd5e1" }}></span>✓ Applied <b>{matPicked.brand} {matPicked.colorName}</b> ({matPicked.code}) to <b>{matScope === "all" ? "the whole unit" : matScope + " cabinets"}</b> — flows into the quotation & Spec Sheet. <button onClick={() => setMatOpen(false)} className="underline ml-1">Done</button></div>}
                     </div>
                   </div>
                 )}
@@ -9600,17 +9617,30 @@ sqlite.exec(`CREATE TABLE IF NOT EXISTS design_materials (
 function designMaterial(id: string): any {
   try { const row = sqlite.prepare(`SELECT material FROM design_materials WHERE design_id=?`).get(id) as any; return row ? JSON.parse(row.material) : null; } catch { return null; }
 }
-// Visible front/face area (sqft) a finish/coat covers — basis for material costing (12.pdf).
-function finishFaceSqft(layout: any): number {
+// §4 Apply-To: material is stored per SCOPE (base / wall / tall). A legacy flat
+// record (or a "whole unit" pick) maps to all three. primaryMaterial = the finish
+// shown as the design's headline colour.
+const MAT_SCOPES = ["base", "wall", "tall"] as const;
+function materialScopes(id: string): Record<string, any> {
+  const m = designMaterial(id); if (!m) return {};
+  if (m.materialId || m.colorCode) return { base: m, wall: m, tall: m };   // legacy flat = whole unit
+  const out: Record<string, any> = {}; for (const s of MAT_SCOPES) if (m[s]) out[s] = m[s];
+  return out;
+}
+function primaryMaterial(scopes: Record<string, any>): any { return scopes.base || scopes.wall || scopes.tall || null; }
+// Visible front/face area (sqft) per scope — basis for material costing (12.pdf).
+function scopeFaceSqft(layout: any, scope: string): number {
+  const u = layout.furniture; if (u) return scope === "base" ? Math.round((u.widthMM || 0) * (u.heightMM || 0) / 92903 * 10) / 10 : 0;   // furniture front = "base"
   let mm2 = 0;
   for (const run of (layout.runs || [])) {
-    for (const c of (run.base || [])) { if (c.kind === "filler" || c.kind === "sidepanel") continue; mm2 += (c.w || 0) * (c.h || STD.baseHeight); }
-    for (const c of (run.wallCabs || [])) { if (c.kind === "filler" || c.kind === "sidepanel") continue; mm2 += (c.w || 0) * (c.h || STD.wallHeight); }
+    if (scope === "base") for (const c of (run.base || [])) { if (isTall(c.kind) || c.kind === "filler" || c.kind === "sidepanel") continue; mm2 += (c.w || 0) * (c.h || STD.baseHeight); }
+    if (scope === "tall") for (const c of (run.base || [])) { if (!isTall(c.kind)) continue; mm2 += (c.w || 0) * (STD.wallStart + STD.wallHeight); }
+    if (scope === "wall") for (const c of (run.wallCabs || [])) { if (c.kind === "filler" || c.kind === "sidepanel") continue; mm2 += (c.w || 0) * (c.h || STD.wallHeight); }
   }
-  const u = layout.furniture; if (u) mm2 += (u.widthMM || 0) * (u.heightMM || 0);
   return Math.round(mm2 / 92903 * 10) / 10;   // 1 sqft = 92903 mm²
 }
-function priceQuote(layout: any, rates: Record<string, number>, material?: any) {
+const SCOPE_LABEL: Record<string, string> = { base: "Base cabinets", wall: "Wall cabinets", tall: "Tall units" };
+function priceQuote(layout: any, rates: Record<string, number>, scopes?: Record<string, any>) {
   const r = { ...DEFAULT_RATES, ...(rates || {}) };
   const lines = boq(layout).map((row) => {
     const key = rateKeyFor(row.item);
@@ -9618,11 +9648,13 @@ function priceQuote(layout: any, rates: Record<string, number>, material?: any) 
     const amount = Math.round(row.qty * rate);
     return { item: row.item, qty: row.qty, unit: row.unit, rate, amount };
   });
-  // §8/§13: finish material as a costed line — face area × rate + 15% factory wastage.
-  if (material && Number(material.customerRate) > 0) {
-    const face = finishFaceSqft(layout), qty = Math.round(face * 1.15 * 10) / 10, rate = Math.round(Number(material.customerRate) * 100) / 100;
-    const label = "Finish — " + [material.brand, material.colorName].filter(Boolean).join(" ") + (material.code ? " (" + material.code + ")" : "") + " · incl. 15% wastage";
-    lines.unshift({ item: label, qty, unit: material.unit || "sqft", rate, amount: Math.round(qty * rate) });
+  // §8/§13: finish material as costed lines — per scope, face area × rate + 15% factory wastage.
+  if (scopes) for (const scope of MAT_SCOPES) {
+    const mat = scopes[scope]; if (!mat || !(Number(mat.customerRate) > 0)) continue;
+    const face = scopeFaceSqft(layout, scope); if (face <= 0) continue;
+    const qty = Math.round(face * 1.15 * 10) / 10, rate = Math.round(Number(mat.customerRate) * 100) / 100;
+    const label = "Finish [" + (SCOPE_LABEL[scope] || scope) + "] — " + [mat.brand, mat.colorName].filter(Boolean).join(" ") + (mat.code ? " (" + mat.code + ")" : "") + " · +15% wastage";
+    lines.push({ item: label, qty, unit: mat.unit || "sqft", rate, amount: Math.round(qty * rate) });
   }
   const subtotal = lines.reduce((s, l) => s + l.amount, 0);
   const marginPct = r.margin_pct ?? 0, gstPct = r.gst_pct ?? 0;
@@ -9679,20 +9711,20 @@ app.put("/api/designs/:id/rate-card", async (c) => {
   sqlite.prepare(`INSERT INTO rate_cards(design_id,rates,updated_at) VALUES(?,?,?)
     ON CONFLICT(design_id) DO UPDATE SET rates=excluded.rates, updated_at=excluded.updated_at`).run(id, JSON.stringify(merged), Date.now());
   auditEdit(id, d.row.designType, "adjustment", "rate-card updated");
-  const quote = priceQuote(d.layout, merged, designMaterial(id));
+  const quote = priceQuote(d.layout, merged, materialScopes(id));
   broadcast(id, "quote", { total: quote.total });
   return c.json({ data: { ok: true, rates: merged, quote } });
 });
 app.get("/api/designs/:id/quote", (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
-  return c.json({ data: priceQuote(d.layout, quoteRates(id), designMaterial(id)) });
+  return c.json({ data: priceQuote(d.layout, quoteRates(id), materialScopes(id)) });
 });
 app.get("/api/designs/:id/quote.csv", (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
   const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-quote.csv`;
   c.header("Content-Type", "text/csv");
   c.header("Content-Disposition", `attachment; filename="${fname}"`);
-  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id), designMaterial(id)), quoteClient(id)));
+  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id), materialScopes(id)), quoteClient(id)));
 });
 // Per-design selected material (Material Management Module). Whitelisted catalog fields.
 app.get("/api/designs/:id/material", (c) => { const d = loadDesign(c.req.param("id")); if (!d) return c.json({ error: "Design not found" }, 404); return c.json({ data: designMaterial(c.req.param("id")) }); });
@@ -9702,11 +9734,15 @@ app.put("/api/designs/:id/material", async (c) => {
   const allow = ["materialId", "code", "category", "brand", "collection", "colorName", "colorCode", "finishType", "sheen", "dealerRate", "customerRate", "unit"];
   const m: any = {}; for (const k of allow) if (b[k] != null) m[k] = typeof b[k] === "number" ? b[k] : String(b[k]).slice(0, 80);
   if (m.colorCode && !/^#[0-9a-fA-F]{6}$/.test(m.colorCode)) delete m.colorCode;
+  // §4 Apply-To: scope = all | base | wall | tall (default all → whole unit).
+  const scope = ["all", "base", "wall", "tall"].includes(b.scope) ? b.scope : "all";
+  const cur = materialScopes(id);
+  if (scope === "all") { cur.base = m; cur.wall = m; cur.tall = m; } else { cur[scope] = m; }
   sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
-    ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify(m), Date.now());
-  auditEdit(id, d.row.designType, "adjustment", "material selected: " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
-  broadcast(id, "material", { code: m.code || "" });
-  return c.json({ data: { ok: true, material: m } });
+    ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify(cur), Date.now());
+  auditEdit(id, d.row.designType, "adjustment", "material [" + scope + "]: " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
+  broadcast(id, "material", { code: m.code || "", scope });
+  return c.json({ data: { ok: true, scope, scopes: cur } });
 });
 // Client / "Bill To" details — persisted per design, addressed onto the quote + proposal.
 app.get("/api/designs/:id/client", (c) => {

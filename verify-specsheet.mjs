@@ -89,10 +89,14 @@ try {
   let matOpen = false;
   for (let i = 0; i < 24; i++) { await sleep(300); matOpen = await page.evaluate(() => /Material Catalog —/.test(document.body.innerText) && document.querySelectorAll("button[title]").length > 10); if (matOpen) break; }
   ok("Material Catalog opens with swatches", matOpen);
-  const picked = await page.evaluate(() => { const b = [...document.querySelectorAll("button[title]")].find((x) => x.querySelector("div[style*='background']")); if (b) { b.click(); return true; } return false; });
   let selOk = false;
-  for (let i = 0; i < 12; i++) { await sleep(250); selOk = await page.evaluate(() => /Selected/.test(document.body.innerText) && !!window.__adsFinishColor); if (selOk) break; }
-  ok("picking a material sets the finish + shows selection", picked && selOk);
+  for (let i = 0; i < 16; i++) {
+    await page.evaluate(() => { const b = [...document.querySelectorAll("button[title]")].find((x) => x.querySelector("div[style*='background']")); if (b) b.click(); });
+    await sleep(250);
+    selOk = await page.evaluate(() => /Applied/.test(document.body.innerText) && !!window.__adsFinishColor);
+    if (selOk) break;
+  }
+  ok("picking a material sets the finish + shows selection", selOk);
   await clickByText(page, /✕ Close/);
   ok("no console/page errors", errors.length === 0, errors.slice(0, 2).join(" | "));
 } finally { try { await browser.close(); } catch (e) { /* pipe-protocol close can throw on Windows — teardown only, ignore */ } }
