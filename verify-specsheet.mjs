@@ -84,6 +84,16 @@ try {
   await clickByText(page, /✕ Close/);
   await sleep(300);
   ok("modal closes", await page.evaluate(() => !/Presentation Spec Sheet/.test(document.body.innerText)));
+  // Material Catalog (Material Management Module · Phase 1)
+  await clickByText(page, /🎨 Material Catalog/);
+  let matOpen = false;
+  for (let i = 0; i < 24; i++) { await sleep(300); matOpen = await page.evaluate(() => /Material Catalog —/.test(document.body.innerText) && document.querySelectorAll("button[title]").length > 10); if (matOpen) break; }
+  ok("Material Catalog opens with swatches", matOpen);
+  const picked = await page.evaluate(() => { const b = [...document.querySelectorAll("button[title]")].find((x) => x.querySelector("div[style*='background']")); if (b) { b.click(); return true; } return false; });
+  await sleep(350);
+  const selOk = await page.evaluate(() => /Selected/.test(document.body.innerText) && !!window.__adsFinishColor);
+  ok("picking a material sets the finish + shows selection", picked && selOk);
+  await clickByText(page, /✕ Close/);
   ok("no console/page errors", errors.length === 0, errors.slice(0, 2).join(" | "));
 } finally { try { await browser.close(); } catch (e) { /* pipe-protocol close can throw on Windows — teardown only, ignore */ } }
 console.log("\nRESULT " + pass + "/" + (pass + fail) + " passed");

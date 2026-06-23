@@ -4422,6 +4422,65 @@ app.post("/api/designs/:id/spec-sheet.svg", async (c) => {
   const heroDataUrl = typeof body.hero === "string" && body.hero.length < 9_000_000 && /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/]+=*$/.test(body.hero) ? body.hero : undefined;
   return emitSpecSheet(c, d, { finish, finishColor, heroDataUrl });
 });
+// ════════════════════════════════════════════════════════════════════════════
+//  MATERIAL CATALOG — the "Material DNA" (blueprint §1) + search API (§3).
+//  Single server-side source of every selectable finish (PU/acrylic/laminate/
+//  veneer/glass/functional), each with brand · collection · colour name · code ·
+//  finish type · sheen · two-tier rate. PU is led by the official Sirca/OIKOS
+//  Supercolor palette (114 colours sampled from the catalogue PDF).
+// ════════════════════════════════════════════════════════════════════════════
+const SIRCA_FAMILIES: Record<string, { p: string; hex: string[] }> = {
+  Neutral: { p: "N", hex: ["0f1316","26210e","213438","40483b","434c53","555a60","74716c","877c84","819498","a4a8ab","b5abb3","c8b3b0","cabfc7","c7d1b9","dbd4cc","e4dbde"] },
+  Earth:   { p: "E", hex: ["584338","c45220","a0684d","ba6c17","a57b4b","bc812f","ff7906","b68a5b","cf9031","f79307","afa393","ce9f81","fba74d","e7b43e","f7b060","f7ba9e","eccc79","fecd64"] },
+  Sunlight:{ p: "Y", hex: ["333412","526803","6d765b","8e8a0d","a38d3a","c8a002","a9a580","d7ad1b","aec16f","b6bc98","d0c38f","bccb88","e1cf5f","c7de8c","fed839","ffe114"] },
+  Red:     { p: "R", hex: ["381114","991018","d00d1e","563331","863a2a","e93011","b74429","8f5756","985a67","d85640","f54b72","93756d","fc664d","ea6e4c","f3826e","f3939f","fb9daf","faada5"] },
+  Blush:   { p: "P", hex: ["5d1837","602659","4d378c","5d3e7a","8b375b","bc4180","8656a2","d15d9c","b47296","eb69a7","b78ab5","cf8a9c","f38eba","cfa2c9"] },
+  Green:   { p: "G", hex: ["233d30","135d2c","385537","486144","177946","008141","2b7a0f","409b56","739475","39ab6d","67a05c","6ba483","4db262","7bbba0","9db498","8fc07f"] },
+  Aqua:    { p: "B", hex: ["0c1326","172741","143733","044587","344f94","325d80","655ea2","1e809b","1b9691","00ab98","449baf","2da7da","8ba0b1","4eb8aa","67c3ac","87ceea"] },
+};
+interface MaterialEntry { materialId: string; code: string; category: string; brand: string; collection: string; colorName: string; colorCode: string; hex: string; finishType: string; sheen: number; dealerRate: number; customerRate: number; unit: string; }
+const MAT_RATE: Record<string, [number, number]> = { pu: [1850, 2800], acrylic: [1400, 2200], laminate: [120, 240], veneer: [350, 700], glass: [180, 360], functional: [90, 180] };
+const MATERIAL_CATALOG: MaterialEntry[] = (() => {
+  const out: MaterialEntry[] = []; const seq: Record<string, number> = {};
+  const add = (category: string, brand: string, collection: string, colorName: string, code: string, hex: string, finishType: string, sheen: number) => {
+    const n = (seq[category] = (seq[category] || 0) + 1);
+    const [d, cu] = MAT_RATE[category] || [0, 0];
+    out.push({ materialId: `${category.toUpperCase()}_${String(n).padStart(4, "0")}`, code, category, brand, collection, colorName, colorCode: "#" + hex, hex, finishType, sheen, dealerRate: d, customerRate: cu, unit: (category === "laminate" || category === "glass") ? "sqft (sheet)" : "sqft" });
+  };
+  // PU — Sirca Supercolor families (the catalogue), then other brands
+  for (const fam of Object.keys(SIRCA_FAMILIES)) { const { p, hex } = SIRCA_FAMILIES[fam]; hex.forEach((h, i) => add("pu", "Sirca", "Supercolor · " + fam, fam + " " + String(i + 1).padStart(2, "0"), p + "-" + String(i + 1).padStart(2, "0"), h, "Matt", 15)); }
+  add("pu", "AICA", "Solid", "Pearl White Satin", "AICA-PWS", "f2f3f2", "Satin", 30); add("pu", "AICA", "Solid", "Wine Red", "AICA-WR", "6a2330", "Matt", 12);
+  add("pu", "Asian Paints", "PU Wood", "Linen White", "AP-LW", "f1efe6", "Matt", 15); add("pu", "Asian Paints", "PU Wood", "Teal", "AP-TL", "2f6e6a", "Satin", 28);
+  // Acrylic (high gloss)
+  add("acrylic", "Merino", "Gloss", "Frosty White", "ACR-FW", "f5f7f9", "High Gloss", 92); add("acrylic", "Merino", "Gloss", "Candy Red", "ACR-CR", "b01e2e", "High Gloss", 92);
+  add("acrylic", "Senosan", "Gloss", "Alpine White", "ACR-AW", "f6f8fa", "High Gloss", 90); add("acrylic", "Senosan", "Gloss", "Burgundy", "ACR-BG", "5f1f2c", "High Gloss", 90);
+  // Laminate
+  add("laminate", "Merino", "1mm", "Snow White", "LAM-SW", "f2f4f5", "Suede", 25); add("laminate", "Merino", "1mm", "Walnut", "LAM-WN", "6b4a32", "Wood", 20);
+  add("laminate", "Greenlam", "1mm", "Classic Walnut", "LAM-CW", "5e4128", "Wood", 20); add("laminate", "Century", "1mm", "Wenge", "LAM-WE", "3e2f26", "Wood", 18);
+  // Veneer
+  add("veneer", "Greenlam Decowood", "Natural", "Natural Oak", "VEN-NO", "c9a878", "Natural", 22); add("veneer", "CenturyVeneers", "Natural", "Burma Teak", "VEN-BT", "96652f", "Natural", 22);
+  // Glass
+  add("glass", "Saint-Gobain", "Lacquered", "Back-painted Grey", "GLS-BG", "8a9097", "Gloss", 80); add("glass", "Saint-Gobain", "Tinted", "Black", "GLS-BK", "2a2f36", "Gloss", 80);
+  // Functional / colour-coded
+  add("functional", "Studio", "Colour-coded", "Signal", "FN-SG", "e11d48", "Matt", 10);
+  return out;
+})();
+function materialFacets() {
+  const cats: Record<string, number> = {}, brands: Record<string, Set<string>> = {};
+  for (const m of MATERIAL_CATALOG) { cats[m.category] = (cats[m.category] || 0) + 1; (brands[m.category] = brands[m.category] || new Set()).add(m.brand); }
+  return { total: MATERIAL_CATALOG.length, categories: Object.keys(cats).map((k) => ({ category: k, count: cats[k] })), brandsByCategory: Object.fromEntries(Object.entries(brands).map(([k, v]) => [k, [...v]])) };
+}
+app.get("/api/materials/facets", (c) => c.json({ data: materialFacets() }));
+app.get("/api/materials", (c) => {
+  const cat = (c.req.query("category") || "").toLowerCase(), brand = (c.req.query("brand") || "").toLowerCase(), q = (c.req.query("q") || "").toLowerCase().trim();
+  const lim = Math.min(2000, Math.max(1, parseInt(c.req.query("limit") || "500", 10)));
+  let rows = MATERIAL_CATALOG;
+  if (cat) rows = rows.filter((m) => m.category === cat);
+  if (brand) rows = rows.filter((m) => m.brand.toLowerCase() === brand);
+  if (q) rows = rows.filter((m) => (m.colorName + " " + m.code + " " + m.colorCode + " " + m.brand + " " + m.collection + " " + m.materialId + " " + m.finishType).toLowerCase().includes(q));
+  return c.json({ data: { count: rows.length, materials: rows.slice(0, lim) } });
+});
+
 // 4-type modular kitchen comparison sheet (standalone — generates the four shapes).
 app.get("/api/spec-sheet/kitchens.svg", (c) => {
   const svg = kitchenCompareSheet();
@@ -7598,6 +7657,24 @@ const frontendHTML = `<!DOCTYPE html>
       const [specBusy, setSpecBusy] = useState(false);
       const openSpecSheet = async (result) => { setSpecBusy(true); try { setSpecSvg(await fetchSpecSheet(result)); } catch (e) { alert("Spec sheet failed: " + (e && e.message)); } setSpecBusy(false); };
       const openKitchenCompare = async () => { setSpecBusy(true); try { const r = await fetch("/api/spec-sheet/kitchens.svg?inline=1"); if (!r.ok) throw new Error("HTTP " + r.status); setSpecSvg(await r.text()); } catch (e) { alert("4-type sheet failed: " + (e && e.message)); } setSpecBusy(false); };
+      // ── Material Catalog browser (Material Management Module, Phase 1) ──
+      const [matOpen, setMatOpen] = useState(false);
+      const [matCat, setMatCat] = useState("pu");
+      const [matBrand, setMatBrand] = useState("");
+      const [matQ, setMatQ] = useState("");
+      const [matRows, setMatRows] = useState([]);
+      const [matFacets, setMatFacets] = useState(null);
+      const [matPicked, setMatPicked] = useState(null);
+      React.useEffect(() => { if (!matFacets) fetch("/api/materials/facets").then((r) => r.json()).then((j) => setMatFacets(j.data)).catch(() => {}); }, [matFacets]);
+      React.useEffect(() => {
+        if (!matOpen) return;
+        const id = setTimeout(() => {
+          const qs = "category=" + encodeURIComponent(matCat) + (matBrand ? "&brand=" + encodeURIComponent(matBrand) : "") + (matQ ? "&q=" + encodeURIComponent(matQ) : "") + "&limit=400";
+          fetch("/api/materials?" + qs).then((r) => r.json()).then((j) => setMatRows((j.data && j.data.materials) || [])).catch(() => {});
+        }, 180);
+        return () => clearTimeout(id);
+      }, [matOpen, matCat, matBrand, matQ]);
+      const pickMaterial = (m) => { try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {} setMatPicked(m); };
       const [editRun, setEditRun] = useState(0);
       const [activeView, setActiveView] = useState(0);   // Project Tree selection: 'plan' | run index
       React.useEffect(() => { if (activeView !== "3d") last2dRef.current = activeView; }, [activeView]);   // 5.12: remember last 2D view
@@ -8136,6 +8213,38 @@ const frontendHTML = `<!DOCTYPE html>
             {result && result.error && <p className="text-red-600 text-sm">{result.error}</p>}
             {result && !result.error && (
               <div className="fade-in space-y-4">
+                {matOpen && (
+                  <div onClick={() => setMatOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.72)", zIndex: 60, overflow: "auto", padding: 18 }}>
+                    <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: 1120, margin: "0 auto", background: "#fff", borderRadius: 8, padding: 14, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold text-slate-700 text-sm">🎨 Material Catalog{matFacets ? " — " + matFacets.total + " finishes" : ""}</span>
+                        <button onClick={() => setMatOpen(false)} className="px-2.5 py-1 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white rounded">✕ Close</button>
+                      </div>
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {(matFacets ? matFacets.categories : []).map((c) => <button key={c.category} onClick={() => { setMatCat(c.category); setMatBrand(""); }} className={"px-2 py-1 text-xs rounded font-medium " + (matCat === c.category ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")}>{c.category.toUpperCase()} ({c.count})</button>)}
+                      </div>
+                      <div className="flex gap-2 mb-3">
+                        <select value={matBrand} onChange={(e) => setMatBrand(e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs text-slate-700">
+                          <option value="">All brands</option>
+                          {((matFacets && matFacets.brandsByCategory[matCat]) || []).map((b) => <option key={b} value={b}>{b}</option>)}
+                        </select>
+                        <input value={matQ} onChange={(e) => setMatQ(e.target.value)} placeholder="Search colour name / code / brand…" className="px-2 py-1 border border-slate-300 rounded text-xs flex-1" />
+                        <span className="text-xs text-slate-500 self-center whitespace-nowrap">{matRows.length} shown</span>
+                      </div>
+                      <div style={{ maxHeight: "58vh", overflow: "auto" }} className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+                        {matRows.map((m) => <button key={m.materialId} onClick={() => pickMaterial(m)} title={m.brand + " · " + m.collection} className={"text-left border rounded-md overflow-hidden hover:ring-2 hover:ring-teal-400 " + (matPicked && matPicked.materialId === m.materialId ? "ring-2 ring-teal-600 border-teal-600" : "border-slate-200")}>
+                          <div style={{ background: m.colorCode, height: 44 }}></div>
+                          <div className="px-1.5 py-1">
+                            <div className="text-[10px] font-semibold text-slate-700 truncate">{m.colorName}</div>
+                            <div className="text-[9px] text-slate-500 truncate">{m.code} · {m.finishType}</div>
+                            <div className="text-[9px] text-slate-400">₹{m.customerRate}/{m.unit}</div>
+                          </div>
+                        </button>)}
+                      </div>
+                      {matPicked && <div className="mt-3 text-xs text-emerald-700 flex items-center gap-2"><span style={{ background: matPicked.colorCode, width: 14, height: 14, borderRadius: 3, display: "inline-block", border: "1px solid #cbd5e1" }}></span>✓ Selected <b>{matPicked.brand} {matPicked.colorName}</b> ({matPicked.code}) — appears on the next Spec Sheet palette. <button onClick={() => setMatOpen(false)} className="underline ml-1">Done</button></div>}
+                    </div>
+                  </div>
+                )}
                 {specSvg && (
                   <div onClick={() => setSpecSvg(null)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.78)", zIndex: 60, overflow: "auto", padding: 18 }}>
                     <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: 1300, margin: "0 auto", background: "#fff", borderRadius: 8, padding: 12, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
@@ -8165,6 +8274,8 @@ const frontendHTML = `<!DOCTYPE html>
                     className="px-3 py-1.5 text-xs font-medium bg-amber-800 hover:bg-amber-700 text-white rounded-lg disabled:opacity-50">⬇ Spec Sheet PDF</button>
                   {type.indexOf("Kitchen") >= 0 && <button onClick={openKitchenCompare} disabled={specBusy}
                     className="px-3 py-1.5 text-xs font-medium bg-yellow-700 hover:bg-yellow-600 text-white rounded-lg disabled:opacity-50">📐 4-Type Kitchen Sheet</button>}
+                  <button onClick={() => setMatOpen(true)}
+                    className="px-3 py-1.5 text-xs font-medium bg-teal-700 hover:bg-teal-600 text-white rounded-lg">🎨 Material Catalog</button>
                   {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/cutlist.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/cutlist.csv", (type + "-" + result.id.slice(0, 8) + "-cutlist.csv").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg">⬇ Cut List (CSV)</a>}
                   {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/hardware.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/hardware.csv", (type + "-" + result.id.slice(0, 8) + "-hardware.csv").replace(/[^\\w.-]/g, "_")); }}
