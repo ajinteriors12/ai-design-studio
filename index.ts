@@ -2788,6 +2788,328 @@ function combinedSvg(layout: any, meta: { type?: string; id?: string } = {}): st
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${shW}" height="${shH}" viewBox="0 0 ${shW} ${shH}"><rect width="${shW}" height="${shH}" fill="#ffffff"/><g transform="translate(${M},${M})">${parts.join("")}</g>${tb.join("")}</svg>`;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  PRESENTATION SPEC SHEET  (StudioNuvique-style 2D-drawing presentation)
+//  One polished marketing / hand-off sheet per design — the "concept" of the
+//  reference 2D drawing sheets: title banner, annotated hero elevation
+//  (numbered component schedule), dimensioned plan + elevation (the embedded
+//  views already carry their own dimension chains), material palette swatches,
+//  specifications table, key-features, detailing drawings (Phase 2), notes and
+//  a branded title footer.  Server-composed SVG, reused by the inline preview
+//  AND the Spec-Sheet PDF export.  Distinct from combinedSvg (engineering CAD
+//  set) — this is the customer-facing presentation drawing.
+// ════════════════════════════════════════════════════════════════════════════
+const SS = {
+  ink: "#2b2722", sub: "#8a8275", line: "#ddd6c9", hair: "#ece6da",
+  panel: "#ffffff", bg: "#f5f1ea", band: "#1d1b18", bandInk: "#f3efe7",
+  accent: "#8a6d3b", chip: "#efe9dd", soft: "#faf7f1", ok: "#5a7d4f",
+  font: "'Segoe UI','Helvetica Neue',Arial,sans-serif",
+};
+const ssEsc = (s: any) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function ssViewDim(s: string) { return { w: parseFloat((s.match(/(?<![\w-])width="([\d.]+)"/) || [])[1] || "0"), h: parseFloat((s.match(/(?<![\w-])height="([\d.]+)"/) || [])[1] || "0") }; }
+function ssInner(s: string) { return s.replace(/^<svg[^>]*>/, "").replace(/<\/svg>\s*$/, ""); }
+// Embed an existing view SVG into a box, aspect-preserved (meet → centred).
+function ssEmbed(svg: string, x: number, y: number, boxW: number, boxH: number): string {
+  const { w, h } = ssViewDim(svg);
+  if (!w || !h) return "";
+  return `<svg x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${boxW.toFixed(1)}" height="${boxH.toFixed(1)}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">${ssInner(svg)}</svg>`;
+}
+// "meet" letterbox transform: maps a source-view point → on-sheet coords.
+function ssMeet(svg: string, x: number, y: number, boxW: number, boxH: number) {
+  const { w, h } = ssViewDim(svg);
+  const k = Math.min(boxW / (w || 1), boxH / (h || 1));
+  return { k, ox: x + (boxW - w * k) / 2, oy: y + (boxH - h * k) / 2, w, h };
+}
+// A panel/card with optional header strip.
+function ssCard(x: number, y: number, w: number, h: number, title?: string, fill = SS.panel): string {
+  let o = `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3" fill="${fill}" stroke="${SS.line}" stroke-width="1"/>`;
+  if (title) o += `<text x="${x + 13}" y="${y + 20}" fill="${SS.ink}" font-size="12.5" font-weight="700" letter-spacing="0.6" font-family="${SS.font}">${ssEsc(title.toUpperCase())}</text>` +
+    `<line x1="${x + 13}" y1="${y + 29}" x2="${x + w - 13}" y2="${y + 29}" stroke="${SS.accent}" stroke-width="1.4"/>`;
+  return o;
+}
+function ssText(x: number, y: number, t: string, fs = 10, fill = SS.ink, weight = "400", anchor = "start", extra = ""): string {
+  return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" fill="${fill}" font-size="${fs}" font-weight="${weight}" text-anchor="${anchor}" font-family="${SS.font}"${extra ? " " + extra : ""}>${ssEsc(t)}</text>`;
+}
+// Only CONSTRAIN over-wide text (compress) — never stretch short text. Returns a textLength attr or "".
+function ssFit(t: string, fs: number, maxW: number): string {
+  return (String(t || "").length * fs * 0.56 > maxW) ? `textLength="${Math.max(8, maxW).toFixed(0)}" lengthAdjust="spacingAndGlyphs"` : "";
+}
+// small ✓ medallion used by the key-features list
+function ssCheck(cx: number, cy: number, r = 7): string {
+  return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${SS.ok}"/><path d="M${cx - r * 0.45} ${cy} L${cx - r * 0.1} ${cy + r * 0.4} L${cx + r * 0.5} ${cy - r * 0.45}" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
+}
+
+// Per-type banner heading + sub-line.
+function ssTitleFor(type: string): { title: string; sub: string } {
+  const t = (type || "").toLowerCase();
+  if (t.includes("kitchen")) return { title: "Kitchen Design", sub: "Functional · Minimal · Timeless — built for everyday living" };
+  if (t.includes("wardrobe")) return { title: "Wardrobe — Design & Details", sub: "Sliding / openable shutters · soft-close · optimised storage" };
+  if (t.includes("vanity") || t.includes("dress")) return { title: "Dressing / Vanity Unit", sub: "Mirror · storage · designer profile lighting" };
+  if (t.includes("lcd") || t.includes("tv")) return { title: "Modular TV Unit Design", sub: "Modern · Minimal · Functional" };
+  if (t.includes("crockery")) return { title: "Crockery Unit Design", sub: "Display · storage · soft-close hardware" };
+  if (t.includes("mandir") || t.includes("temple") || t.includes("pooja") || t.includes("puja")) return { title: "Mandir Design", sub: "Traditional jali · concealed LED · CNC detail" };
+  if (t.includes("wall panel") || t.includes("panel") || t.includes("cladding")) return { title: "Wall Panel Design", sub: "Fluted panel · marble · display niche · LED" };
+  return { title: type || "Design", sub: "Modern · Functional · Elegant" };
+}
+
+// Material palette swatches per type (name, sub-line, fill, optional fluted overlay).
+function ssMaterials(type: string, layout: any): { name: string; sub: string; fill: string; flute?: boolean; glass?: boolean }[] {
+  const t = (type || "").toLowerCase();
+  const fin = String((layout && layout.finish) || "").toLowerCase();
+  const walnut = { name: "Wood Finish", sub: "Walnut", fill: "#6b4a2f", flute: true };
+  const lam = { name: "Matte Laminate", sub: "Beige", fill: "#d8c9b0" };
+  const quartz = { name: "Quartz Stone", sub: "Calacatta", fill: "#ece7dd" };
+  const led = { name: "LED Strip", sub: "Warm White", fill: "#f3d9a0" };
+  const ali = { name: "Aluminium Profile", sub: "Champagne", fill: "#c7a96a" };
+  const mirror = { name: "Designer Mirror", sub: "5 mm", fill: "#cfe6ee", glass: true };
+  const glass = { name: "Tinted Glass", sub: "Black", fill: "#2a2f36", glass: true };
+  const marble = { name: "Marble / UV Sheet", sub: "Vitrified", fill: "#ece7dd" };
+  const teak = { name: "Laminate Finish", sub: "Teak Wood", fill: "#7a4a25", flute: true };
+  const jali = { name: "MDF Jali", sub: "PU Off-White", fill: "#efe9dd" };
+  const brass = { name: "Knob / Profile", sub: "Brass Gold", fill: "#b0892f" };
+  const acr = { name: "Acrylic Finish", sub: fin.includes("acrylic") ? "High Gloss" : "White", fill: "#f2efe9" };
+  if (t.includes("kitchen")) return [lam, walnut, quartz, { name: "Fluted Tiles", sub: "Off White", fill: "#efe9dd", flute: true }, led];
+  if (t.includes("wardrobe")) return [{ name: "Pre-Lam Board", sub: "Light Beige", fill: "#d8c9b0" }, { name: "Wood Texture", sub: "Walnut Band", fill: "#8a5a36", flute: true }, ali, mirror, led];
+  if (t.includes("lcd") || t.includes("tv")) return [{ name: "MDF Laminate", sub: "Matte", fill: "#d8c9b0" }, { name: "Fluted WPC", sub: "Wood", fill: "#6b4a2f", flute: true }, marble, glass, led, ali];
+  if (t.includes("mandir") || t.includes("temple") || t.includes("puja") || t.includes("pooja")) return [teak, { name: "Acrylic Sheet", sub: "Marble", fill: "#ece7dd" }, jali, brass, led];
+  if (t.includes("panel") || t.includes("cladding")) return [{ name: "WPC Fluted", sub: "Wood Finish", fill: "#6b4a2f", flute: true }, marble, { name: "Laminate", sub: "Shelf & Niche", fill: "#7a4a25" }, led];
+  if (t.includes("vanity") || t.includes("dress")) return [{ name: "Laminate", sub: "Walnut", fill: "#6b4a2f", flute: true }, acr, mirror, ali, led];
+  if (t.includes("crockery")) return [lam, { name: "Wood Finish", sub: "Walnut", fill: "#6b4a2f", flute: true }, { name: "Glass Shutter", sub: "Frosted", fill: "#cfe6ee", glass: true }, led];
+  return [lam, walnut, quartz, led];
+}
+
+// Specifications rows (label, value) derived from the layout.
+function ssSpecs(type: string, layout: any): [string, string][] {
+  const t = (type || "").toLowerCase();
+  const rows: [string, string][] = [];
+  if (t.includes("kitchen")) {
+    const runs = (layout.runs || []).filter((r: any) => r.length);
+    const lens = runs.map((r: any) => Math.round(r.length)).join(" + ");
+    rows.push(["Layout", type]);
+    if (lens) rows.push(["Run length", lens + " mm"]);
+    rows.push(["Worktop height", String(STD.baseHeight) + " mm (FFL)"]);
+    rows.push(["Base / Wall depth", STD.baseDepth + " / " + STD.wallDepth + " mm"]);
+    rows.push(["Carcass", "18 mm BWP plywood"]);
+    rows.push(["Shutter", "18 mm laminate / acrylic / PU"]);
+    rows.push(["Countertop", "20 mm quartz / granite"]);
+    rows.push(["Backsplash", "6 mm toughened glass / tiles"]);
+    rows.push(["Handle", String(layout.handle || "D Handle")]);
+    rows.push(["Hardware", "Soft-close hinges & telescopic channels"]);
+    if (layout.applianceBrand) rows.push(["Appliances", String(layout.applianceBrand)]);
+  } else {
+    const u = layout.furniture || {};
+    const W = Math.round(u.widthMM || (layout.runs && layout.runs[0] && layout.runs[0].length) || 0);
+    const H = Math.round(u.heightMM || 0), D = Math.round(u.depthMM || 0);
+    if (W && H) rows.push(["Overall size", W + " (W) × " + H + " (H)" + (D ? " × " + D + " (D)" : "") + " mm"]);
+    rows.push(["Carcass", "18 mm HDHMR / BWP plywood"]);
+    rows.push(["Back panel", "6–8 mm pre-laminated / MDF"]);
+    rows.push(["Shutter / Front", "18 mm laminate / acrylic"]);
+    if (u.loftMM) rows.push(["Loft / Top storage", Math.round(u.loftMM) + " mm"]);
+    rows.push(["Edge band", "1 mm PVC"]);
+    rows.push(["Hardware", "Soft-close hinges & telescopic channels"]);
+    rows.push(["Finish", "Matte laminate / wood texture"]);
+    rows.push(["Lighting", "Warm-white LED profile (optional)"]);
+  }
+  return rows;
+}
+
+// Key-feature chips per type.
+function ssFeatures(type: string): string[] {
+  const t = (type || "").toLowerCase();
+  if (t.includes("kitchen")) return ["Ergonomic work-triangle", "Soft-close hardware", "Ample storage", "Easy-to-clean surfaces", "Integrated appliances", "Durable & long-lasting"];
+  if (t.includes("wardrobe")) return ["Optimised hanging & shelving", "Soft-close drawers", "Sliding-track system", "Loft storage", "Scratch-resistant finish"];
+  if (t.includes("mandir") || t.includes("temple")) return ["Traditional jali detail", "Concealed warm LED", "Acrylic marble back", "Storage drawer", "Wall-mounted"];
+  if (t.includes("panel") || t.includes("cladding")) return ["Fluted texture accent", "Display niche with LED", "Floating shelf", "Marble / UV feature", "Customisable size"];
+  if (t.includes("tv") || t.includes("lcd")) return ["Open & closed storage", "Concealed cable management", "Warm LED ambience", "Premium textures", "Wall-mounted clean look"];
+  return ["Premium materials", "Soft-close hardware", "Ample storage", "Easy maintenance", "Durable & long-lasting"];
+}
+
+// Short notes (right column) per type.
+function ssNotes(type: string): string[] {
+  const t = (type || "").toLowerCase();
+  const base = ["All dimensions are in millimetres (mm).", "Dimensions for reference — verify on site before execution.", "Follow carpenter / shop drawings for final cutting."];
+  if (t.includes("kitchen")) return ["Counter height 850 mm from FFL.", "Wall-cabinet sill 1450 mm; loft above.", ...base.slice(0, 2)];
+  if (t.includes("mandir") || t.includes("temple")) return ["LED strip concealed in top & side grooves.", "Acrylic back panel with CNC-cut design.", "Provide a 5 A power socket behind the unit.", base[1]];
+  if (t.includes("panel") || t.includes("cladding")) return ["WPC fluted panel thickness 12 mm.", "Floating-shelf load capacity as per wall support.", "Design customisable to wall width & height.", base[1]];
+  return base;
+}
+
+// Component schedule for the annotated hero (label + centre fraction 0..1 along the run width).
+function ssSchedule(type: string, layout: any): { label: string; frac: number }[] {
+  const t = (type || "").toLowerCase();
+  const out: { label: string; frac: number }[] = [];
+  if (t.includes("kitchen")) {
+    const run = (layout.runs || []).find((r: any) => (r.base || []).length) || (layout.runs || [])[0];
+    if (!run || !run.length) return out;
+    const L = run.length, seen = new Set<string>();
+    const KIND: Record<string, string> = { sink: "Sink", hob: "Hob / Cooktop", chimney: "Chimney", fridge: "Refrigerator", "tall-fridge": "Refrigerator", "tall-pantry": "Tall Pantry", "tall-hiunit": "Oven Tower", "tall-utility": "Utility Tall Unit", "drawer-atta": "Atta Drawer", corner: "Corner Unit", dishwasher: "Dishwasher" };
+    for (const c of (run.base || [])) {
+      let lbl = KIND[c.kind];
+      if (!lbl && c.kind === "drawer3" && apptOn(GEN.hob)) lbl = "Hob / Cooktop";
+      if (!lbl) continue;
+      if (seen.has(lbl)) continue; seen.add(lbl);
+      out.push({ label: lbl, frac: Math.min(0.98, Math.max(0.02, (c.x + c.w / 2) / L)) });
+    }
+    if (!seen.has("Wall Cabinets") && (run.wallCabs || []).length) { const wc = run.wallCabs[Math.floor(run.wallCabs.length / 2)]; out.push({ label: "Wall Cabinets", frac: Math.min(0.98, Math.max(0.02, (wc.x + wc.w / 2) / L)) }); }
+  } else {
+    const u = layout.furniture; if (!u || !u.columns) return out;
+    const seen = new Set<string>(); const KIND: Record<string, string> = { hang: "Hanging Rod", shelf: "Shelves", drawer: "Drawers", glass: "Glass Display", tv: "TV Recess", mirror: "Mirror", basin: "Wash Basin", open: "Open Display", door: "Cabinet", jali: "Jali Panel", niche: "Display Niche", puja: "Puja Space" };
+    let x = 0;
+    for (const col of u.columns) {
+      const cx = x + col.wMM / 2;
+      for (const cell of (col.cells || [])) {
+        const lbl = KIND[cell.kind]; if (!lbl || seen.has(lbl)) continue; seen.add(lbl);
+        out.push({ label: lbl, frac: Math.min(0.98, Math.max(0.02, cx / (u.widthMM || 1))) });
+      }
+      x += col.wMM;
+    }
+    if (u.loftMM > 0 && !seen.has("Loft")) out.push({ label: "Loft", frac: 0.5 });
+  }
+  out.sort((a, b) => a.frac - b.frac);
+  return out.slice(0, 8);
+}
+
+const SHEET_W = 1240;        // fixed presentation-sheet width (px)
+// Build the full presentation spec sheet for a generated layout.
+function specSheet(layout: any, meta: { type?: string; id?: string } = {}): string {
+  const type = meta.type || layout.designType || layout.type || "Modular Kitchen";
+  const W = SHEET_W, M = 22, gut = 16;
+  const innerW = W - M * 2;
+  const parts: string[] = [];
+  const { title, sub } = ssTitleFor(type);
+  let y = M;
+
+  // ── 1. Banner ───────────────────────────────────────────────────────────
+  const bH = 78;
+  parts.push(`<rect x="${M}" y="${y}" width="${innerW}" height="${bH}" rx="3" fill="${SS.band}"/>`);
+  parts.push(ssText(M + 22, y + 38, title.toUpperCase(), 30, SS.bandInk, "800"));
+  parts.push(ssText(M + 23, y + 60, sub, 11.5, "#c9c0ad", "400"));
+  parts.push(ssText(W - M - 18, y + 32, MKW.name, 12, "#e9e1cd", "700", "end"));
+  parts.push(ssText(W - M - 18, y + 50, "2D Drawing · Plan · Elevation · Detail", 9.5, "#b3a98f", "400", "end"));
+  parts.push(ssText(W - M - 18, y + 66, MKW.area, 9, "#9b917a", "400", "end"));
+  y += bH + gut;
+
+  // ── 2. Hero (annotated elevation) + right column (palette + highlights) ──
+  const heroW = Math.round(innerW * 0.62), rcX = M + heroW + gut, rcW = innerW - heroW - gut;
+  const heroH = 360;
+  const heroSvg = (layout.elevations && layout.elevations[0] && layout.elevations[0].svg) || layout.planSvg || "";
+  parts.push(ssCard(M, y, heroW, heroH, "Annotated Elevation"));
+  // embed area + numbered component schedule
+  const ex = M + 12, ey = y + 38, ew = heroW - 24, eh = heroH - 84;
+  parts.push(ssEmbed(heroSvg, ex, ey, ew, eh));
+  const sched = ssSchedule(type, layout);
+  if (heroSvg && sched.length) {
+    const mt = ssMeet(heroSvg, ex, ey, ew, eh);
+    const t = (type || "").toLowerCase();
+    const isKit = t.includes("kitchen");
+    const padL = isKit ? 60 : 50, padSum = isKit ? 190 : 80;
+    const drawPx = mt.w - padSum;
+    sched.forEach((s, i) => {
+      const sx = mt.ox + (padL + s.frac * drawPx) * mt.k;
+      const topY = mt.oy + 6;
+      parts.push(`<line x1="${sx.toFixed(1)}" y1="${topY.toFixed(1)}" x2="${sx.toFixed(1)}" y2="${(topY + 16).toFixed(1)}" stroke="${SS.accent}" stroke-width="0.8"/>`);
+      parts.push(`<circle cx="${sx.toFixed(1)}" cy="${topY.toFixed(1)}" r="8" fill="${SS.band}"/>`);
+      parts.push(ssText(sx, topY + 3.2, String(i + 1), 9, "#fff", "700", "middle"));
+    });
+    // legend strip along the card bottom
+    const lyY = y + heroH - 32;
+    parts.push(`<line x1="${M + 13}" y1="${lyY - 8}" x2="${M + heroW - 13}" y2="${lyY - 8}" stroke="${SS.hair}" stroke-width="1"/>`);
+    const perRow = Math.ceil(sched.length / 2), colW = (heroW - 26) / perRow;
+    sched.forEach((s, i) => {
+      const row = Math.floor(i / perRow), col = i % perRow;
+      const lx = M + 15 + col * colW, ly = lyY + row * 15;
+      parts.push(`<circle cx="${lx + 6}" cy="${ly - 3}" r="6.5" fill="${SS.band}"/>`);
+      parts.push(ssText(lx + 6, ly - 0.2, String(i + 1), 8, "#fff", "700", "middle"));
+      parts.push(ssText(lx + 17, ly, s.label, 9, SS.ink, "400", "start", ssFit(s.label, 9, colW - 26)));
+    });
+  }
+  // right column: material palette
+  const mats = ssMaterials(type, layout);
+  const palH = 200;
+  parts.push(ssCard(rcX, y, rcW, palH, "Material Palette"));
+  const swPerRow = 3, swGap = 10, swW = (rcW - 26 - swGap * (swPerRow - 1)) / swPerRow, swH = 52;
+  const flutes: string[] = [];
+  mats.forEach((m, i) => {
+    const r = Math.floor(i / swPerRow), c = i % swPerRow;
+    const sx = rcX + 13 + c * (swW + swGap), sy = y + 40 + r * (swH + 30);
+    parts.push(`<rect x="${sx.toFixed(1)}" y="${sy}" width="${swW.toFixed(1)}" height="${swH}" rx="2" fill="${m.fill}" stroke="${SS.line}" stroke-width="0.8"/>`);
+    if (m.flute) for (let f = 1; f < 7; f++) parts.push(`<line x1="${(sx + swW * f / 7).toFixed(1)}" y1="${sy}" x2="${(sx + swW * f / 7).toFixed(1)}" y2="${sy + swH}" stroke="#00000022" stroke-width="1"/>`);
+    if (m.glass) parts.push(`<line x1="${sx.toFixed(1)}" y1="${sy + swH}" x2="${(sx + swW * 0.5).toFixed(1)}" y2="${sy}" stroke="#ffffff55" stroke-width="2"/>`);
+    parts.push(ssText(sx, sy + swH + 12, m.name, 8.6, SS.ink, "700", "start", ssFit(m.name, 8.6, swW)));
+    parts.push(ssText(sx, sy + swH + 23, m.sub, 8, SS.sub, "400"));
+  });
+  // right column: design highlights
+  const hlY = y + palH + gut, hlH = heroH - palH - gut;
+  parts.push(ssCard(rcX, hlY, rcW, hlH, "Design Highlights"));
+  const feats = ssFeatures(type);
+  feats.slice(0, Math.floor((hlH - 40) / 22)).forEach((f, i) => {
+    const fy = hlY + 50 + i * 22;
+    parts.push(ssCheck(rcX + 20, fy - 3.5));
+    parts.push(ssText(rcX + 35, fy, f, 10, SS.ink, "400"));
+  });
+  parts.push(flutes.join(""));
+  y += heroH + gut;
+
+  // ── 3. Plan (top view) ───────────────────────────────────────────────────
+  if (layout.planSvg) {
+    const pd = ssViewDim(layout.planSvg);
+    const planH = Math.min(280, Math.max(150, Math.round(innerW * (pd.h / (pd.w || 1)) * 0.5)));
+    parts.push(ssCard(M, y, innerW, planH, "Plan — Top View"));
+    parts.push(ssEmbed(layout.planSvg, M + 14, y + 36, innerW - 28, planH - 48));
+    y += planH + gut;
+  }
+
+  // ── 4. Elevation(s) — front view (embedded; carries its own dim chains) ───
+  const elevs = (layout.elevations || []);
+  if (elevs.length) {
+    const elH = 280;
+    parts.push(ssCard(M, y, innerW, elH, "Elevation — Front View"));
+    const n = Math.min(elevs.length, 3);
+    const cw = (innerW - 28 - (n - 1) * 12) / n;
+    for (let i = 0; i < n; i++) {
+      const cx = M + 14 + i * (cw + 12);
+      parts.push(ssEmbed(elevs[i].svg, cx, y + 36, cw, elH - 60));
+      parts.push(ssText(cx + cw / 2, y + elH - 12, ssEsc(elevs[i].name || ("View " + (i + 1))), 9, SS.sub, "600", "middle"));
+    }
+    y += elH + gut;
+  }
+
+  // ── 5. Specifications + Key features / notes ──────────────────────────────
+  const specRows = ssSpecs(type, layout), notes = ssNotes(type);
+  const specH = Math.max(190, 52 + specRows.length * 19);
+  const halfW = (innerW - gut) / 2;
+  parts.push(ssCard(M, y, halfW, specH, "Specifications & Materials"));
+  specRows.forEach((r, i) => {
+    const ry = y + 50 + i * 19;
+    parts.push(ssText(M + 16, ry, r[0], 9.5, SS.sub, "600"));
+    parts.push(ssText(M + 150, ry, r[1], 9.5, SS.ink, "400", "start", ssFit(r[1], 9.5, halfW - 165)));
+    if (i < specRows.length - 1) parts.push(`<line x1="${M + 16}" y1="${ry + 6}" x2="${M + halfW - 16}" y2="${ry + 6}" stroke="${SS.hair}" stroke-width="0.7"/>`);
+  });
+  // right: notes
+  const nX = M + halfW + gut;
+  parts.push(ssCard(nX, y, halfW, specH, "Notes & Specifications"));
+  notes.forEach((nt, i) => {
+    const ry = y + 50 + i * 22;
+    parts.push(`<circle cx="${nX + 19}" cy="${ry - 3}" r="2.4" fill="${SS.accent}"/>`);
+    parts.push(ssText(nX + 30, ry, nt, 9.5, SS.ink, "400", "start", ssFit(nt, 9.5, halfW - 46)));
+  });
+  y += specH + gut;
+
+  // ── 6. Branded title footer ──────────────────────────────────────────────
+  const fH = 50, today = new Date().toISOString().slice(0, 10);
+  const idS = meta.id ? meta.id.slice(0, 8).toUpperCase() : "";
+  parts.push(`<rect x="${M}" y="${y}" width="${innerW}" height="${fH}" rx="3" fill="${SS.band}"/>`);
+  if (MKW_LOGO_B64) parts.push(`<image x="${M + 12}" y="${y + 7}" width="40" height="36" preserveAspectRatio="xMidYMid meet" href="${MKW_LOGO_B64}"/>`);
+  parts.push(ssText(M + 62, y + 22, MKW.name, 12.5, SS.bandInk, "700"));
+  parts.push(ssText(M + 62, y + 39, MKW.phone + "  ·  " + MKW.email + "  ·  " + MKW.cta, 9.5, "#c9c0ad", "400"));
+  parts.push(ssText(W - M - 16, y + 22, type, 11, "#e9e1cd", "700", "end"));
+  parts.push(ssText(W - M - 16, y + 39, "DATE " + today + (idS ? "   ·   SHEET " + idS : "") + "   ·   PRESENTATION 2D", 9, "#b3a98f", "400", "end"));
+  y += fH + M;
+
+  const H = y;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="${SS.font}"><rect width="${W}" height="${H}" fill="${SS.bg}"/>${parts.join("")}</svg>`;
+}
+
 // ── Production panel cut list (12.pdf §5.7.12) — per-cabinet carcass panels for
 //    factory cutting (NOT sheet-nesting/optimization, which is forbidden). Each
 //    row: Height × Width × Qty × Description, 18 mm board, 3 mm shutter gaps. ──
@@ -3510,6 +3832,19 @@ app.get("/api/designs/:id/export.svg", (c) => {
   c.header("Content-Disposition", `attachment; filename="${fname}"`);
   return c.body(combinedSvg(d.layout, { type: d.row.designType, id: d.row.id }));
 });
+// Presentation spec sheet (StudioNuvique-style 2D drawing). inline=1 → render in
+// the browser preview (no download header); default → attachment for the PDF/SVG save.
+app.get("/api/designs/:id/spec-sheet.svg", (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  const svg = specSheet(d.layout, { type: d.row.designType, id: d.row.id });
+  c.header("Content-Type", "image/svg+xml");
+  if (c.req.query("inline") !== "1") {
+    const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-spec-sheet.svg`;
+    c.header("Content-Disposition", `attachment; filename="${fname}"`);
+  }
+  return c.body(svg);
+});
 app.get("/api/designs/:id/export.dxf", (c) => {
   const d = loadDesign(c.req.param("id"));
   if (!d) return c.json({ error: "Design not found" }, 404);
@@ -3923,6 +4258,22 @@ const frontendHTML = `<!DOCTYPE html>
       return rows;
     };
     // drawn as NATIVE jsPDF vector text — sharp and a fraction of the file size.
+    // ── Presentation spec sheet (StudioNuvique-style 2D drawing) — fetch the server-composed SVG,
+    //    preview it inline, or rasterize it to a single-page PDF. ──
+    const fetchSpecSheet = async (result) => {
+      const r = await fetch("/api/designs/" + result.id + "/spec-sheet.svg?inline=1");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return await r.text();
+    };
+    const exportSpecSheetPdf = async (result, type) => {
+      const jsPDF = window.jspdf && window.jspdf.jsPDF;
+      if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
+      const svg = await fetchSpecSheet(result);
+      const { dataUrl, w, h } = await svgToPng(svg, 2);
+      const pdf = new jsPDF({ orientation: w >= h ? "landscape" : "portrait", unit: "pt", format: [w, h] });
+      pdf.addImage(dataUrl, "PNG", 0, 0, w, h);
+      await saveBlobAs(pdf.output("blob"), (type + "-" + ((result.id || "design") + "").slice(0, 8) + "-spec-sheet.pdf").replace(/[^\\w.-]/g, "_"));
+    };
     const exportDesignPdf = async (result, type) => {
       const jsPDF = window.jspdf && window.jspdf.jsPDF;
       if (!jsPDF) throw new Error("jsPDF not loaded");
@@ -6630,6 +6981,9 @@ const frontendHTML = `<!DOCTYPE html>
       const [reasoning, setReasoning] = useState("");
       const [streaming, setStreaming] = useState(false);
       const [pdfBusy, setPdfBusy] = useState(false);
+      const [specSvg, setSpecSvg] = useState(null);     // presentation spec-sheet preview SVG
+      const [specBusy, setSpecBusy] = useState(false);
+      const openSpecSheet = async (result) => { setSpecBusy(true); try { setSpecSvg(await fetchSpecSheet(result)); } catch (e) { alert("Spec sheet failed: " + (e && e.message)); } setSpecBusy(false); };
       const [editRun, setEditRun] = useState(0);
       const [activeView, setActiveView] = useState(0);   // Project Tree selection: 'plan' | run index
       React.useEffect(() => { if (activeView !== "3d") last2dRef.current = activeView; }, [activeView]);   // 5.12: remember last 2D view
@@ -7168,6 +7522,21 @@ const frontendHTML = `<!DOCTYPE html>
             {result && result.error && <p className="text-red-600 text-sm">{result.error}</p>}
             {result && !result.error && (
               <div className="fade-in space-y-4">
+                {specSvg && (
+                  <div onClick={() => setSpecSvg(null)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.78)", zIndex: 60, overflow: "auto", padding: 18 }}>
+                    <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: 1300, margin: "0 auto", background: "#fff", borderRadius: 8, padding: 12, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold text-slate-700 text-sm">📄 Presentation Spec Sheet — {type}</span>
+                        <div className="flex gap-2">
+                          <button onClick={async () => { setSpecBusy(true); try { await exportSpecSheetPdf(result, type); } catch (e) { console.error(e); } setSpecBusy(false); }} disabled={specBusy} className="px-2.5 py-1 text-xs font-medium bg-rose-600 hover:bg-rose-500 text-white rounded disabled:opacity-50">⬇ PDF</button>
+                          <a href={"/api/designs/" + result.id + "/spec-sheet.svg"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/spec-sheet.svg", (type + "-spec-sheet.svg").replace(/[^\\w.-]/g, "_")); }} className="px-2.5 py-1 text-xs font-medium bg-slate-200 hover:bg-slate-300 text-slate-700 rounded">⬇ SVG</a>
+                          <button onClick={() => setSpecSvg(null)} className="px-2.5 py-1 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white rounded">✕ Close</button>
+                        </div>
+                      </div>
+                      <div style={{ width: "100%", overflow: "auto", border: "1px solid #e2e8f0", borderRadius: 4 }} dangerouslySetInnerHTML={{ __html: specSvg }} />
+                    </div>
+                  </div>
+                )}
                 <div className="flex gap-2">
                   {/* 18.pdf §6: exports ask WHERE to save (native Save As / name dialog) — no silent downloads */}
                   <a href={"/api/designs/" + result.id + "/export.svg"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/export.svg", (type + "-" + result.id.slice(0, 8) + ".svg").replace(/[^\\w.-]/g, "_")); }}
@@ -7176,6 +7545,10 @@ const frontendHTML = `<!DOCTYPE html>
                     className="px-3 py-1.5 text-xs font-medium bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200 text-slate-800">⬇ Export DXF (mm)</a>
                   <button onClick={async () => { setPdfBusy(true); try { await exportDesignPdf(result, type); } catch (e) { console.error(e); } setPdfBusy(false); }} disabled={pdfBusy}
                     className="px-3 py-1.5 text-xs font-medium bg-rose-600 hover:bg-rose-500 text-white rounded-lg disabled:opacity-50">{pdfBusy ? "Building PDF…" : "⬇ Export PDF"}</button>
+                  <button onClick={() => openSpecSheet(result)} disabled={specBusy}
+                    className="px-3 py-1.5 text-xs font-medium bg-amber-700 hover:bg-amber-600 text-white rounded-lg disabled:opacity-50">{specBusy ? "Building…" : "📄 Spec Sheet"}</button>
+                  <button onClick={async () => { setSpecBusy(true); try { await exportSpecSheetPdf(result, type); } catch (e) { console.error(e); } setSpecBusy(false); }} disabled={specBusy}
+                    className="px-3 py-1.5 text-xs font-medium bg-amber-800 hover:bg-amber-700 text-white rounded-lg disabled:opacity-50">⬇ Spec Sheet PDF</button>
                   {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/cutlist.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/cutlist.csv", (type + "-" + result.id.slice(0, 8) + "-cutlist.csv").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg">⬇ Cut List (CSV)</a>}
                   {type.indexOf("Kitchen") >= 0 && <a href={"/api/designs/" + result.id + "/hardware.csv"} onClick={(e) => { e.preventDefault(); saveUrlAs("/api/designs/" + result.id + "/hardware.csv", (type + "-" + result.id.slice(0, 8) + "-hardware.csv").replace(/[^\\w.-]/g, "_")); }}
