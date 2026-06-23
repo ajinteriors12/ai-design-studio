@@ -65,6 +65,21 @@ const g2 = await POST("/api/generate", { designType: "Straight Kitchen", wall: 3
 const q2 = await j("/api/designs/" + g2.data.id + "/quote");
 ok("no-override design has no Custom finish line (regression)", !q2.data.lines.some((l) => /Custom · per-cabinet/.test(l.item)));
 
+// painted-cabinets list (review panel) + clear-all
+const g3 = await POST("/api/generate", { designType: "L-Shape Kitchen", wall: 2400, wallB: 1800 });
+const id3 = g3.data.id;
+const bi3 = g3.data.runs[0].base.findIndex((c) => c.kind !== "filler" && c.kind !== "sidepanel" && c.kind !== "chimney" && c.kind !== "hob");
+const wbi3 = (g3.data.runs[0].wallCabs || []).findIndex((c) => c.kind !== "filler" && c.kind !== "sidepanel" && c.kind !== "chimney");
+await PUT("/api/designs/" + id3 + "/material", { ...m1, scope: "cabinet", cabinetKey: "base:0:" + bi3 });
+if (wbi3 >= 0) await PUT("/api/designs/" + id3 + "/material", { ...m1, scope: "cabinet", cabinetKey: "wall:0:" + wbi3 });
+const lst = await j("/api/designs/" + id3 + "/cabinet-materials");
+ok("cabinet-materials lists every override", lst.data.length === (wbi3 >= 0 ? 2 : 1), lst.data.length + " listed");
+ok("override rows carry a resolved label (not the raw key)", lst.data[0] && lst.data[0].label && !lst.data[0].label.includes(":"), lst.data[0] && lst.data[0].label);
+await PUT("/api/designs/" + id3 + "/material", { ...m1, scope: "cabinet", cabinetKey: "base:0:" + bi3, clear: true });
+ok("clearing one leaves the rest", (await j("/api/designs/" + id3 + "/cabinet-materials")).data.length === (wbi3 >= 0 ? 1 : 0));
+await PUT("/api/designs/" + id3 + "/material", { scope: "cabinet", clearAll: true });
+ok("clearAll wipes every override", (await j("/api/designs/" + id3 + "/cabinet-materials")).data.length === 0);
+
 // ── headless UI: Paint mode + live 3D re-skin ─────────────────────────────────
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: "new", protocol: "pipe", args: ["--no-sandbox", "--disable-dev-shm-usage", "--headless=new", "--use-gl=angle", "--use-angle=swiftshader", "--ignore-gpu-blocklist"], timeout: 60000 });
 try {
@@ -108,6 +123,17 @@ try {
   let skinned = false;
   for (let i = 0; i < 20; i++) { await sleep(300); skinned = await page.evaluate(() => window.__adsCabMatN() >= 1); if (skinned) break; }
   ok("live 3D scene ingested the per-cabinet override", skinned, "before=" + before);
+
+  // the Material Catalog shows the "Painted cabinets" review panel for the override we just applied
+  await clickByText(page, /🎨 Material Catalog/);
+  let panel = false;
+  for (let i = 0; i < 20; i++) { await sleep(300); panel = await page.evaluate(() => /Painted cabinets \(\d+\)/.test(document.body.innerText)); if (panel) break; }
+  ok("Painted cabinets review panel lists the override", panel);
+  // clear-all empties the panel
+  await clickByText(page, /Clear all/);
+  let gone = false;
+  for (let i = 0; i < 16; i++) { await sleep(300); gone = await page.evaluate(() => !/Painted cabinets \(/.test(document.body.innerText)); if (gone) break; }
+  ok("Clear all removes the painted-cabinets panel", gone);
 
   ok("no console/page errors during UI flow", errors.length === 0, errors.slice(0, 3).join(" | "));
 } finally { await browser.close(); }

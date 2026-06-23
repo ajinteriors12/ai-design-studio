@@ -7909,7 +7909,17 @@ const frontendHTML = `<!DOCTYPE html>
       };
       const [matHarmony, setMatHarmony] = useState(null);   // §5 colour-harmony suggestions
       const [matHistory, setMatHistory] = useState([]);     // §11 material change history
+      const [paintedCabs, setPaintedCabs] = useState([]);   // §2 per-cabinet overrides (review / clear)
       const loadHistory = () => { if (result && result.id) fetch("/api/designs/" + result.id + "/material-history").then((r) => r.json()).then((j) => setMatHistory(j.data || [])).catch(() => {}); };
+      const loadPaintedCabs = () => { if (result && result.id) fetch("/api/designs/" + result.id + "/cabinet-materials").then((r) => r.json()).then((j) => setPaintedCabs(j.data || [])).catch(() => {}); };
+      const clearPaintedCab = (body, label) => {
+        if (!result || !result.id) return;
+        fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "cabinet", ...body }) }).then(() => {
+          if (typeof refreshQuote === "function") refreshQuote(); loadHistory(); loadPaintedCabs();
+          try { window.dispatchEvent(new CustomEvent("ads-material", { detail: { designId: result.id } })); } catch (e) {}   // §2: re-skin live 3D after clearing
+          setMatPicked({ brand: "Cleared", colorName: label, code: "✕", colorCode: "#94a3b8" });
+        }).catch(() => {});
+      };
       const revertMaterial = (hid) => { if (!result || !result.id) return; fetch("/api/designs/" + result.id + "/material-revert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ historyId: hid }) }).then((r) => r.json()).then(() => { if (typeof refreshQuote === "function") refreshQuote(); loadHistory(); setMatPicked({ brand: "Reverted to", colorName: "a previous material", code: "↩", colorCode: "#64748b" }); }).catch(() => {}); };
       // §7 comparison — up to 4 materials side-by-side on a cabinet silhouette
       const [compare, setCompare] = useState([]);
@@ -7949,7 +7959,7 @@ const frontendHTML = `<!DOCTYPE html>
             const body = perCab ? { ...m, scope: "cabinet", cabinetKey: matCabKey } : { ...m, scope: matScope };
             fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(() => {
               if (typeof refreshQuote === "function") refreshQuote(); loadHistory();
-              if (perCab) { try { window.dispatchEvent(new CustomEvent("ads-material", { detail: { designId: result.id } })); } catch (e) {} }   // §2: re-skin just-painted cabinet in the live 3D scene
+              if (perCab) { loadPaintedCabs(); try { window.dispatchEvent(new CustomEvent("ads-material", { detail: { designId: result.id } })); } catch (e) {} }   // §2: refresh panel + re-skin just-painted cabinet in the live 3D scene
             });
           }
         } catch (e) {}   // persist (scoped/per-cabinet) → flows into quote + sheet + 3D
@@ -7958,7 +7968,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [themes, setThemes] = useState([]);
       const [themeSel, setThemeSel] = useState("");
       const loadThemes = () => fetch("/api/themes").then((r) => r.json()).then((j) => setThemes(j.data || [])).catch(() => {});
-      React.useEffect(() => { if (matOpen) { loadThemes(); loadHistory(); } }, [matOpen]);
+      React.useEffect(() => { if (matOpen) { loadThemes(); loadHistory(); loadPaintedCabs(); } }, [matOpen]);
       const applyTheme = () => {
         if (!themeSel || !result || !result.id) return;
         fetch("/api/designs/" + result.id + "/apply-theme", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ themeId: themeSel }) }).then((r) => r.json()).then((j) => {
@@ -8635,6 +8645,21 @@ const frontendHTML = `<!DOCTYPE html>
                             ) : null)}
                           </div>
                           <div className="mt-1.5 text-[10px] text-slate-600">Countertop: <b>{matHarmony.pairing.countertop}</b> · Handle: <b>{matHarmony.pairing.handle}</b> · Backsplash: <b>{matHarmony.pairing.backsplash}</b></div>
+                        </div>
+                      )}
+                      {paintedCabs.length > 0 && (
+                        <div className="mt-2 p-2 bg-teal-50 border border-teal-200 rounded text-xs">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-semibold text-teal-800">🖌 Painted cabinets ({paintedCabs.length}) — per-cabinet finishes</span>
+                            <button onClick={() => clearPaintedCab({ clearAll: true }, "all painted cabinets")} className="text-[10px] px-1.5 py-0.5 bg-teal-200 hover:bg-teal-300 rounded text-teal-800 font-medium">Clear all</button>
+                          </div>
+                          <div className="space-y-0.5" style={{ maxHeight: 130, overflow: "auto" }}>
+                            {paintedCabs.map((pc) => <div key={pc.ck} className="flex items-center gap-2">
+                              <span style={{ background: pc.colorCode || "#e2e8f0", width: 12, height: 12, borderRadius: 2, display: "inline-block", border: "1px solid #cbd5e1" }}></span>
+                              <span className="text-slate-700 truncate flex-1"><b>{pc.label}</b> → {[pc.brand, pc.colorName].filter(Boolean).join(" ")}{pc.code ? " (" + pc.code + ")" : ""}</span>
+                              <button onClick={() => clearPaintedCab({ cabinetKey: pc.ck, clear: true }, pc.label)} title="Remove this cabinet's override" className="text-[10px] px-1.5 py-0.5 bg-rose-100 hover:bg-rose-200 rounded text-rose-700">✕</button>
+                            </div>)}
+                          </div>
                         </div>
                       )}
                       {matHistory.length > 0 && (
@@ -10151,6 +10176,18 @@ app.get("/api/designs/:id/quote.csv", (c) => {
 });
 // Per-design selected material (Material Management Module). Whitelisted catalog fields.
 app.get("/api/designs/:id/material", (c) => { const d = loadDesign(c.req.param("id")); if (!d) return c.json({ error: "Design not found" }, 404); return c.json({ data: designMaterial(c.req.param("id")) }); });
+// §2: list per-cabinet overrides, each resolved to its cabinet's label (for the "Painted cabinets" panel).
+app.get("/api/designs/:id/cabinet-materials", (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const cb = cabinetMaterials(id), out: any[] = [];
+  const labelFor = (ck: string) => {
+    const [section, ri, bi] = ck.split(":"); const run = (d.layout.runs || [])[+ri]; if (!run) return ck;
+    const cc = (section === "wall" ? (run.wallCabs || []) : (run.base || []))[+bi];
+    return cc ? ((cc.label || cc.kind) + (run.name ? " · " + run.name : "")) : ck;
+  };
+  for (const ck of Object.keys(cb)) { const m = cb[ck] || {}; out.push({ ck, label: labelFor(ck), brand: m.brand, colorName: m.colorName, code: m.code, colorCode: m.colorCode, finishType: m.finishType }); }
+  return c.json({ data: out });
+});
 app.put("/api/designs/:id/material", async (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
   const b = await c.req.json().catch(() => ({} as any));
@@ -10165,11 +10202,14 @@ app.put("/api/designs/:id/material", async (c) => {
   if (Object.keys(existingCab).length) cur.cabinets = { ...existingCab };   // preserve per-cabinet overrides across any material write
   let tag = "[" + scope + "]";
   if (scope === "cabinet") {
-    const ck = String(b.cabinetKey || "");
-    if (!CK_RE.test(ck)) return c.json({ error: "invalid cabinetKey" }, 400);
-    cur.cabinets = cur.cabinets || {};
-    if (b.clear) { delete cur.cabinets[ck]; if (!Object.keys(cur.cabinets).length) delete cur.cabinets; tag = "cleared cabinet " + ck; }
-    else { cur.cabinets[ck] = m; tag = "cabinet " + ck; }
+    if (b.clearAll) { delete cur.cabinets; tag = "cleared all cabinet overrides"; }   // §2: wipe every per-cabinet override
+    else {
+      const ck = String(b.cabinetKey || "");
+      if (!CK_RE.test(ck)) return c.json({ error: "invalid cabinetKey" }, 400);
+      cur.cabinets = cur.cabinets || {};
+      if (b.clear) { delete cur.cabinets[ck]; if (!Object.keys(cur.cabinets).length) delete cur.cabinets; tag = "cleared cabinet " + ck; }
+      else { cur.cabinets[ck] = m; tag = "cabinet " + ck; }
+    }
   } else if (scope === "all") { cur.base = m; cur.wall = m; cur.tall = m; }
   else { cur[scope] = m; }
   sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
