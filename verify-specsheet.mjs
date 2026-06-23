@@ -7,6 +7,15 @@ const ok = (n, c, e = "") => { console.log((c ? "PASS" : "FAIL") + " " + n + (e 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clickByText = (page, re) => page.evaluate((o) => { const r = new RegExp(o.s, o.f); const b = [...document.querySelectorAll("button,summary,a,li")].find((x) => r.test(x.textContent || "")); if (b) { b.click(); return true; } return false; }, { s: re.source, f: re.flags });
 
+// API smoke — every type (incl. the new Mandir / Wall Panel) returns a valid presentation sheet.
+const post = (p, b) => fetch(B + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b || {}) }).then((r) => r.json());
+for (const t of ["L-Shape Kitchen", "U-Shape Kitchen", "Wardrobe", "Vanity Unit", "LCD/TV Panel", "Crockery Unit", "Mandir", "Wall Panel"]) {
+  const d = (await post("/api/generate", { designType: t, wall: 1500, wallB: 2100 })).data;
+  const r = await fetch(B + "/api/designs/" + d.id + "/spec-sheet.svg?inline=1");
+  const svg = await r.text();
+  ok("spec sheet — " + t, r.status === 200 && svg.startsWith("<svg") && /MATERIAL PALETTE/.test(svg) && /SPECIFICATIONS/.test(svg));
+}
+
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: "new", protocol: "pipe", args: ["--no-sandbox", "--disable-dev-shm-usage", "--headless=new", "--use-gl=angle", "--use-angle=swiftshader", "--ignore-gpu-blocklist"], timeout: 60000 });
 try {
   const page = await browser.newPage();
@@ -42,6 +51,6 @@ try {
   await sleep(300);
   ok("modal closes", await page.evaluate(() => !/Presentation Spec Sheet/.test(document.body.innerText)));
   ok("no console/page errors", errors.length === 0, errors.slice(0, 2).join(" | "));
-} finally { await browser.close(); }
+} finally { try { await browser.close(); } catch (e) { /* pipe-protocol close can throw on Windows — teardown only, ignore */ } }
 console.log("\nRESULT " + pass + "/" + (pass + fail) + " passed");
 process.exit(fail ? 1 : 0);

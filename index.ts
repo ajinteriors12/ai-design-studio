@@ -219,6 +219,7 @@ const UPLOAD_EXT: Record<string, string> = {
 const DESIGN_TYPES = [
   "Straight Kitchen", "L-Shape Kitchen", "U-Shape Kitchen", "Parallel Kitchen",
   "Island Kitchen", "Peninsula Kitchen", "Wardrobe", "Vanity Unit", "LCD/TV Panel", "Crockery Unit",
+  "Mandir", "Wall Panel",
   "Office Furniture", "Study Table", "Bed Back Panel", "Reception Counter",
 ];
 
@@ -1527,14 +1528,34 @@ function buildFurniture(type: string, dims: { wall: number; wallB?: number; wall
   const w = dims.wall, h = dims.wallB ?? 2100;
   const isWardrobe = t.includes("wardrobe"), isCrockery = t.includes("crockery");
   const isTV = t.includes("lcd") || t.includes("tv"), isVanity = t.includes("vanity");
-  const depthMM = isTV ? 400 : isVanity ? 550 : (isWardrobe || isCrockery) ? 600 : 500;
+  const isMandir = t.includes("mandir") || t.includes("temple") || t.includes("puja") || t.includes("pooja");
+  const isPanel = t.includes("wall panel") || t.includes("cladding");
+  const depthMM = isMandir ? 350 : isPanel ? 250 : isTV ? 400 : isVanity ? 550 : (isWardrobe || isCrockery) ? 600 : 500;
   const loftMM = (isWardrobe || isCrockery) ? Math.min(500, Math.max(300, Math.round(h * 0.2))) : 0;
   const body = h - loftMM;
   const widths = tileEven(w, (dims as any).colTarget || 750);   // even shutter columns; colTarget lets a consensus strategy pack more (narrower) or fewer (wider) columns
 
   const applied: string[] = [];
   let columns: Column[];
-  if (isWardrobe) { columns = wardrobeColumns(widths, body); applied.push("Wardrobe: hanging + shelf + drawer columns with a loft band across the top."); }
+  let skipStorage = false;
+  if (isMandir) {
+    const side = Math.min(220, w * 0.24), ctr = w - side * 2;
+    columns = [
+      { wMM: side, cells: [{ kind: "jali", label: "Jali", hMM: body * 0.6 }, { kind: "shelf", label: "Shelf", hMM: body * 0.25 }, { kind: "drawer", label: "Drawer", hMM: 150 }] },
+      { wMM: ctr, cells: [{ kind: "puja", label: "Puja Space", hMM: body * 0.85 }, { kind: "drawer", label: "Drawer", hMM: 150 }] },
+      { wMM: side, cells: [{ kind: "jali", label: "Jali", hMM: body * 0.6 }, { kind: "shelf", label: "Shelf", hMM: body * 0.25 }, { kind: "drawer", label: "Drawer", hMM: 150 }] },
+    ];
+    skipStorage = true;
+    applied.push("Mandir: arched mehrab over an open puja space, MDF jali side panels, acrylic-marble back with a sun-ray motif, concealed LED, drawer below.");
+  } else if (isPanel) {
+    columns = [
+      { wMM: Math.round(w * 0.4), cells: [{ kind: "fluted", label: "WPC Fluted Panel", hMM: h }] },
+      { wMM: Math.round(w * 0.6), cells: [{ kind: "marble", label: "Marble Sheet", hMM: h }, { kind: "niche", label: "Display Niche", hMM: h * 0.5 }, { kind: "floatshelf", label: "Floating Shelf", hMM: 150 }] },
+    ];
+    skipStorage = true;
+    applied.push("Wall panel: WPC fluted feature band + marble/UV sheet, an LED display niche column and a floating shelf.");
+  }
+  else if (isWardrobe) { columns = wardrobeColumns(widths, body); applied.push("Wardrobe: hanging + shelf + drawer columns with a loft band across the top."); }
   else if (isCrockery) { columns = crockeryColumns(widths, body); applied.push("Crockery unit: lower drawers + cabinet, upper glass-shutter display, loft on top."); }
   else if (isTV) { columns = tvColumns(w, h); applied.push("TV/LCD panel: centred TV recess with a media drawer below, side display columns and a floating shelf."); }
   else if (isVanity) { columns = vanityColumns(widths, h); applied.push("Vanity unit: base storage with a wash-basin counter and a mirror cabinet above."); }
@@ -1542,19 +1563,22 @@ function buildFurniture(type: string, dims: { wall: number; wallB?: number; wall
 
   // Consensus storage mode (storage / balanced / display) genuinely changes the cell composition — works
   // for every furniture type incl. TV (whose column count ignores colTarget) so the 3 candidates differ.
-  columns = applyStorageMode(columns, (dims as any).storageMode || "balanced");
+  // (skipped for mandir/wall-panel whose composition is fixed by the design, not by storage strategy.)
+  if (!skipStorage) columns = applyStorageMode(columns, (dims as any).storageMode || "balanced");
 
   applied.push(`No 4-drawer cabinets: drawer stacks capped at ${STD.maxDrawers}.`);
   applied.push("Standard shutter widths + filler logic applied to the carcass.");
   applied.push("Hardware (hinges, channels, handles) placed to learned standards; 1 mm PVC edge-banding.");
 
   const unit: FurnitureUnit = { type, widthMM: w, heightMM: h, depthMM, loftMM, columns };
+  const planSvg = isMandir ? renderMandirPlan(unit) : renderFurniturePlan(unit);
+  const frontSvg = isMandir ? renderMandirElevation(unit) : isPanel ? renderWallPanelElevation(unit) : renderFurnitureElevation(unit);
   const layout: any = {
     type, dims,
     runs: [{ name: type, length: w, base: [], wallCabs: [], sockets: [] }],
     appliedRules: applied,
-    planSvg: renderFurniturePlan(unit),
-    elevations: [{ name: `${type} — Front`, svg: renderFurnitureElevation(unit) }],
+    planSvg,
+    elevations: [{ name: `${type} — Front`, svg: frontSvg }],
   };
   layout.furniture = unit;   // expose columns/cells so the consensus scorer can read furniture storage
   return layout;
@@ -1711,11 +1735,133 @@ function renderWardrobeSection(unit: FurnitureUnit): string {
   p.push(`</svg>`);
   return p.join("");
 }
+// ── Mandir (temple unit) drawings — jali sides, arched mehrab, sun-ray motif on
+//    the marble back, puja space, drawer; front elevation + plan + side section. ──
+function jaliFill(x: number, y: number, w: number, h: number): string {
+  const p = [`<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="#efe9dd" stroke="#b9a98a" stroke-width="0.7"/>`];
+  for (let gx = x + 7; gx < x + w; gx += 9) p.push(`<line x1="${gx}" y1="${y}" x2="${gx}" y2="${y + h}" stroke="#cbb892" stroke-width="0.4"/>`);
+  for (let gy = y + 7; gy < y + h; gy += 9) p.push(`<line x1="${x}" y1="${gy}" x2="${x + w}" y2="${gy}" stroke="#cbb892" stroke-width="0.4"/>`);
+  return p.join("");
+}
+function renderMandirElevation(unit: FurnitureUnit): string {
+  const S = 0.22, padL = 56, padR = 56, padT = 40, padB = 46;
+  const W = unit.widthMM * S + padL + padR, H = unit.heightMM * S + padT + padB;
+  const floorY = padT + unit.heightMM * S, yOf = (mm: number) => floorY - mm * S, xOf = (mm: number) => padL + mm * S;
+  const ww = unit.widthMM, side = Math.min(220, ww * 0.24), drawerH = 150;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${S}" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace">`);
+  p.push(`<rect width="${W}" height="${H}" fill="#ffffff"/>`);
+  p.push(`<text x="${xOf(ww / 2)}" y="20" fill="#1e3a5f" font-size="11" text-anchor="middle">Front Elevation</text>`);
+  const x0 = xOf(0), x1 = xOf(ww), top = yOf(unit.heightMM), botBody = yOf(drawerH);
+  p.push(`<rect x="${x0}" y="${top}" width="${ww * S}" height="${unit.heightMM * S}" fill="#7a4a25" stroke="#5a3417" stroke-width="1.6"/>`);   // teak frame
+  // marble back panel (centre)
+  const cx0 = xOf(side), cx1 = xOf(ww - side);
+  p.push(`<rect x="${cx0}" y="${top + 6}" width="${cx1 - cx0}" height="${botBody - top - 6}" fill="#ece7dd" stroke="#cbb892" stroke-width="0.8"/>`);
+  // sun-ray (OM rangoli) motif on the marble
+  const sxc = (cx0 + cx1) / 2, syc = top + (botBody - top) * 0.42, rr = Math.min(26, (cx1 - cx0) * 0.18);
+  for (let a = 0; a < 24; a++) { const ang = a * Math.PI / 12; p.push(`<line x1="${(sxc + Math.cos(ang) * rr * 0.5).toFixed(1)}" y1="${(syc + Math.sin(ang) * rr * 0.5).toFixed(1)}" x2="${(sxc + Math.cos(ang) * rr).toFixed(1)}" y2="${(syc + Math.sin(ang) * rr).toFixed(1)}" stroke="#c79a3a" stroke-width="1"/>`); }
+  p.push(`<circle cx="${sxc.toFixed(1)}" cy="${syc.toFixed(1)}" r="${(rr * 0.45).toFixed(1)}" fill="none" stroke="#b0892f" stroke-width="1.4"/>`);
+  // jali side panels
+  p.push(jaliFill(x0 + 4, top + 6, side * S - 4, botBody - top - 6));
+  p.push(jaliFill(cx1, top + 6, side * S - 4, botBody - top - 6));
+  // arched mehrab over the puja space
+  const archTop = top + 8, archSpring = top + (botBody - top) * 0.34;
+  p.push(`<path d="M${cx0 + 4} ${archSpring} L${cx0 + 4} ${archSpring - 6} Q${sxc} ${archTop - 14} ${cx1 - 4} ${archSpring - 6} L${cx1 - 4} ${archSpring}" fill="none" stroke="#8a5a2a" stroke-width="1.6"/>`);
+  // bells
+  for (const bx of [cx0 + (cx1 - cx0) * 0.32, cx0 + (cx1 - cx0) * 0.68]) { const by = archSpring - 2; p.push(`<line x1="${bx.toFixed(1)}" y1="${(archTop).toFixed(1)}" x2="${bx.toFixed(1)}" y2="${by.toFixed(1)}" stroke="#b0892f" stroke-width="0.7"/><path d="M${(bx - 4).toFixed(1)} ${by.toFixed(1)} Q${bx} ${(by - 8).toFixed(1)} ${(bx + 4).toFixed(1)} ${by.toFixed(1)} Z" fill="#c79a3a" stroke="#8a5a2a" stroke-width="0.5"/>`); }
+  // LED groove hint at the top
+  p.push(`<line x1="${cx0 + 4}" y1="${top + 4}" x2="${cx1 - 4}" y2="${top + 4}" stroke="#f3d59f" stroke-width="2"/>`);
+  // drawer
+  p.push(`<rect x="${x0}" y="${botBody}" width="${ww * S}" height="${drawerH * S}" fill="#7a4a25" stroke="#5a3417" stroke-width="1.2"/>`);
+  p.push(`<circle cx="${xOf(ww / 2)}" cy="${botBody + drawerH * S / 2}" r="3" fill="#c79a3a" stroke="#8a5a2a" stroke-width="0.6"/>`);
+  // width dim chain 200/500/200-style
+  const dy = floorY + 16; p.push(`<line x1="${x0}" y1="${dy}" x2="${x1}" y2="${dy}" stroke="#94a3b8" stroke-width="0.6"/>`);
+  const segs: [number, number][] = [[0, side], [side, ww - side], [ww - side, ww]];
+  for (const [a, b] of segs) { p.push(`<line x1="${xOf(a)}" y1="${dy - 3}" x2="${xOf(a)}" y2="${dy + 3}" stroke="#94a3b8" stroke-width="0.6"/>`); p.push(`<text x="${xOf((a + b) / 2)}" y="${dy + 12}" fill="#475569" font-size="8" text-anchor="middle">${Math.round(b - a)}</text>`); }
+  p.push(`<line x1="${xOf(ww)}" y1="${dy - 3}" x2="${xOf(ww)}" y2="${dy + 3}" stroke="#94a3b8" stroke-width="0.6"/>`);
+  p.push(`<text x="${x1 + 14}" y="${(top + floorY) / 2}" fill="#475569" font-size="8" text-anchor="middle" transform="rotate(90 ${x1 + 14} ${(top + floorY) / 2})">${Math.round(unit.heightMM)} mm</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+function renderMandirPlan(unit: FurnitureUnit): string {
+  const S = 0.22, pad = 30, header = 22, D = unit.depthMM, ww = unit.widthMM, side = Math.min(220, ww * 0.24);
+  const W = ww * S + pad * 2, H = D * S + pad * 2 + header, top = pad + header, xOf = (mm: number) => pad + mm * S;
+  const p = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace"><rect width="${W}" height="${H}" fill="#ffffff"/>`];
+  p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">Plan — Top View</text>`);
+  p.push(`<rect x="${xOf(0)}" y="${top}" width="${ww * S}" height="${D * S}" fill="#faf7f1" stroke="#334155" stroke-width="1.3"/>`);
+  p.push(`<line x1="${xOf(side)}" y1="${top}" x2="${xOf(side)}" y2="${top + D * S}" stroke="#94a3b8" stroke-width="0.8"/>`);
+  p.push(`<line x1="${xOf(ww - side)}" y1="${top}" x2="${xOf(ww - side)}" y2="${top + D * S}" stroke="#94a3b8" stroke-width="0.8"/>`);
+  p.push(`<text x="${xOf(side / 2)}" y="${top + D * S / 2}" fill="#475569" font-size="7.5" text-anchor="middle">Shelf</text>`);
+  p.push(`<text x="${xOf(ww / 2)}" y="${top + D * S / 2}" fill="#475569" font-size="8" text-anchor="middle">Puja Space</text>`);
+  p.push(`<text x="${xOf(ww - side / 2)}" y="${top + D * S / 2}" fill="#475569" font-size="7.5" text-anchor="middle">Shelf</text>`);
+  p.push(`<text x="${W / 2}" y="${top + D * S + 16}" fill="#475569" font-size="8.5" text-anchor="middle">${Math.round(ww)} × ${D} mm</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+function renderMandirSection(unit: FurnitureUnit): string {
+  const S = 0.22, padL = 70, padR = 40, padT = 38, padB = 36, D = unit.depthMM;
+  const W = D * S + padL + padR, H = unit.heightMM * S + padT + padB;
+  const floorY = padT + unit.heightMM * S, yOf = (mm: number) => floorY - mm * S, xOf = (mm: number) => padL + mm * S;
+  const p = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace"><rect width="${W}" height="${H}" fill="#ffffff"/>`];
+  p.push(`<text x="${(padL + xOf(D)) / 2}" y="18" fill="#1e3a5f" font-size="11" text-anchor="middle">Side Elevation</text>`);
+  p.push(`<rect x="${padL}" y="${yOf(unit.heightMM)}" width="${D * S}" height="${unit.heightMM * S}" fill="#7a4a25" stroke="#5a3417" stroke-width="1.4"/>`);
+  // 3 shelf bands + drawer (240/240/240/150-style)
+  const bands = [150, 240, 240, 240]; let acc = 0;
+  for (const b of bands) { const yb = yOf(acc + b); p.push(`<line x1="${padL}" y1="${yb}" x2="${xOf(D)}" y2="${yb}" stroke="#cbb892" stroke-width="0.9"/>`); p.push(`<text x="${padL - 8}" y="${yOf(acc + b / 2) + 3}" fill="#0f766e" font-size="8" text-anchor="end">${b}</text>`); acc += b; }
+  p.push(`<line x1="${padL}" y1="${padT - 8}" x2="${xOf(D)}" y2="${padT - 8}" stroke="#64748b" stroke-width="0.7"/>`);
+  p.push(`<text x="${(padL + xOf(D)) / 2}" y="${padT - 12}" fill="#475569" font-size="8.5" text-anchor="middle">${D} mm</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+// ── Wall panel — fluted WPC + marble feature wall with display niche + floating shelf. ──
+function renderWallPanelElevation(unit: FurnitureUnit): string {
+  const S = 0.085, padL = 50, padR = 50, padT = 40, padB = 44;
+  const W = unit.widthMM * S + padL + padR, H = unit.heightMM * S + padT + padB;
+  const floorY = padT + unit.heightMM * S, yOf = (mm: number) => floorY - mm * S, xOf = (mm: number) => padL + mm * S;
+  const ww = unit.widthMM, hh = unit.heightMM, flW = ww * 0.4, p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${S}" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace">`);
+  p.push(`<rect width="${W}" height="${H}" fill="#ffffff"/>`);
+  p.push(`<text x="${xOf(ww / 2)}" y="20" fill="#1e3a5f" font-size="11" text-anchor="middle">Front Elevation</text>`);
+  const x0 = xOf(0), x1 = xOf(ww), top = yOf(hh);
+  // marble field (full), then fluted panel over the left part
+  p.push(`<rect x="${x0}" y="${top}" width="${ww * S}" height="${hh * S}" fill="#ece7dd" stroke="#334155" stroke-width="1.3"/>`);
+  p.push(`<rect x="${x0}" y="${top}" width="${flW * S}" height="${hh * S}" fill="#6b4a2f" stroke="#5a3417" stroke-width="0.8"/>`);
+  for (let gx = x0 + 5; gx < xOf(flW); gx += 6) p.push(`<line x1="${gx}" y1="${top}" x2="${gx}" y2="${floorY}" stroke="#00000033" stroke-width="1.1"/>`);  // flutes
+  // display niche column with shelves + LED on the right of the fluted band
+  const nx = xOf(flW) + 8, nw = Math.min(60, (ww - flW) * S * 0.4), ntop = top + 20, nbot = floorY - 70;
+  p.push(`<rect x="${nx}" y="${ntop}" width="${nw}" height="${nbot - ntop}" fill="#6b4a2f" stroke="#5a3417" stroke-width="0.8"/>`);
+  for (let s = 1; s <= 3; s++) { const sy = ntop + (nbot - ntop) * s / 4; p.push(`<rect x="${nx + 3}" y="${sy - 6}" width="${nw - 6}" height="6" fill="#3a2a1a"/>`); p.push(`<line x1="${nx + 3}" y1="${sy - 6}" x2="${nx + nw - 3}" y2="${sy - 6}" stroke="#f3d59f" stroke-width="1.4"/>`); }  // niche shelves + warm LED
+  // floating shelf
+  const shY = floorY - 60; p.push(`<rect x="${x0 + 6}" y="${shY}" width="${ww * S * 0.62}" height="14" fill="#7a4a25" stroke="#5a3417" stroke-width="0.8"/>`);
+  for (let gx = x0 + 9; gx < x0 + ww * S * 0.62; gx += 5) p.push(`<line x1="${gx}" y1="${shY}" x2="${gx}" y2="${shY + 14}" stroke="#00000022" stroke-width="0.8"/>`);
+  // dims
+  p.push(`<text x="${xOf(ww / 2)}" y="${floorY + 18}" fill="#475569" font-size="9" text-anchor="middle">${Math.round(ww)} mm</text>`);
+  p.push(`<text x="${x1 + 14}" y="${(top + floorY) / 2}" fill="#475569" font-size="8" text-anchor="middle" transform="rotate(90 ${x1 + 14} ${(top + floorY) / 2})">${Math.round(hh)} mm</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+function renderWallPanelSide(unit: FurnitureUnit): string {
+  const S = 0.085, padL = 60, padR = 60, padT = 38, padB = 40, D = unit.depthMM;
+  const W = D * S + padL + padR + 30, H = unit.heightMM * S + padT + padB;
+  const floorY = padT + unit.heightMM * S, yOf = (mm: number) => floorY - mm * S, xOf = (mm: number) => padL + mm * S;
+  const p = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace"><rect width="${W}" height="${H}" fill="#ffffff"/>`];
+  p.push(`<text x="${(padL + xOf(D)) / 2}" y="18" fill="#1e3a5f" font-size="11" text-anchor="middle">Side View</text>`);
+  p.push(`<rect x="${padL}" y="${yOf(unit.heightMM)}" width="${Math.max(6, D * S * 0.3)}" height="${unit.heightMM * S}" fill="#6b4a2f" stroke="#5a3417" stroke-width="1"/>`);   // panel thickness on wall
+  // floating shelf projection
+  const shY = floorY - 60 * 1; p.push(`<rect x="${padL}" y="${shY}" width="${D * S}" height="14" fill="#7a4a25" stroke="#5a3417" stroke-width="0.8"/>`);
+  p.push(`<line x1="${padL}" y1="${padT - 8}" x2="${xOf(D)}" y2="${padT - 8}" stroke="#64748b" stroke-width="0.7"/>`);
+  p.push(`<text x="${(padL + xOf(D)) / 2}" y="${padT - 12}" fill="#475569" font-size="8.5" text-anchor="middle">${D} mm Projection</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
 // Extra dimensioned views per type for the spec sheet (wardrobe inside + section, …).
 function ssExtraViews(type: string, layout: any): { title: string; svg: string }[] {
   const t = (type || "").toLowerCase();
   const u = layout.furniture;
   if (t.includes("wardrobe") && u) return [{ title: "Inside View", svg: renderWardrobeInside(u) }, { title: "Section", svg: renderWardrobeSection(u) }];
+  if (u && (t.includes("mandir") || t.includes("temple") || t.includes("puja") || t.includes("pooja"))) return [{ title: "Side Elevation", svg: renderMandirSection(u) }];
+  if (u && (t.includes("wall panel") || t.includes("cladding") || (t.includes("panel") && !t.includes("lcd") && !t.includes("tv")))) return [{ title: "Side View", svg: renderWallPanelSide(u) }];
   return [];
 }
 
@@ -2939,7 +3085,7 @@ function ssTitleFor(type: string): { title: string; sub: string } {
   if (t.includes("lcd") || t.includes("tv")) return { title: "Modular TV Unit Design", sub: "Modern · Minimal · Functional" };
   if (t.includes("crockery")) return { title: "Crockery Unit Design", sub: "Display · storage · soft-close hardware" };
   if (t.includes("mandir") || t.includes("temple") || t.includes("pooja") || t.includes("puja")) return { title: "Mandir Design", sub: "Traditional jali · concealed LED · CNC detail" };
-  if (t.includes("wall panel") || t.includes("panel") || t.includes("cladding")) return { title: "Wall Panel Design", sub: "Fluted panel · marble · display niche · LED" };
+  if (t.includes("wall panel") || t.includes("cladding")) return { title: "Wall Panel Design", sub: "Fluted panel · marble · display niche · LED" };
   return { title: type || "Design", sub: "Modern · Functional · Elegant" };
 }
 
@@ -2963,7 +3109,7 @@ function ssMaterials(type: string, layout: any): { name: string; sub: string; fi
   if (t.includes("wardrobe")) return [{ name: "Pre-Lam Board", sub: "Light Beige", fill: "#d8c9b0" }, { name: "Wood Texture", sub: "Walnut Band", fill: "#8a5a36", flute: true }, ali, mirror, led];
   if (t.includes("lcd") || t.includes("tv")) return [{ name: "MDF Laminate", sub: "Matte", fill: "#d8c9b0" }, { name: "Fluted WPC", sub: "Wood", fill: "#6b4a2f", flute: true }, marble, glass, led, ali];
   if (t.includes("mandir") || t.includes("temple") || t.includes("puja") || t.includes("pooja")) return [teak, { name: "Acrylic Sheet", sub: "Marble", fill: "#ece7dd" }, jali, brass, led];
-  if (t.includes("panel") || t.includes("cladding")) return [{ name: "WPC Fluted", sub: "Wood Finish", fill: "#6b4a2f", flute: true }, marble, { name: "Laminate", sub: "Shelf & Niche", fill: "#7a4a25" }, led];
+  if (t.includes("wall panel") || t.includes("cladding")) return [{ name: "WPC Fluted", sub: "Wood Finish", fill: "#6b4a2f", flute: true }, marble, { name: "Laminate", sub: "Shelf & Niche", fill: "#7a4a25" }, led];
   if (t.includes("vanity") || t.includes("dress")) return [{ name: "Laminate", sub: "Walnut", fill: "#6b4a2f", flute: true }, acr, mirror, ali, led];
   if (t.includes("crockery")) return [lam, { name: "Wood Finish", sub: "Walnut", fill: "#6b4a2f", flute: true }, { name: "Glass Shutter", sub: "Frosted", fill: "#cfe6ee", glass: true }, led];
   return [lam, walnut, quartz, led];
@@ -3010,7 +3156,7 @@ function ssFeatures(type: string): string[] {
   if (t.includes("kitchen")) return ["Ergonomic work-triangle", "Soft-close hardware", "Ample storage", "Easy-to-clean surfaces", "Integrated appliances", "Durable & long-lasting"];
   if (t.includes("wardrobe")) return ["Optimised hanging & shelving", "Soft-close drawers", "Sliding-track system", "Loft storage", "Scratch-resistant finish"];
   if (t.includes("mandir") || t.includes("temple")) return ["Traditional jali detail", "Concealed warm LED", "Acrylic marble back", "Storage drawer", "Wall-mounted"];
-  if (t.includes("panel") || t.includes("cladding")) return ["Fluted texture accent", "Display niche with LED", "Floating shelf", "Marble / UV feature", "Customisable size"];
+  if (t.includes("wall panel") || t.includes("cladding")) return ["Fluted texture accent", "Display niche with LED", "Floating shelf", "Marble / UV feature", "Customisable size"];
   if (t.includes("tv") || t.includes("lcd")) return ["Open & closed storage", "Concealed cable management", "Warm LED ambience", "Premium textures", "Wall-mounted clean look"];
   return ["Premium materials", "Soft-close hardware", "Ample storage", "Easy maintenance", "Durable & long-lasting"];
 }
@@ -3021,7 +3167,7 @@ function ssNotes(type: string): string[] {
   const base = ["All dimensions are in millimetres (mm).", "Dimensions for reference — verify on site before execution.", "Follow carpenter / shop drawings for final cutting."];
   if (t.includes("kitchen")) return ["Counter height 850 mm from FFL.", "Wall-cabinet sill 1450 mm; loft above.", ...base.slice(0, 2)];
   if (t.includes("mandir") || t.includes("temple")) return ["LED strip concealed in top & side grooves.", "Acrylic back panel with CNC-cut design.", "Provide a 5 A power socket behind the unit.", base[1]];
-  if (t.includes("panel") || t.includes("cladding")) return ["WPC fluted panel thickness 12 mm.", "Floating-shelf load capacity as per wall support.", "Design customisable to wall width & height.", base[1]];
+  if (t.includes("wall panel") || t.includes("cladding")) return ["WPC fluted panel thickness 12 mm.", "Floating-shelf load capacity as per wall support.", "Design customisable to wall width & height.", base[1]];
   return base;
 }
 
@@ -3043,7 +3189,7 @@ function ssSchedule(type: string, layout: any): { label: string; frac: number }[
     if (!seen.has("Wall Cabinets") && (run.wallCabs || []).length) { const wc = run.wallCabs[Math.floor(run.wallCabs.length / 2)]; out.push({ label: "Wall Cabinets", frac: Math.min(0.98, Math.max(0.02, (wc.x + wc.w / 2) / L)) }); }
   } else {
     const u = layout.furniture; if (!u || !u.columns) return out;
-    const seen = new Set<string>(); const KIND: Record<string, string> = { hang: "Hanging Rod", shelf: "Shelves", drawer: "Drawers", glass: "Glass Display", tv: "TV Recess", mirror: "Mirror", basin: "Wash Basin", open: "Open Display", door: "Cabinet", jali: "Jali Panel", niche: "Display Niche", puja: "Puja Space" };
+    const seen = new Set<string>(); const KIND: Record<string, string> = { hang: "Hanging Rod", shelf: "Shelves", drawer: "Drawers", glass: "Glass Display", tv: "TV Recess", mirror: "Mirror", basin: "Wash Basin", open: "Open Display", door: "Cabinet", jali: "Jali Panel", niche: "Display Niche", puja: "Puja Space", fluted: "WPC Fluted Panel", marble: "Marble Sheet", floatshelf: "Floating Shelf" };
     let x = 0;
     for (const col of u.columns) {
       const cx = x + col.wMM / 2;
