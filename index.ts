@@ -4564,6 +4564,48 @@ app.delete("/api/materials/:id", (c) => {
   sqlite.prepare(`DELETE FROM material_overrides WHERE material_id=?`).run(id);
   return c.json({ data: { ok: true } });
 });
+// ── §5 AI colour-harmony — deterministic colour-theory engine. Maps the chosen
+//    colour's complementary / analogous / triadic / neutral targets to the NEAREST
+//    real catalogue material, and recommends a countertop + handle pairing. ──
+function hexToRgb(h: string): [number, number, number] { const n = parseInt(h.replace("#", ""), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  let h = 0, s = 0; if (d) { s = d / (1 - Math.abs(2 * l - 1)); h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h *= 60; if (h < 0) h += 360; } return [h, s, l];
+}
+function hslToHex(h: number, s: number, l: number): string {
+  h = ((h % 360) + 360) % 360; s = Math.min(1, Math.max(0, s)); l = Math.min(1, Math.max(0, l));
+  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = l - c / 2;
+  let r = 0, g = 0, b = 0; if (h < 60) [r, g, b] = [c, x, 0]; else if (h < 120) [r, g, b] = [x, c, 0]; else if (h < 180) [r, g, b] = [0, c, x]; else if (h < 240) [r, g, b] = [0, x, c]; else if (h < 300) [r, g, b] = [x, 0, c]; else [r, g, b] = [c, 0, x];
+  const to = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, "0"); return "#" + to(r) + to(g) + to(b);
+}
+function nearestMaterial(targetHex: string, pool: any[], excludeHex?: string): any {
+  const [tr, tg, tb] = hexToRgb(targetHex); let best: any = null, bd = Infinity;
+  for (const m of pool) { if (m.outOfStock) continue; if (excludeHex && m.colorCode.toLowerCase() === excludeHex.toLowerCase()) continue; const [r, g, b] = hexToRgb(m.colorCode); const d = (r - tr) ** 2 + (g - tg) ** 2 + (b - tb) ** 2; if (d < bd) { bd = d; best = m; } }
+  return best;
+}
+function colorHarmony(hex: string): any {
+  const pool = catalogAll(); const [h, s, l] = rgbToHsl(...hexToRgb(hex));
+  const sat = Math.min(0.75, Math.max(0.25, s)), lig = Math.min(0.7, Math.max(0.3, l));
+  const near = (hx: string) => nearestMaterial(hx, pool, hex);
+  const warm = (h < 60 || h >= 300);
+  return {
+    base: hex,
+    complementary: near(hslToHex(h + 180, sat, lig)),
+    analogous: [near(hslToHex(h + 30, sat, lig)), near(hslToHex(h - 30, sat, lig))].filter(Boolean),
+    triadic: [near(hslToHex(h + 120, sat, lig)), near(hslToHex(h + 240, sat, lig))].filter(Boolean),
+    neutrals: [near("#ece7dd"), near("#3a3f45")].filter(Boolean),
+    pairing: {
+      countertop: l > 0.5 ? "White Quartz / Calacatta marble" : "Black Granite / charcoal quartz",
+      handle: warm ? "Brass / antique-gold profile" : "Matt black / champagne profile",
+      backsplash: l > 0.5 ? "Glossy white / fluted glass" : "Smoked / back-painted glass",
+    },
+  };
+}
+app.get("/api/materials/harmony", (c) => {
+  const hex = "#" + String(c.req.query("hex") || "").replace("#", "").toLowerCase();
+  if (!/^#[0-9a-f]{6}$/.test(hex)) return c.json({ error: "hex must be #rrggbb" }, 400);
+  return c.json({ data: colorHarmony(hex) });
+});
 
 // 4-type modular kitchen comparison sheet (standalone — generates the four shapes).
 app.get("/api/spec-sheet/kitchens.svg", (c) => {
@@ -7750,6 +7792,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [matFacets, setMatFacets] = useState(null);
       const [matPicked, setMatPicked] = useState(null);
       const [matScope, setMatScope] = useState("all");   // §4 Apply-To: all | base | wall | tall
+      const [matHarmony, setMatHarmony] = useState(null);   // §5 colour-harmony suggestions
       React.useEffect(() => { if (!matFacets) fetch("/api/materials/facets").then((r) => r.json()).then((j) => setMatFacets(j.data)).catch(() => {}); }, [matFacets]);
       React.useEffect(() => {
         if (!matOpen) return;
@@ -7763,6 +7806,7 @@ const frontendHTML = `<!DOCTYPE html>
         if (m.outOfStock && !matAdmin) { alert(m.colorName + " (" + m.code + ") is out of stock."); return; }
         try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {}
         setMatPicked(m);
+        try { if (m.colorCode) fetch("/api/materials/harmony?hex=" + m.colorCode.replace("#", "")).then((r) => r.json()).then((j) => setMatHarmony(j.data || null)).catch(() => {}); } catch (e) {}   // §5 pairing suggestions
         try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...m, scope: matScope }) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); }); } catch (e) {}   // persist (scoped) → flows into quote + sheet
       };
       // §12 Theme creator
@@ -8405,6 +8449,25 @@ const frontendHTML = `<!DOCTYPE html>
                         </div>)}
                       </div>
                       {matPicked && <div className="mt-3 text-xs text-emerald-700 flex items-center gap-2"><span style={{ background: matPicked.colorCode, width: 14, height: 14, borderRadius: 3, display: "inline-block", border: "1px solid #cbd5e1" }}></span>✓ Applied <b>{matPicked.brand} {matPicked.colorName}</b> ({matPicked.code}) to <b>{matScope === "all" ? "the whole unit" : matScope + " cabinets"}</b> — flows into the quotation & Spec Sheet. <button onClick={() => setMatOpen(false)} className="underline ml-1">Done</button></div>}
+                      {matHarmony && (
+                        <div className="mt-2 p-2 bg-indigo-50 border border-indigo-200 rounded text-xs">
+                          <div className="font-semibold text-indigo-800 mb-1">✨ Pairs well with</div>
+                          <div className="flex flex-wrap gap-3">
+                            {[["Complementary", [matHarmony.complementary]], ["Analogous", matHarmony.analogous], ["Triadic", matHarmony.triadic], ["Neutrals", matHarmony.neutrals]].map(([label, arr]) => (arr && arr.filter(Boolean).length) ? (
+                              <div key={label}>
+                                <div className="text-[10px] text-slate-500 mb-0.5">{label}</div>
+                                <div className="flex gap-1">
+                                  {arr.filter(Boolean).map((s) => <button key={s.materialId} onClick={() => pickMaterial(s)} title={s.brand + " " + s.colorName + " (" + s.code + ")"} className="rounded border border-slate-300 overflow-hidden hover:ring-2 hover:ring-indigo-400" style={{ width: 36 }}>
+                                    <div style={{ background: s.colorCode, height: 22 }}></div>
+                                    <div className="text-[8px] text-slate-500 truncate px-0.5">{s.code}</div>
+                                  </button>)}
+                                </div>
+                              </div>
+                            ) : null)}
+                          </div>
+                          <div className="mt-1.5 text-[10px] text-slate-600">Countertop: <b>{matHarmony.pairing.countertop}</b> · Handle: <b>{matHarmony.pairing.handle}</b> · Backsplash: <b>{matHarmony.pairing.backsplash}</b></div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

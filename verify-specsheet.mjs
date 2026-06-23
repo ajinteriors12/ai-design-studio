@@ -103,6 +103,10 @@ try {
     if (selOk) break;
   }
   ok("picking a material sets the finish + shows selection", selOk);
+  // §5 colour-harmony suggestions
+  let harmonyOk = false;
+  for (let i = 0; i < 14; i++) { await sleep(250); harmonyOk = await page.evaluate(() => /Pairs well with/.test(document.body.innerText)); if (harmonyOk) break; }
+  ok("colour-harmony suggestions appear", harmonyOk);
   // §12 Theme creator — select a built-in theme and apply it
   const themed = await page.evaluate(() => {
     const sel = [...document.querySelectorAll("select")].find((s) => [...s.options].some((o) => /Modern Luxury/.test(o.textContent || "")));
