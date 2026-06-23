@@ -2945,8 +2945,7 @@ function ssSchedule(type: string, layout: any): { label: string; frac: number }[
     const KIND: Record<string, string> = { sink: "Sink", hob: "Hob / Cooktop", chimney: "Chimney", fridge: "Refrigerator", "tall-fridge": "Refrigerator", "tall-pantry": "Tall Pantry", "tall-hiunit": "Oven Tower", "tall-utility": "Utility Tall Unit", "drawer-atta": "Atta Drawer", corner: "Corner Unit", dishwasher: "Dishwasher" };
     for (const c of (run.base || [])) {
       let lbl = KIND[c.kind];
-      if (!lbl && c.kind === "drawer3" && apptOn(GEN.hob)) lbl = "Hob / Cooktop";
-      if (!lbl) continue;
+      if (!lbl) continue;   // explicit hob/chimney cabinets are labelled via KIND; we do NOT infer a hob from a drawer3 + global GEN state (would mislabel re-opened designs)
       if (seen.has(lbl)) continue; seen.add(lbl);
       out.push({ label: lbl, frac: Math.min(0.98, Math.max(0.02, (c.x + c.w / 2) / L)) });
     }
@@ -3167,7 +3166,6 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
   const palH = 200;
   parts.push(ssCard(rcX, y, rcW, palH, "Material Palette"));
   const swPerRow = 3, swGap = 10, swW = (rcW - 26 - swGap * (swPerRow - 1)) / swPerRow, swH = 52;
-  const flutes: string[] = [];
   mats.forEach((m, i) => {
     const r = Math.floor(i / swPerRow), c = i % swPerRow;
     const sx = rcX + 13 + c * (swW + swGap), sy = y + 40 + r * (swH + 30);
@@ -3186,7 +3184,6 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
     parts.push(ssCheck(rcX + 20, fy - 3.5));
     parts.push(ssText(rcX + 35, fy, f, 10, SS.ink, "400"));
   });
-  parts.push(flutes.join(""));
   y += heroH + gut;
 
   // ── 3. Plan (top view) ───────────────────────────────────────────────────
@@ -3208,7 +3205,7 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
     for (let i = 0; i < n; i++) {
       const cx = M + 14 + i * (cw + 12);
       parts.push(ssEmbed(elevs[i].svg, cx, y + 36, cw, elH - 60));
-      parts.push(ssText(cx + cw / 2, y + elH - 12, ssEsc(elevs[i].name || ("View " + (i + 1))), 9, SS.sub, "600", "middle"));
+      parts.push(ssText(cx + cw / 2, y + elH - 12, elevs[i].name || ("View " + (i + 1)), 9, SS.sub, "600", "middle"));
     }
     y += elH + gut;
   }
