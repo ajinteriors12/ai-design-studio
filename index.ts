@@ -4484,20 +4484,85 @@ const MATERIAL_CATALOG: MaterialEntry[] = (() => {
   add("functional", "Studio", "Colour-coded", "Signal", "FN-SG", "e11d48", "Matt", 10);
   return out;
 })();
+// §9 Admin: persistent custom materials + per-material overrides (rate / out-of-stock),
+// merged over the built-in catalogue. catalogAll() is the effective catalogue.
+sqlite.exec(`CREATE TABLE IF NOT EXISTS custom_materials (material_id TEXT PRIMARY KEY, material TEXT NOT NULL, created_at INTEGER NOT NULL);`);
+sqlite.exec(`CREATE TABLE IF NOT EXISTS material_overrides (material_id TEXT PRIMARY KEY, override TEXT NOT NULL);`);
+function catalogAll(): any[] {
+  const custom = (sqlite.prepare(`SELECT material FROM custom_materials`).all() as any[]).map((r) => JSON.parse(r.material));
+  const ov: Record<string, any> = {};
+  for (const r of (sqlite.prepare(`SELECT material_id,override FROM material_overrides`).all() as any[])) ov[r.material_id] = JSON.parse(r.override);
+  return [...MATERIAL_CATALOG, ...custom].map((m) => {
+    const o = ov[m.materialId];
+    return { ...m, outOfStock: !!(o && o.outOfStock), dealerRate: o && o.dealerRate != null ? o.dealerRate : m.dealerRate, customerRate: o && o.customerRate != null ? o.customerRate : m.customerRate };
+  });
+}
+function newMaterial(b: any, fallbackCollection: string): any | { error: string } {
+  const category = String(b.category || "pu").toLowerCase();
+  const hex = String(b.colorCode || b.hex || "").replace("#", "").trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) return { error: "colorCode must be #rrggbb" };
+  const [d, cu] = MAT_RATE[category] || [0, 0];
+  const s = (v: any, n: number, dflt = "") => (v == null ? dflt : String(v).slice(0, n));
+  return { materialId: "CUSTOM_" + randomUUID().slice(0, 8).toUpperCase(), code: s(b.code, 24) || "CUST", category, brand: s(b.brand, 40) || "Custom", collection: s(b.collection, 40) || fallbackCollection, colorName: s(b.colorName, 40) || "Colour", colorCode: "#" + hex.toLowerCase(), hex: hex.toLowerCase(), finishType: s(b.finishType, 20) || "Matt", sheen: Number(b.sheen) || 15, dealerRate: Number(b.dealerRate) || d, customerRate: Number(b.customerRate) || cu, unit: s(b.unit, 16) || "sqft" };
+}
 function materialFacets() {
+  const all = catalogAll();
   const cats: Record<string, number> = {}, brands: Record<string, Set<string>> = {};
-  for (const m of MATERIAL_CATALOG) { cats[m.category] = (cats[m.category] || 0) + 1; (brands[m.category] = brands[m.category] || new Set()).add(m.brand); }
-  return { total: MATERIAL_CATALOG.length, categories: Object.keys(cats).map((k) => ({ category: k, count: cats[k] })), brandsByCategory: Object.fromEntries(Object.entries(brands).map(([k, v]) => [k, [...v]])) };
+  for (const m of all) { cats[m.category] = (cats[m.category] || 0) + 1; (brands[m.category] = brands[m.category] || new Set()).add(m.brand); }
+  return { total: all.length, categories: Object.keys(cats).map((k) => ({ category: k, count: cats[k] })), brandsByCategory: Object.fromEntries(Object.entries(brands).map(([k, v]) => [k, [...v]])) };
 }
 app.get("/api/materials/facets", (c) => c.json({ data: materialFacets() }));
 app.get("/api/materials", (c) => {
   const cat = (c.req.query("category") || "").toLowerCase(), brand = (c.req.query("brand") || "").toLowerCase(), q = (c.req.query("q") || "").toLowerCase().trim();
   const lim = Math.min(2000, Math.max(1, parseInt(c.req.query("limit") || "500", 10)));
-  let rows = MATERIAL_CATALOG;
+  let rows = catalogAll();
   if (cat) rows = rows.filter((m) => m.category === cat);
   if (brand) rows = rows.filter((m) => m.brand.toLowerCase() === brand);
   if (q) rows = rows.filter((m) => (m.colorName + " " + m.code + " " + m.colorCode + " " + m.brand + " " + m.collection + " " + m.materialId + " " + m.finishType).toLowerCase().includes(q));
   return c.json({ data: { count: rows.length, materials: rows.slice(0, lim) } });
+});
+// admin: add one material
+app.post("/api/materials", async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const m = newMaterial(b, "Custom"); if ((m as any).error) return c.json({ error: (m as any).error }, 400);
+  sqlite.prepare(`INSERT INTO custom_materials(material_id,material,created_at) VALUES(?,?,?)`).run((m as any).materialId, JSON.stringify(m), Date.now());
+  return c.json({ data: m });
+});
+// admin: bulk CSV import (category,brand,collection,colorName,code,colorCode,finishType,dealerRate,customerRate)
+app.post("/api/materials/import", async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const csv = String(b.csv || ""); if (!csv.trim()) return c.json({ error: "empty CSV" }, 400);
+  const lines = csv.split(/\r?\n/).filter((l) => l.trim());
+  let header: string[] | null = null; let added = 0; const errors: string[] = [];
+  const ins = sqlite.prepare(`INSERT INTO custom_materials(material_id,material,created_at) VALUES(?,?,?)`);
+  for (let i = 0; i < lines.length; i++) {
+    const cells = lines[i].split(",").map((s) => s.trim().replace(/^"|"$/g, ""));
+    if (i === 0 && /categor|colou?r|brand|code/i.test(lines[0])) { header = cells.map((h) => h.toLowerCase().replace(/\s+/g, "")); continue; }
+    const at = (idx: number, name: string) => header ? (cells[header.indexOf(name)] ?? "") : (cells[idx] ?? "");
+    const row = { category: at(0, "category"), brand: at(1, "brand"), collection: at(2, "collection"), colorName: at(3, "colorname"), code: at(4, "code"), colorCode: at(5, "colorcode") || at(5, "hex"), finishType: at(6, "finishtype"), dealerRate: at(7, "dealerrate"), customerRate: at(8, "customerrate") };
+    const m = newMaterial(row, "Imported"); if ((m as any).error) { errors.push("row " + (i + 1) + ": " + (m as any).error); continue; }
+    ins.run((m as any).materialId, JSON.stringify(m), Date.now()); added++;
+  }
+  return c.json({ data: { added, errors: errors.slice(0, 12) } });
+});
+// admin: set rate / out-of-stock
+app.patch("/api/materials/:id", async (c) => {
+  const id = c.req.param("id"); const b = await c.req.json().catch(() => ({} as any));
+  if (!catalogAll().some((m) => m.materialId === id)) return c.json({ error: "Material not found" }, 404);
+  const cur = (() => { const r = sqlite.prepare(`SELECT override FROM material_overrides WHERE material_id=?`).get(id) as any; return r ? JSON.parse(r.override) : {}; })();
+  if (b.dealerRate != null && isFinite(+b.dealerRate)) cur.dealerRate = Math.max(0, +b.dealerRate);
+  if (b.customerRate != null && isFinite(+b.customerRate)) cur.customerRate = Math.max(0, +b.customerRate);
+  if (b.outOfStock != null) cur.outOfStock = !!b.outOfStock;
+  sqlite.prepare(`INSERT INTO material_overrides(material_id,override) VALUES(?,?) ON CONFLICT(material_id) DO UPDATE SET override=excluded.override`).run(id, JSON.stringify(cur));
+  return c.json({ data: { ok: true, override: cur } });
+});
+// admin: delete a custom material
+app.delete("/api/materials/:id", (c) => {
+  const id = c.req.param("id");
+  if (!id.startsWith("CUSTOM_")) return c.json({ error: "only custom materials can be deleted" }, 400);
+  sqlite.prepare(`DELETE FROM custom_materials WHERE material_id=?`).run(id);
+  sqlite.prepare(`DELETE FROM material_overrides WHERE material_id=?`).run(id);
+  return c.json({ data: { ok: true } });
 });
 
 // 4-type modular kitchen comparison sheet (standalone — generates the four shapes).
@@ -7693,8 +7758,9 @@ const frontendHTML = `<!DOCTYPE html>
           fetch("/api/materials?" + qs).then((r) => r.json()).then((j) => setMatRows((j.data && j.data.materials) || [])).catch(() => {});
         }, 180);
         return () => clearTimeout(id);
-      }, [matOpen, matCat, matBrand, matQ]);
+      }, [matOpen, matCat, matBrand, matQ, matReload]);
       const pickMaterial = (m) => {
+        if (m.outOfStock && !matAdmin) { alert(m.colorName + " (" + m.code + ") is out of stock."); return; }
         try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {}
         setMatPicked(m);
         try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...m, scope: matScope }) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); }); } catch (e) {}   // persist (scoped) → flows into quote + sheet
@@ -7718,6 +7784,19 @@ const frontendHTML = `<!DOCTYPE html>
         const name = window.prompt("Save current materials as a Theme — name:", "My Theme"); if (!name) return;
         fetch("/api/themes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, designId: result.id }) }).then((r) => r.json()).then((j) => { if (j.error) alert(j.error); else loadThemes(); }).catch(() => {});
       };
+      // §9 Admin library — add / import / rate / out-of-stock
+      const [matAdmin, setMatAdmin] = useState(false);
+      const [matReload, setMatReload] = useState(0);
+      const [addForm, setAddForm] = useState({ brand: "", colorName: "", code: "", colorCode: "#cccccc", customerRate: "" });
+      const [csvText, setCsvText] = useState("");
+      const reloadCatalog = () => { setMatReload((x) => x + 1); setMatFacets(null); };
+      const addMaterial = () => {
+        if (!/^#[0-9a-fA-F]{6}$/.test(addForm.colorCode)) { alert("Pick a colour"); return; }
+        fetch("/api/materials", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...addForm, category: matCat }) }).then((r) => r.json()).then((j) => { if (j.error) alert(j.error); else { setAddForm({ brand: "", colorName: "", code: "", colorCode: "#cccccc", customerRate: "" }); reloadCatalog(); } });
+      };
+      const importCsv = () => { if (!csvText.trim()) return; fetch("/api/materials/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ csv: csvText }) }).then((r) => r.json()).then((j) => { alert(((j.data && j.data.added) || 0) + " material(s) imported" + (j.data && j.data.errors && j.data.errors.length ? " · " + j.data.errors.length + " skipped" : "")); setCsvText(""); reloadCatalog(); }); };
+      const toggleStock = (m, e) => { e.stopPropagation(); fetch("/api/materials/" + m.materialId, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ outOfStock: !m.outOfStock }) }).then(() => reloadCatalog()); };
+      const deleteMaterial = (m, e) => { e.stopPropagation(); fetch("/api/materials/" + m.materialId, { method: "DELETE" }).then((r) => r.json()).then((j) => { if (j.error) alert(j.error); else reloadCatalog(); }); };
       const [editRun, setEditRun] = useState(0);
       const [activeView, setActiveView] = useState(0);   // Project Tree selection: 'plan' | run index
       React.useEffect(() => { if (activeView !== "3d") last2dRef.current = activeView; }, [activeView]);   // 5.12: remember last 2D view
@@ -8261,8 +8340,28 @@ const frontendHTML = `<!DOCTYPE html>
                     <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: 1120, margin: "0 auto", background: "#fff", borderRadius: 8, padding: 14, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
                       <div className="flex items-center justify-between mb-2">
                         <span className="font-semibold text-slate-700 text-sm">🎨 Material Catalog{matFacets ? " — " + matFacets.total + " finishes" : ""}</span>
-                        <button onClick={() => setMatOpen(false)} className="px-2.5 py-1 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white rounded">✕ Close</button>
+                        <div className="flex gap-2">
+                          <button onClick={() => setMatAdmin((a) => !a)} className={"px-2.5 py-1 text-xs font-medium rounded " + (matAdmin ? "bg-amber-600 text-white" : "bg-slate-100 hover:bg-slate-200 text-slate-600")}>⚙ Admin</button>
+                          <button onClick={() => setMatOpen(false)} className="px-2.5 py-1 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white rounded">✕ Close</button>
+                        </div>
                       </div>
+                      {matAdmin && (
+                        <div className="mb-3 p-2 bg-amber-50 border border-amber-200 rounded text-xs space-y-2">
+                          <div className="flex flex-wrap gap-1 items-center">
+                            <span className="text-amber-800 font-semibold whitespace-nowrap">Add to {matCat.toUpperCase()}:</span>
+                            <input value={addForm.brand} onChange={(e) => setAddForm({ ...addForm, brand: e.target.value })} placeholder="Brand" className="px-1.5 py-0.5 border border-slate-300 rounded" style={{ width: 88 }} />
+                            <input value={addForm.colorName} onChange={(e) => setAddForm({ ...addForm, colorName: e.target.value })} placeholder="Colour name" className="px-1.5 py-0.5 border border-slate-300 rounded" style={{ width: 110 }} />
+                            <input value={addForm.code} onChange={(e) => setAddForm({ ...addForm, code: e.target.value })} placeholder="Code" className="px-1.5 py-0.5 border border-slate-300 rounded" style={{ width: 64 }} />
+                            <input type="color" value={addForm.colorCode} onChange={(e) => setAddForm({ ...addForm, colorCode: e.target.value })} style={{ width: 34, height: 26, padding: 0 }} />
+                            <input value={addForm.customerRate} onChange={(e) => setAddForm({ ...addForm, customerRate: e.target.value })} placeholder="₹rate" className="px-1.5 py-0.5 border border-slate-300 rounded" style={{ width: 56 }} />
+                            <button onClick={addMaterial} className="px-2 py-0.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium">Add</button>
+                          </div>
+                          <div className="flex gap-1 items-start">
+                            <textarea value={csvText} onChange={(e) => setCsvText(e.target.value)} placeholder="Bulk CSV: category,brand,collection,colorName,code,colorCode,finishType,dealerRate,customerRate" className="px-1.5 py-1 border border-slate-300 rounded flex-1" rows={2} style={{ fontFamily: "monospace", fontSize: 10 }} />
+                            <button onClick={importCsv} className="px-2 py-1 bg-amber-700 hover:bg-amber-600 text-white rounded whitespace-nowrap">Import CSV</button>
+                          </div>
+                        </div>
+                      )}
                       <div className="flex flex-wrap gap-1 mb-2">
                         {(matFacets ? matFacets.categories : []).map((c) => <button key={c.category} onClick={() => { setMatCat(c.category); setMatBrand(""); }} className={"px-2 py-1 text-xs rounded font-medium " + (matCat === c.category ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")}>{c.category.toUpperCase()} ({c.count})</button>)}
                       </div>
@@ -8292,14 +8391,18 @@ const frontendHTML = `<!DOCTYPE html>
                         <button onClick={saveTheme} className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded">💾 Save current as Theme</button>
                       </div>
                       <div style={{ maxHeight: "52vh", overflow: "auto" }} className="grid grid-cols-4 sm:grid-cols-6 gap-2">
-                        {matRows.map((m) => <button key={m.materialId} onClick={() => pickMaterial(m)} title={m.brand + " · " + m.collection} className={"text-left border rounded-md overflow-hidden hover:ring-2 hover:ring-teal-400 " + (matPicked && matPicked.materialId === m.materialId ? "ring-2 ring-teal-600 border-teal-600" : "border-slate-200")}>
-                          <div style={{ background: m.colorCode, height: 44 }}></div>
+                        {matRows.map((m) => <div key={m.materialId} onClick={() => pickMaterial(m)} title={m.brand + " · " + m.collection} style={{ opacity: m.outOfStock && !matAdmin ? 0.45 : 1, cursor: "pointer" }} className={"text-left border rounded-md overflow-hidden hover:ring-2 hover:ring-teal-400 " + (matPicked && matPicked.materialId === m.materialId ? "ring-2 ring-teal-600 border-teal-600" : "border-slate-200")}>
+                          <div style={{ background: m.colorCode, height: 44, position: "relative" }}>{m.outOfStock && <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.4)", color: "#fff", fontSize: 8, fontWeight: 700, letterSpacing: 0.5 }}>OUT OF STOCK</span>}</div>
                           <div className="px-1.5 py-1">
                             <div className="text-[10px] font-semibold text-slate-700 truncate">{m.colorName}</div>
                             <div className="text-[9px] text-slate-500 truncate">{m.code} · {m.finishType}</div>
                             <div className="text-[9px] text-slate-400">₹{m.customerRate}/{m.unit}</div>
+                            {matAdmin && <div className="flex gap-1 mt-1" onClick={(e) => e.stopPropagation()}>
+                              <button onClick={(e) => toggleStock(m, e)} className="text-[9px] px-1 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-700">{m.outOfStock ? "In stock" : "Mark OOS"}</button>
+                              {String(m.materialId).indexOf("CUSTOM_") === 0 && <button onClick={(e) => deleteMaterial(m, e)} className="text-[9px] px-1 py-0.5 rounded bg-red-100 hover:bg-red-200 text-red-700">Del</button>}
+                            </div>}
                           </div>
-                        </button>)}
+                        </div>)}
                       </div>
                       {matPicked && <div className="mt-3 text-xs text-emerald-700 flex items-center gap-2"><span style={{ background: matPicked.colorCode, width: 14, height: 14, borderRadius: 3, display: "inline-block", border: "1px solid #cbd5e1" }}></span>✓ Applied <b>{matPicked.brand} {matPicked.colorName}</b> ({matPicked.code}) to <b>{matScope === "all" ? "the whole unit" : matScope + " cabinets"}</b> — flows into the quotation & Spec Sheet. <button onClick={() => setMatOpen(false)} className="underline ml-1">Done</button></div>}
                     </div>
@@ -9775,7 +9878,7 @@ app.put("/api/designs/:id/material", async (c) => {
 
 // ── §12 Theme creator — reusable bundles of per-scope material assignments. ──
 sqlite.exec(`CREATE TABLE IF NOT EXISTS themes (id TEXT PRIMARY KEY, name TEXT NOT NULL, theme TEXT NOT NULL, created_at INTEGER NOT NULL);`);
-function matByCode(code: string): any { return MATERIAL_CATALOG.find((m) => m.code === code) || null; }
+function matByCode(code: string): any { return catalogAll().find((m) => m.code === code) || null; }
 const BUILTIN_THEMES = [
   { id: "builtin-modern-luxury", name: "Modern Luxury", base: "N-04", wall: "N-15", tall: "N-04" },
   { id: "builtin-warm-earth", name: "Warm Earth", base: "E-01", wall: "E-15", tall: "E-01" },

@@ -87,11 +87,17 @@ try {
   // Material Catalog (Material Management Module · Phase 1)
   await clickByText(page, /🎨 Material Catalog/);
   let matOpen = false;
-  for (let i = 0; i < 24; i++) { await sleep(300); matOpen = await page.evaluate(() => /Material Catalog —/.test(document.body.innerText) && document.querySelectorAll("button[title]").length > 10); if (matOpen) break; }
+  for (let i = 0; i < 24; i++) { await sleep(300); matOpen = await page.evaluate(() => /Material Catalog —/.test(document.body.innerText) && document.querySelectorAll("div[title]").length > 10); if (matOpen) break; }
   ok("Material Catalog opens with swatches", matOpen);
+  // §9 Admin panel toggles
+  await clickByText(page, /⚙ Admin/);
+  await sleep(250);
+  ok("Admin panel (add + CSV import) toggles", await page.evaluate(() => /Import CSV/.test(document.body.innerText) && /Add to/.test(document.body.innerText)));
+  await clickByText(page, /⚙ Admin/);
+  await sleep(200);
   let selOk = false;
   for (let i = 0; i < 16; i++) {
-    await page.evaluate(() => { const b = [...document.querySelectorAll("button[title]")].find((x) => x.querySelector("div[style*='background']")); if (b) b.click(); });
+    await page.evaluate(() => { const b = [...document.querySelectorAll("div[title]")].find((x) => x.querySelector("div[style*='background']")); if (b) b.click(); });
     await sleep(250);
     selOk = await page.evaluate(() => /Applied/.test(document.body.innerText) && !!window.__adsFinishColor);
     if (selOk) break;
