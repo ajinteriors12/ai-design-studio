@@ -25,6 +25,13 @@ for (const t of ["L-Shape Kitchen", "U-Shape Kitchen", "Wardrobe", "Vanity Unit"
   const svg = await r.text();
   ok("4-type kitchen comparison sheet", r.status === 200 && /4-TYPE MODULAR KITCHEN/.test(svg) && /STRAIGHT/.test(svg) && /U-SHAPE/.test(svg) && /DETAILING DRAWINGS/.test(svg));
 }
+{ // POST sheet reflects the user's actual finish + the Bill-To client
+  const d = (await post("/api/generate", { designType: "L-Shape Kitchen", wall: 3000, wallB: 2400 })).data;
+  await fetch(B + "/api/designs/" + d.id + "/client", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Test Client", phone: "+91 90000 00000" }) });
+  const r = await fetch(B + "/api/designs/" + d.id + "/spec-sheet.svg?inline=1", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ finish: "Merino White Gloss Acrylic" }) });
+  const svg = await r.text();
+  ok("POST sheet shows finish swatch + Prepared-for", r.status === 200 && /Acrylic Finish/.test(svg) && /Prepared for: Test Client/.test(svg));
+}
 
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: "new", protocol: "pipe", args: ["--no-sandbox", "--disable-dev-shm-usage", "--headless=new", "--use-gl=angle", "--use-angle=swiftshader", "--ignore-gpu-blocklist"], timeout: 60000 });
 try {

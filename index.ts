@@ -3090,9 +3090,12 @@ function ssTitleFor(type: string): { title: string; sub: string } {
 }
 
 // Material palette swatches per type (name, sub-line, fill, optional fluted overlay).
-function ssMaterials(type: string, layout: any): { name: string; sub: string; fill: string; flute?: boolean; glass?: boolean }[] {
+// `finish` (when supplied) is the user's actual chosen 3D finish — its swatch is
+// shown FIRST so the sheet reflects the real selection, not just a per-type default.
+function ssMaterials(type: string, layout: any, finish?: string): { name: string; sub: string; fill: string; flute?: boolean; glass?: boolean }[] {
   const t = (type || "").toLowerCase();
-  const fin = String((layout && layout.finish) || "").toLowerCase();
+  const fin = String(finish || (layout && layout.finish) || "").toLowerCase();
+  const base = (): { name: string; sub: string; fill: string; flute?: boolean; glass?: boolean }[] => {
   const walnut = { name: "Wood Finish", sub: "Walnut", fill: "#6b4a2f", flute: true };
   const lam = { name: "Matte Laminate", sub: "Beige", fill: "#d8c9b0" };
   const quartz = { name: "Quartz Stone", sub: "Calacatta", fill: "#ece7dd" };
@@ -3113,6 +3116,17 @@ function ssMaterials(type: string, layout: any): { name: string; sub: string; fi
   if (t.includes("vanity") || t.includes("dress")) return [{ name: "Laminate", sub: "Walnut", fill: "#6b4a2f", flute: true }, acr, mirror, ali, led];
   if (t.includes("crockery")) return [lam, { name: "Wood Finish", sub: "Walnut", fill: "#6b4a2f", flute: true }, { name: "Glass Shutter", sub: "Frosted", fill: "#cfe6ee", glass: true }, led];
   return [lam, walnut, quartz, led];
+  };
+  const list = base();
+  if (finish && fin && !/color-?coded/.test(fin)) {   // prepend the user's actual finish swatch
+    const isAcr = fin.includes("acrylic"), isVen = fin.includes("veneer"), isPu = fin.includes("pu ") || fin.endsWith(" pu") || fin.includes("paint");
+    const fcol = isAcr ? "#f2efe9" : isVen ? "#7a4a25" : isPu ? "#e7e2d6" : "#d8c9b0";
+    const fname = isAcr ? "Acrylic Finish" : isVen ? "Veneer Finish" : isPu ? "PU Paint" : "Laminate Finish";
+    const sub = finish.length > 20 ? finish.slice(0, 20) : finish;
+    list.unshift({ name: fname, sub, fill: fcol, flute: isVen });
+    if (list.length > 6) list.length = 6;
+  }
+  return list;
 }
 
 // Specifications rows (label, value) derived from the layout.
@@ -3374,7 +3388,10 @@ function furnitureHardware(type: string): string[] {
 }
 const SHEET_W = 1240;        // fixed presentation-sheet width (px)
 // Build the full presentation spec sheet for a generated layout.
-function specSheet(layout: any, meta: { type?: string; id?: string } = {}): string {
+// meta.finish = the user's actual chosen 3D finish (palette reflects it);
+// meta.client = Bill-To dict (shows "Prepared for"); meta.heroDataUrl = a rendered
+// 3D / photoreal image to use as the hero instead of the line elevation.
+function specSheet(layout: any, meta: { type?: string; id?: string; finish?: string; client?: any; heroDataUrl?: string } = {}): string {
   const type = meta.type || layout.designType || layout.type || "Modular Kitchen";
   const W = SHEET_W, M = 22, gut = 16;
   const innerW = W - M * 2;
@@ -3389,7 +3406,9 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
   parts.push(ssText(M + 23, y + 60, sub, 11.5, "#c9c0ad", "400"));
   parts.push(ssText(W - M - 18, y + 32, MKW.name, 12, "#e9e1cd", "700", "end"));
   parts.push(ssText(W - M - 18, y + 50, "2D Drawing · Plan · Elevation · Detail", 9.5, "#b3a98f", "400", "end"));
-  parts.push(ssText(W - M - 18, y + 66, MKW.area, 9, "#9b917a", "400", "end"));
+  const cl = meta.client;
+  if (cl && (cl.name || cl.phone)) parts.push(ssText(W - M - 18, y + 66, "Prepared for: " + [cl.name, cl.phone].filter(Boolean).join(" · "), 9, "#d9cdb0", "600", "end"));
+  else parts.push(ssText(W - M - 18, y + 66, MKW.area, 9, "#9b917a", "400", "end"));
   y += bH + gut;
 
   // ── 2. Hero (annotated elevation) + right column (palette + highlights) ──
@@ -3427,7 +3446,7 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
     });
   }
   // right column: material palette
-  const mats = ssMaterials(type, layout);
+  const mats = ssMaterials(type, layout, meta.finish);
   const palH = 200;
   parts.push(ssCard(rcX, y, rcW, palH, "Material Palette"));
   const swPerRow = 3, swGap = 10, swW = (rcW - 26 - swGap * (swPerRow - 1)) / swPerRow, swH = 52;
@@ -4358,16 +4377,32 @@ app.get("/api/designs/:id/export.svg", (c) => {
 });
 // Presentation spec sheet (StudioNuvique-style 2D drawing). inline=1 → render in
 // the browser preview (no download header); default → attachment for the PDF/SVG save.
-app.get("/api/designs/:id/spec-sheet.svg", (c) => {
-  const d = loadDesign(c.req.param("id"));
-  if (!d) return c.json({ error: "Design not found" }, 404);
-  const svg = specSheet(d.layout, { type: d.row.designType, id: d.row.id });
+// The Bill-To client (when set) is stamped on every sheet. GET = plain; POST carries
+// the optional live { finish, hero } so the palette reflects the real selection and
+// the hero can be the rendered 3D / photoreal view.
+function emitSpecSheet(c: any, d: any, extra: { finish?: string; heroDataUrl?: string }) {
+  const client = (() => { try { return quoteClient(d.row.id); } catch { return {}; } })();
+  const svg = specSheet(d.layout, { type: d.row.designType, id: d.row.id, client, ...extra });
   c.header("Content-Type", "image/svg+xml");
   if (c.req.query("inline") !== "1") {
     const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-spec-sheet.svg`;
     c.header("Content-Disposition", `attachment; filename="${fname}"`);
   }
   return c.body(svg);
+}
+app.get("/api/designs/:id/spec-sheet.svg", (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  return emitSpecSheet(c, d, {});
+});
+app.post("/api/designs/:id/spec-sheet.svg", async (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* no body — fine */ }
+  const finish = typeof body.finish === "string" ? body.finish.slice(0, 60) : undefined;
+  const heroDataUrl = typeof body.hero === "string" && body.hero.startsWith("data:image/") && body.hero.length < 9_000_000 ? body.hero : undefined;
+  return emitSpecSheet(c, d, { finish, heroDataUrl });
 });
 // 4-type modular kitchen comparison sheet (standalone — generates the four shapes).
 app.get("/api/spec-sheet/kitchens.svg", (c) => {
@@ -4792,7 +4827,10 @@ const frontendHTML = `<!DOCTYPE html>
     // ── Presentation spec sheet (StudioNuvique-style 2D drawing) — fetch the server-composed SVG,
     //    preview it inline, or rasterize it to a single-page PDF. ──
     const fetchSpecSheet = async (result) => {
-      const r = await fetch("/api/designs/" + result.id + "/spec-sheet.svg?inline=1");
+      const body = {};
+      try { if (window.__adsFinish) body.finish = window.__adsFinish; } catch (e) {}   // user's actual 3D finish → palette
+      try { if (window.__ads3D || window.__adsPR) body.hero = window.__ads3D || window.__adsPR; } catch (e) {}   // rendered hero (if the 3D / photoreal view has been visited)
+      const r = await fetch("/api/designs/" + result.id + "/spec-sheet.svg?inline=1", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!r.ok) throw new Error("HTTP " + r.status);
       return await r.text();
     };
@@ -5876,6 +5914,7 @@ const frontendHTML = `<!DOCTYPE html>
           color: S.c, roughness: S.r != null ? S.r : T.r, metalness: T.m, wood: !!S.w, smooth: !!T.smooth, env: T.env };
       };
       const FIN = finOf();
+      try { window.__adsFinish = FIN && FIN.name; } catch (e) {}   // stash current finish for the spec-sheet palette
       const [lightKey, setLightKey] = useState("warm");   // warm key default — cosier, richer "designer render" feel (neutral read cool/clinical)
       const [demoOn, setDemoOn] = useState(false);   // 🎛 live accessory demo (doors/drawers/pull-outs/carousel in motion)
       const demoRef = React.useRef(false), demoT0Ref = React.useRef(0);
@@ -7442,6 +7481,9 @@ const frontendHTML = `<!DOCTYPE html>
       const [type, setType] = useState(TYPES[0]);
       const [wall, setWall] = useState(3600);
       const [wallB, setWallB] = useState(2400);
+      // Sensible default HEIGHT (wallB) when switching to a furniture type whose typical
+      // height differs from the kitchen side-wall default — Mandir ~1050, Wall Panel ~2700, etc.
+      React.useEffect(() => { const HV = { "Mandir": "1050", "Wall Panel": "2700", "Wardrobe": "2400", "Crockery Unit": "2100", "LCD/TV Panel": "2400", "Vanity Unit": "1200" }; if (HV[type]) setWallB(HV[type]); }, [type]);
       const [wallC, setWallC] = useState(2400);
       const [result, setResult] = useState(null);
       const [liveRuns, setLiveRuns] = useState(null);   // §7.9 shared room model (edits lifted from elevations)
