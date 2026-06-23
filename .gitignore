@@ -66,6 +66,7 @@ dbg-*
 !verify-client.mjs
 !verify-gallery.mjs
 !verify-specsheet.mjs
+!verify-cabmat.mjs
 
 # editor/OS
 .DS_Store

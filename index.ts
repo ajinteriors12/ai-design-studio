@@ -3681,12 +3681,14 @@ function kitchenCompareSheet(): string {
 // ── Production panel cut list (12.pdf §5.7.12) — per-cabinet carcass panels for
 //    factory cutting (NOT sheet-nesting/optimization, which is forbidden). Each
 //    row: Height × Width × Qty × Description, 18 mm board, 3 mm shutter gaps. ──
-interface CutRow { h: number; w: number; qty: number; desc: string; scope?: string; face?: boolean; }
+interface CutRow { h: number; w: number; qty: number; desc: string; scope?: string; face?: boolean; ck?: string; }
 function cutList(layout: any): CutRow[] {
   const rows: CutRow[] = [], t = 18, gap = 3, red = handleReduction(layout.handle || "D Handle");
   // scope = base|wall|tall (which finish applies), face = true for visible fronts
   // (shutters/drawer fronts → finish material), false for carcass panels (→ ply).
-  const add = (h: number, w: number, qty: number, desc: string, scope: string, face: boolean) => { if (w > 0 && h > 0) rows.push({ h: Math.round(h), w: Math.round(w), qty, desc, scope, face }); };
+  // ck = cabinet key (section:runIndex:arrayIndex) so a per-cabinet finish override (§2) can be joined per row.
+  let curCK = "";
+  const add = (h: number, w: number, qty: number, desc: string, scope: string, face: boolean) => { if (w > 0 && h > 0) rows.push({ h: Math.round(h), w: Math.round(w), qty, desc, scope, face, ck: curCK }); };
   const carcass = (rn: string, c: any, Hc: number, D: number, prefix: string, scope: string) => {
     const W = c.w;
     add(Hc, D, 2, `${rn}: ${prefix}${c.label} — Side Panel`, scope, false);
@@ -3694,11 +3696,12 @@ function cutList(layout: any): CutRow[] {
     add(D, W - 2 * t, 1, `${rn}: ${prefix}${c.label} — Top / Rail`, scope, false);
     add(Hc, W, 1, `${rn}: ${prefix}${c.label} — Back`, scope, false);
   };
-  for (const run of layout.runs || []) {
+  (layout.runs || []).forEach((run: any, ri: number) => {
     const rn = run.name;
-    for (const c of run.base || []) {
-      if (c.kind === "filler") { add(720, c.w, 1, `${rn}: Filler Panel`, "base", false); continue; }
-      if (c.kind === "sidepanel" || c.kind === "chimney" || c.kind === "hob") continue;
+    (run.base || []).forEach((c: any, bi: number) => {
+      curCK = "base:" + ri + ":" + bi;
+      if (c.kind === "filler") { add(720, c.w, 1, `${rn}: Filler Panel`, "base", false); return; }
+      if (c.kind === "sidepanel" || c.kind === "chimney" || c.kind === "hob") return;
       const tall = isTall(c.kind), Hc = tall ? 2100 : 720, D = 560, scope = tall ? "tall" : "base";
       carcass(rn, c, Hc, D, "", scope);
       if (isDrawerKind(c.kind) && c.drawers > 0) {
@@ -3712,16 +3715,17 @@ function cutList(layout: any): CutRow[] {
         add(Hc - 6 - red, (c.w - (n + 1) * gap) / n, n, `${rn}: ${c.label} — Shutter`, scope, true);
         if (tall) add(D - 20, c.w - 2 * t, c.kind === "tall-hiunit" ? 2 : 5, `${rn}: ${c.label} — Shelf`, scope, false);
       }
-    }
-    for (const c of run.wallCabs || []) {
-      if (c.kind === "chimney" || c.kind === "sidepanel") continue;
+    });
+    (run.wallCabs || []).forEach((c: any, bi: number) => {
+      curCK = "wall:" + ri + ":" + bi;
+      if (c.kind === "chimney" || c.kind === "sidepanel") return;
       const Hc = 720, D = 320;
       carcass(rn, c, Hc, D, "Wall ", "wall");
       const n = shutterCount(c.w);
       add(Hc - 6 - red, (c.w - (n + 1) * gap) / n, n, `${rn}: Wall ${c.label} — Shutter`, "wall", true);
       if (c.kind !== "gtpt") add(D - 20, c.w - 2 * t, 2, `${rn}: Wall ${c.label} — Shelf`, "wall", false);
-    }
-  }
+    });
+  });
   return rows;
 }
 // Material label for a scope (falls back to the primary finish, else generic).
@@ -3845,42 +3849,46 @@ function validateManufacturing(layout: any): { name: string; ok: boolean; note: 
   }
   return checks;
 }
-function cutListCsv(layout: any, scopes?: any): string {
+function cutListCsv(layout: any, scopes?: any, cabMats?: any): string {
+  cabMats = cabMats || {};
   const rows = cutList(layout);
   const lines = ["S.No,Height(mm),Width(mm),Qty,Material,Description"];
-  rows.forEach((r, i) => { const mat = r.face ? (materialLabelFor(scopes, r.scope || "base") || "Finish: laminate / acrylic / PU") : "18 mm BWP ply"; lines.push(`${i + 1},${r.h},${r.w},${r.qty},"${mat.replace(/"/g, '""')}","${r.desc.replace(/"/g, '""')}"`); });
+  rows.forEach((r, i) => { const mat = r.face ? (matLabelOf(cabMaterialFor(scopes, cabMats, r.ck || "", r.scope || "base")) || "Finish: laminate / acrylic / PU") : "18 mm BWP ply"; lines.push(`${i + 1},${r.h},${r.w},${r.qty},"${mat.replace(/"/g, '""')}","${r.desc.replace(/"/g, '""')}"`); });
   return lines.join("\n");
 }
 // BOQ summary with finish-material lines appended (face area × +15% wastage per scope).
-function boqWithMaterial(layout: any, scopes: any): { item: string; qty: number; unit: string }[] {
+function boqWithMaterial(layout: any, scopes: any, cabMats?: any): { item: string; qty: number; unit: string }[] {
   const rows = boq(layout);
-  if (scopes) for (const scope of MAT_SCOPES) {
-    const m = scopes[scope]; if (!m) continue;
-    const face = scopeFaceSqft(layout, scope); if (face <= 0) continue;
-    rows.push({ item: "Finish [" + (SCOPE_LABEL[scope] || scope) + "] — " + [m.brand, m.colorName].filter(Boolean).join(" ") + (m.code ? " (" + m.code + ")" : "") + " · incl. 15% wastage", qty: Math.round(face * 1.15 * 10) / 10, unit: "sq.ft" });
+  if (scopes) for (const fl of materialFaceLines(layout, scopes, cabMats)) {
+    const m = fl.mat; if (!m) continue;
+    const face = mm2ToSqft(fl.faceMm2); if (face <= 0) continue;
+    const scopeLbl = fl.override ? "Custom · per-cabinet" : (SCOPE_LABEL[fl.scope] || fl.scope);
+    rows.push({ item: "Finish [" + scopeLbl + "] — " + matLabelOf(m) + " · incl. 15% wastage", qty: Math.round(face * 1.15 * 10) / 10, unit: "sq.ft" });
   }
   return rows;
 }
 // Production data with the chosen MATERIAL joined per scope — cut list (face panels
 // get the finish material, carcass panels get 18 mm ply) + cabinet schedule + BOQ.
-function productionData(layout: any, scopes: any): { cutList: any[]; cabinetSchedule: any[]; boq: any[] } {
+function productionData(layout: any, scopes: any, cabMats?: any): { cutList: any[]; cabinetSchedule: any[]; boq: any[] } {
+  cabMats = cabMats || {};
   const shN = (w: number) => (w <= 600 ? 1 : w <= 1200 ? 2 : 3);
-  const cl = (layout.cutList || cutList(layout)).map((r: any) => ({ h: r.h, w: r.w, qty: r.qty, desc: r.desc, material: r.face ? (materialLabelFor(scopes, r.scope || "base") || "Finish: laminate / acrylic / PU") : "18 mm BWP ply" }));
+  // §2: a face panel adopts its cabinet's own override finish if set, else the scope finish.
+  const cl = (layout.cutList || cutList(layout)).map((r: any) => ({ h: r.h, w: r.w, qty: r.qty, desc: r.desc, material: r.face ? (matLabelOf(cabMaterialFor(scopes, cabMats, r.ck || "", r.scope || "base")) || "Finish: laminate / acrylic / PU") : "18 mm BWP ply" }));
   const cab: any[] = []; let n = 0;
   const matCols = (m: any) => [m ? [m.brand, m.colorName].filter(Boolean).join(" ") : "", m ? (m.finishType || "") : "", m ? (m.code || "") : ""];
-  for (const r of (layout.runs || [])) {
-    for (const c of (r.base || [])) {
-      if (c.kind === "filler" || c.kind === "sidepanel") continue;
-      const tall = isTall(c.kind), m = scopes && (scopes[tall ? "tall" : "base"] || primaryMaterial(scopes));
+  (layout.runs || []).forEach((r: any, ri: number) => {
+    (r.base || []).forEach((c: any, bi: number) => {
+      if (c.kind === "filler" || c.kind === "sidepanel") return;
+      const tall = isTall(c.kind), m = cabMaterialFor(scopes, cabMats, "base:" + ri + ":" + bi, tall ? "tall" : "base");
       cab.push([++n, r.name || "", tall ? "Tall" : "Base", c.label || c.kind, Math.round(c.w), tall ? (STD.wallStart + STD.wallHeight) : STD.baseHeight, STD.baseDepth, c.drawers > 0 ? c.drawers + " drawer fronts" : (c.kind === "open-shelf" ? "open" : shN(c.w) + " shutter" + (shN(c.w) > 1 ? "s" : "")), ...matCols(m)]);
-    }
-    for (const c of (r.wallCabs || [])) {
-      if (c.kind === "filler" || c.kind === "sidepanel" || c.kind === "chimney") continue;
-      const m = scopes && (scopes.wall || primaryMaterial(scopes));
+    });
+    (r.wallCabs || []).forEach((c: any, bi: number) => {
+      if (c.kind === "filler" || c.kind === "sidepanel" || c.kind === "chimney") return;
+      const m = cabMaterialFor(scopes, cabMats, "wall:" + ri + ":" + bi, "wall");
       cab.push([++n, r.name || "", "Wall", c.label || c.kind, Math.round(c.w), STD.wallHeight, STD.wallDepth, c.kind === "open-shelf" ? "open" : shN(c.w) + " shutter" + (shN(c.w) > 1 ? "s" : ""), ...matCols(m)]);
-    }
-  }
-  return { cutList: cl, cabinetSchedule: cab, boq: boqWithMaterial(layout, scopes) };
+    });
+  });
+  return { cutList: cl, cabinetSchedule: cab, boq: boqWithMaterial(layout, scopes, cabMats) };
 }
 
 // ── Hardware schedule (12.pdf master rule) — soft-close hinges, drawer slides,
@@ -4670,13 +4678,13 @@ app.get("/api/designs/:id/cutlist.csv", (c) => {
   const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-cutlist.csv`;
   c.header("Content-Type", "text/csv");
   c.header("Content-Disposition", `attachment; filename="${fname}"`);
-  return c.body(cutListCsv(d.layout, materialScopes(d.row.id)));
+  return c.body(cutListCsv(d.layout, materialScopes(d.row.id), cabinetMaterials(d.row.id)));
 });
 // Production data (cut list + cabinet schedule) with the chosen material joined.
 app.get("/api/designs/:id/production", (c) => {
   const d = loadDesign(c.req.param("id"));
   if (!d) return c.json({ error: "Design not found" }, 404);
-  return c.json({ data: productionData(d.layout, materialScopes(d.row.id)) });
+  return c.json({ data: productionData(d.layout, materialScopes(d.row.id), cabinetMaterials(d.row.id)) });
 });
 app.get("/api/designs/:id/hardware.csv", (c) => {
   const d = loadDesign(c.req.param("id"));
@@ -6118,7 +6126,7 @@ const frontendHTML = `<!DOCTYPE html>
     // Extrudes the generated cabinets into an interactive Three.js scene. Runs are
     // placed on their walls by shape; base/wall/tall cabinets become boxes with
     // edge outlines, plus floor, back walls, counters and chimney.
-    function Room3D({ runs, type, dims, tile, camRef, visible, structures, room, onRunsEdit, handle, designId }) {
+    function Room3D({ runs, type, dims, tile, camRef, visible, structures, room, onRunsEdit, handle, designId, onCabSelect }) {
       const TL = tile || { on: true, color: "#e8eef0", grid: "#c2d0d4", size: 100, pattern: "grid" };
       const ref = React.useRef(null);
       // 5.x §4.16 material/finish engine + §4.17 lighting presets — pure visualization
@@ -6197,6 +6205,11 @@ const frontendHTML = `<!DOCTYPE html>
       const [buildVer, setBuildVer] = useState(0);
       // §3.2 #5: a stored/synced PBR material set (server material library) overrides the front finish in the live scene.
       const [serverPBR, setServerPBR] = useState(null);
+      // §2 per-cabinet finish overrides — map of cabinetKey → THREE-ready PBR descriptor; re-skins single cabinets.
+      const [cabMats, setCabMats] = useState({});
+      const [paintMode, setPaintMode] = useState(false);
+      const paintRef = React.useRef(false);
+      React.useEffect(() => { paintRef.current = paintMode; }, [paintMode]);
       const loadServerMaterial = React.useCallback(() => {
         if (!designId) return;
         fetch("/api/designs/" + designId + "/3d/materials").then((r) => r.json()).then((j) => {
@@ -6205,13 +6218,27 @@ const frontendHTML = `<!DOCTYPE html>
           if (front && front.pbr) setServerPBR(front.pbr);
         }).catch(() => {});
       }, [designId]);
-      React.useEffect(() => { loadServerMaterial(); }, [loadServerMaterial]);
+      const loadCabMats = React.useCallback(() => {
+        if (!designId) { setCabMats({}); return; }
+        fetch("/api/designs/" + designId + "/material").then((r) => r.json()).then((j) => {
+          const cb = (j && j.data && j.data.cabinets) || {}, out = {};
+          Object.keys(cb).forEach((k) => {
+            const m = cb[k]; if (!m || !m.colorCode || !/^#[0-9a-fA-F]{6}$/.test(m.colorCode)) return;
+            const ft = String(m.finishType || "").toLowerCase();
+            const gloss = /acrylic|gloss/.test(ft), matt = /matt|matte/.test(ft), pu = /pu|polyu/.test(ft);
+            out[k] = { color: parseInt(m.colorCode.slice(1), 16), roughness: gloss ? 0.08 : matt ? 0.85 : pu ? 0.3 : 0.5, metalness: 0, smooth: gloss || pu, name: [m.brand, m.colorName].filter(Boolean).join(" "), code: m.code || "" };
+          });
+          setCabMats(out);
+        }).catch(() => {});
+      }, [designId]);
+      React.useEffect(() => { loadServerMaterial(); loadCabMats(); }, [loadServerMaterial, loadCabMats]);
+      React.useEffect(() => { try { window.__adsCabMatN = () => Object.keys(cabMats || {}).length; window.__adsPaintMode = () => paintRef.current; } catch (e) {} }, [cabMats]);   // §2 test probes
       // cross-tab: the Generator SSE bus re-broadcasts material changes as a window event → re-skin here.
       React.useEffect(() => {
-        const onMat = (e) => { const d = e.detail || {}; if (d.designId && d.designId !== designId) return; if (d.pbr && (d.target === "kind:shutter" || d.target === "project")) setServerPBR(d.pbr); else loadServerMaterial(); };
+        const onMat = (e) => { const d = e.detail || {}; if (d.designId && d.designId !== designId) return; if (d.pbr && (d.target === "kind:shutter" || d.target === "project")) setServerPBR(d.pbr); else { loadServerMaterial(); loadCabMats(); } };
         window.addEventListener("ads-material", onMat);
         return () => window.removeEventListener("ads-material", onMat);
-      }, [designId, loadServerMaterial]);
+      }, [designId, loadServerMaterial, loadCabMats]);
       React.useEffect(() => {
         visRef.current = visible !== false;
         if (visible !== false) {
@@ -6222,7 +6249,7 @@ const frontendHTML = `<!DOCTYPE html>
       // dep WATCHER (runs every render): the build effect is keyed ONLY to buildVer, so while the 3D tab is
       // hidden a prop change does NOT tear down the live scene — it just queues a rebuild for show-time.
       React.useEffect(() => {
-        const want = [runs, type, FIN.key, lightKey, tile, renderMode, structures, handle, serverPBR];   // 18.pdf §4: handle-system change → regenerate handle geometry; §3.2 #5: serverPBR re-skins fronts
+        const want = [runs, type, FIN.key, lightKey, tile, renderMode, structures, handle, serverPBR, cabMats];   // 18.pdf §4: handle-system change → regenerate handle geometry; §3.2 #5: serverPBR re-skins fronts; §2: cabMats re-skins individual cabinets
         const cur = depsRef.current;
         if (!cur) { depsRef.current = want; return; }   // first render — the mount build covers it
         if (!want.some((v, ix) => v !== cur[ix])) return;
@@ -6599,6 +6626,21 @@ const frontendHTML = `<!DOCTYPE html>
         if (matBody) matBody.name = "Cabinet_" + String(finM.name || "finish").replace(/[^A-Za-z0-9]+/g, "_");
         const matGlass = new THREE.MeshStandardMaterial({ color: 0xaac6d2, transparent: true, opacity: 0.36, roughness: 0.08, metalness: 0.1, envMapIntensity: 1.0 }); matGlass.name = "Glass";
         const matCounter = new THREE.MeshStandardMaterial({ map: graniteTex, color: 0xffffff, roughness: 0.16, metalness: 0.2, envMapIntensity: 1.0 }); matCounter.name = "Countertop";   // polished black granite — glossy/reflective like the references
+        // §2: per-cabinet finish override. ckOf maps a cabinet's meta → its key; ovrMat returns a cached
+        // material in that cabinet's own colour (carcass + fronts), else null → falls back to the shared finish.
+        const ovrCache = {};
+        const ckOf = (meta) => (meta && meta.ri != null && meta.bi != null) ? ((meta.row === "Wall" ? "wall" : "base") + ":" + meta.ri + ":" + meta.bi) : null;
+        const ovrMat = (meta) => {
+          const ck = ckOf(meta); if (!ck) return null;
+          const ov = cabMats && cabMats[ck]; if (!ov || ov.color == null) return null;
+          if (ovrCache[ck]) return ovrCache[ck];
+          const mm = REAL
+            ? new THREE.MeshPhysicalMaterial({ color: ov.color, roughness: ov.roughness != null ? ov.roughness : 0.4, metalness: ov.metalness || 0, envMapIntensity: 0.42, clearcoat: ov.smooth ? 1.0 : 0.3, clearcoatRoughness: ov.smooth ? 0.06 : 0.4 })
+            : new THREE.MeshStandardMaterial({ color: ov.color, roughness: ov.roughness != null ? ov.roughness : 0.6, metalness: ov.metalness || 0, envMapIntensity: 0.35 });
+          mm.name = "Cabinet_ovr_" + ck.replace(/[^A-Za-z0-9]+/g, "_");
+          mm.polygonOffset = true; mm.polygonOffsetFactor = 1; mm.polygonOffsetUnits = 1;
+          ovrCache[ck] = mm; return mm;
+        };
         const addBox = (pl, centerLen, wAlong, depth, h, yc, color, off, glass, body, meta, matName) => {
           const g = new THREE.BoxGeometry(Math.max(20, wAlong), h, depth);
           // §4.16: a cabinet "body" adopts the chosen realistic finish (when not "functional");
@@ -6607,7 +6649,7 @@ const frontendHTML = `<!DOCTYPE html>
           // 5.9.9: glass shutters render as translucent glass; finished bodies share one named laminate material.
           let mat;
           if (glass) mat = matGlass;
-          else if (useFin && matBody) mat = matBody;
+          else if (useFin && matBody) mat = ovrMat(meta) || matBody;   // §2: this cabinet's own finish, else the shared finish
           else if (matName === "Countertop") mat = matCounter;
           else { mat = new THREE.MeshStandardMaterial({ color, roughness: 0.75 }); mat.name = matName || (body ? "Cabinet" : "Trim"); }
           mat.polygonOffset = true; mat.polygonOffsetFactor = 1; mat.polygonOffsetUnits = 1;   // push faces back so overlaid EdgesGeometry lines don't z-fight/shiver
@@ -6730,7 +6772,8 @@ const frontendHTML = `<!DOCTYPE html>
         const easeS = (p) => p * p * (3 - 2 * p);
         const WIREM = () => { const m = new THREE.MeshStandardMaterial({ color: 0xbfc8d2, roughness: 0.32, metalness: 0.8, envMapIntensity: 0.9 }); m.name = "Basket_Wire"; return m; };
         const CAVM = new THREE.MeshStandardMaterial({ color: 0x191d22, roughness: 0.95 }); CAVM.name = "Cavity";
-        const matFront = matBody || new THREE.MeshStandardMaterial({ color: 0xdfe8f4, roughness: 0.6 });
+        const matFrontBase = matBody || new THREE.MeshStandardMaterial({ color: 0xdfe8f4, roughness: 0.6 });
+        let matFront = matFrontBase;   // §2: buildMech re-points this to a per-cabinet override (if any) before building that cabinet's fronts; the door/drawer helpers close over it
         const wv = (pl, along, off, y) => new THREE.Vector3(pl.o[0] + pl.a[0] * along + pl.n[0] * off, y, pl.o[1] + pl.a[1] * along + pl.n[1] * off);
         const mkG = (pl, along, off, y) => { const g = new THREE.Group(); g.position.copy(wv(pl, along, off, y)); g.rotation.y = (pl.a[0] === 0 ? Math.PI / 2 : 0); if (curMechKey) { g.userData.mechKey = curMechKey; if (curMechSpec) g.userData.spec = curMechSpec; g.userData.mechN = [pl.n[0], pl.n[1]]; } group.add(g); return g; };
         const mBox = (w2, h2, d2, mat2) => { const ms = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), mat2); ms.castShadow = true; ms.receiveShadow = true; return ms; };
@@ -6760,6 +6803,7 @@ const frontendHTML = `<!DOCTYPE html>
         const HAS_MECH = ["shutter", "sink", "drawer", "drawer2", "drawer3", "drawer-atta", "pullout", "corner", "wall", "glass-wall", "display", "gtpt", "tall-pantry", "tall-utility"];
         const buildMech = (pl, c, row, spec) => {
           if (HAS_MECH.indexOf(c.kind) < 0) return false;
+          matFront = ovrMat(spec) || matFrontBase;   // §2: this cabinet's fronts adopt its per-cabinet finish override (if any)
           curMechKey = ((spec && spec.run) || "r") + "|" + Math.round(c.x) + "|" + c.kind;   // one key per cabinet → click any of its parts to work it
           curMechSpec = spec || null;
           const FS = FSof(pl), cl = c.x + c.w / 2, lab = String(c.label || "");
@@ -6870,7 +6914,7 @@ const frontendHTML = `<!DOCTYPE html>
             if (pl.a[0] === 0) pm.rotation.y = Math.PI / 2;
             pm.receiveShadow = true; group.add(pm);
           })();
-          (run.wallCabs || []).forEach((c) => {
+          (run.wallCabs || []).forEach((c, bIdx) => {
             if (c.kind === "sidepanel") return;
             if (c.kind === "chimney") {   // realistic chimney: steel hood projecting over the hob + a flue/duct rising to the ceiling
               const cx = c.x + c.w / 2, Dh = D * 0.72;
@@ -6881,8 +6925,8 @@ const frontendHTML = `<!DOCTYPE html>
               return;
             }
             const glass = c.kind === "glass-wall" || c.kind === "display" || c.kind === "gtpt";   // 5.9.9
-            addBox(pl, c.x + c.w / 2, c.w - 6, WD, WH, WS + WH / 2, fill(c.kind), WD / 2, glass, true, meta(c, "Wall", WD, WH));
-            if (!buildMech(pl, c, "wall", meta(c, "Wall", WD, WH)) && !glass) addHandle(pl, c, WD, WS, WS + WH);
+            addBox(pl, c.x + c.w / 2, c.w - 6, WD, WH, WS + WH / 2, fill(c.kind), WD / 2, glass, true, meta(c, "Wall", WD, WH, bIdx));
+            if (!buildMech(pl, c, "wall", meta(c, "Wall", WD, WH, bIdx)) && !glass) addHandle(pl, c, WD, WS, WS + WH);
           });
           // §4.18/13.pdf §4: backsplash TILES between counter top and wall sill, on the wall surface
           const hasWallRun = (run.wallCabs || []).some((cc) => cc.kind !== "sidepanel");
@@ -7220,6 +7264,17 @@ const frontendHTML = `<!DOCTYPE html>
           }
           if (lastPick && lastPick.material && lastPick.material.emissive) lastPick.material.emissive.setHex(lastPick.__em || 0x000000);
           lastPick = null;
+          // §2 PAINT MODE: a click selects the cabinet (mechanism front OR carcass) for material
+          // assignment instead of working its mechanism — lift its key/label to the material picker.
+          if (paintRef.current && onCabSelect) {
+            const md = (mspec && mspec.ri != null) ? mspec : (kindHit && kindHit.userData && kindHit.userData.ri != null ? kindHit.userData : null);
+            if (md) {
+              const tgt = kindHit || mkObj;   // flash the picked cabinet so the user sees what they hit
+              if (tgt && tgt.material && tgt.material.emissive) { tgt.__em = tgt.material.emissive.getHex(); tgt.material.emissive.setHex(0x2563eb); lastPick = tgt; }
+              onCabSelect(md);
+            }
+            return;
+          }
           // User feedback (18.pdf session): clicking a front ONLY works its mechanism (open/close +
           // auto-zoom). No description/spec window opens — that panel was removed.
           if (mk && mechCtlRef.current) {
@@ -7422,6 +7477,9 @@ const frontendHTML = `<!DOCTYPE html>
           {/* §3.2 #5 — persist the current finish as an addressable PBR material set */}
           <button onClick={saveServerMaterial} title="Save the current brand finish as a stored PBR material set on this design"
             className="px-2 py-1 rounded text-xs font-medium bg-slate-600 hover:bg-slate-500 text-white">🎨 Save finish (PBR)</button>
+          {/* §2 per-cabinet material — toggle paint mode, then click any cabinet to assign its own finish */}
+          <button onClick={() => setPaintMode((v) => !v)} disabled={!designId} title="Paint mode: click any cabinet to give it its own finish (overrides the whole-unit finish for that cabinet only)"
+            className={"px-2 py-1 rounded text-xs font-medium disabled:opacity-60 text-white " + (paintMode ? "bg-rose-600 hover:bg-rose-500 ring-2 ring-rose-300" : "bg-teal-700 hover:bg-teal-600")}>{paintMode ? "🖌 Painting — click a cabinet" : "🖌 Paint cabinet"}</button>
           {matMsg && <span className="text-[11px] text-emerald-700">{matMsg}</span>}
           <button disabled={prLoading} onClick={() => runPhotoreal()}
             className="px-2 py-1 rounded text-xs font-semibold bg-gradient-to-r from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500 disabled:opacity-60 text-white">{prLoading ? "✨ Rendering… (~15s)" : "✨ AI Photoreal"}</button>
@@ -7838,7 +7896,17 @@ const frontendHTML = `<!DOCTYPE html>
       const [matRows, setMatRows] = useState([]);
       const [matFacets, setMatFacets] = useState(null);
       const [matPicked, setMatPicked] = useState(null);
-      const [matScope, setMatScope] = useState("all");   // §4 Apply-To: all | base | wall | tall
+      const [matScope, setMatScope] = useState("all");   // §4 Apply-To: all | base | wall | tall | cabinet (§2)
+      const [matCabKey, setMatCabKey] = useState(null);  // §2: target cabinet key when scope === "cabinet"
+      const [matCabLabel, setMatCabLabel] = useState(""); // §2: human label of the target cabinet
+      // §2: a cabinet was clicked in Paint mode → aim the material picker at just that cabinet.
+      const selectCabinet = (meta) => {
+        if (!meta || meta.ri == null || meta.bi == null) return;
+        const ck = (meta.row === "Wall" ? "wall" : "base") + ":" + meta.ri + ":" + meta.bi;
+        setMatScope("cabinet"); setMatCabKey(ck);
+        setMatCabLabel((meta.label || meta.kind || "Cabinet") + (meta.run ? " · " + meta.run : ""));
+        setMatOpen(true);
+      };
       const [matHarmony, setMatHarmony] = useState(null);   // §5 colour-harmony suggestions
       const [matHistory, setMatHistory] = useState([]);     // §11 material change history
       const loadHistory = () => { if (result && result.id) fetch("/api/designs/" + result.id + "/material-history").then((r) => r.json()).then((j) => setMatHistory(j.data || [])).catch(() => {}); };
@@ -7872,10 +7940,19 @@ const frontendHTML = `<!DOCTYPE html>
       }, [matOpen, matCat, matBrand, matQ, matReload]);
       const pickMaterial = (m) => {
         if (m.outOfStock && !matAdmin) { alert(m.colorName + " (" + m.code + ") is out of stock."); return; }
-        try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {}
+        const perCab = matScope === "cabinet" && !!matCabKey;   // §2: a single-cabinet override (don't touch the whole-unit headline finish)
+        if (!perCab) { try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {} }
         setMatPicked(m);
         try { if (m.colorCode) fetch("/api/materials/harmony?hex=" + m.colorCode.replace("#", "")).then((r) => r.json()).then((j) => setMatHarmony(j.data || null)).catch(() => {}); } catch (e) {}   // §5 pairing suggestions
-        try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...m, scope: matScope }) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); loadHistory(); }); } catch (e) {}   // persist (scoped) → flows into quote + sheet
+        try {
+          if (result && result.id) {
+            const body = perCab ? { ...m, scope: "cabinet", cabinetKey: matCabKey } : { ...m, scope: matScope };
+            fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(() => {
+              if (typeof refreshQuote === "function") refreshQuote(); loadHistory();
+              if (perCab) { try { window.dispatchEvent(new CustomEvent("ads-material", { detail: { designId: result.id } })); } catch (e) {} }   // §2: re-skin just-painted cabinet in the live 3D scene
+            });
+          }
+        } catch (e) {}   // persist (scoped/per-cabinet) → flows into quote + sheet + 3D
       };
       // §12 Theme creator
       const [themes, setThemes] = useState([]);
@@ -8490,8 +8567,10 @@ const frontendHTML = `<!DOCTYPE html>
                             <option value="base">Base cabinets</option>
                             <option value="wall">Wall cabinets</option>
                             <option value="tall">Tall units</option>
+                            {matCabKey && <option value="cabinet">This cabinet</option>}
                           </select>
                         </label>
+                        {matScope === "cabinet" && matCabKey && <span className="text-xs font-medium text-teal-700 self-center whitespace-nowrap">🖌 {matCabLabel || matCabKey}</span>}
                         <span className="text-xs text-slate-500 self-center whitespace-nowrap">{matRows.length} shown</span>
                       </div>
                       <div className="flex gap-2 mb-3 items-center text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1.5">
@@ -8538,7 +8617,7 @@ const frontendHTML = `<!DOCTYPE html>
                           </div>
                         </div>)}
                       </div>
-                      {matPicked && <div className="mt-3 text-xs text-emerald-700 flex items-center gap-2"><span style={{ background: matPicked.colorCode, width: 14, height: 14, borderRadius: 3, display: "inline-block", border: "1px solid #cbd5e1" }}></span>✓ Applied <b>{matPicked.brand} {matPicked.colorName}</b> ({matPicked.code}) to <b>{matScope === "all" ? "the whole unit" : matScope + " cabinets"}</b> — flows into the quotation & Spec Sheet. <button onClick={() => setMatOpen(false)} className="underline ml-1">Done</button></div>}
+                      {matPicked && <div className="mt-3 text-xs text-emerald-700 flex items-center gap-2"><span style={{ background: matPicked.colorCode, width: 14, height: 14, borderRadius: 3, display: "inline-block", border: "1px solid #cbd5e1" }}></span>✓ Applied <b>{matPicked.brand} {matPicked.colorName}</b> ({matPicked.code}) to <b>{matScope === "all" ? "the whole unit" : matScope === "cabinet" ? ("this cabinet — " + (matCabLabel || matCabKey)) : matScope + " cabinets"}</b> — flows into the quotation, Spec Sheet & 3D. <button onClick={() => setMatOpen(false)} className="underline ml-1">Done</button></div>}
                       {matHarmony && (
                         <div className="mt-2 p-2 bg-indigo-50 border border-indigo-200 rounded text-xs">
                           <div className="font-semibold text-indigo-800 mb-1">✨ Pairs well with</div>
@@ -8690,7 +8769,7 @@ const frontendHTML = `<!DOCTYPE html>
                         and merely toggled visible — one-click instant switching, camera preserved, no rebuild. */}
                     <div style={{ display: activeView === "3d" ? "block" : "none" }}>
                       <Room3D runs={liveRuns || result.runs} type={type} dims={{ wall, wallB, wallC }} tile={tile} camRef={cam3dRef}
-                        visible={activeView === "3d"} structures={structures} room={room} onRunsEdit={updateLiveRun} handle={result.handle} designId={result.id} />
+                        visible={activeView === "3d"} structures={structures} room={room} onRunsEdit={updateLiveRun} handle={result.handle} designId={result.id} onCabSelect={selectCabinet} />
                     </div>
                   </div>
                 </div>
@@ -9924,6 +10003,50 @@ function materialScopes(id: string): Record<string, any> {
   return out;
 }
 function primaryMaterial(scopes: Record<string, any>): any { return scopes.base || scopes.wall || scopes.tall || null; }
+// §2 per-cabinet material override — a cabinet's own finish (keyed section:runIdx:arrayIdx)
+// wins over its scope finish. Stored as a `cabinets` map inside the design_materials blob.
+const CK_RE = /^(base|wall):\d+:\d+$/;
+function cabinetMaterials(id: string): Record<string, any> {
+  const m = designMaterial(id); return (m && m.cabinets && typeof m.cabinets === "object") ? m.cabinets : {};
+}
+// Full material record (scopes + per-cabinet overrides) — what history snapshots / reverts restore.
+function fullMaterial(id: string): any { const s: any = materialScopes(id); const cb = cabinetMaterials(id); if (Object.keys(cb).length) s.cabinets = cb; return s; }
+function cabScope(c: any, section: string): string { return section === "wall" ? "wall" : (isTall(c.kind) ? "tall" : "base"); }
+// Visible front area (mm²) of one cabinet — matches scopeFaceSqft's per-kind rules.
+function cabFaceMm2(c: any, section: string): number {
+  if (!c || c.kind === "filler" || c.kind === "sidepanel") return 0;
+  if (section === "wall") return (c.w || 0) * (c.h || STD.wallHeight);
+  if (isTall(c.kind)) return (c.w || 0) * (STD.wallStart + STD.wallHeight);
+  return (c.w || 0) * (c.h || STD.baseHeight);
+}
+function matLabelOf(m: any): string { return m ? [m.brand, m.colorName].filter(Boolean).join(" ") + (m.code ? " (" + m.code + ")" : "") : ""; }
+// Material chosen for a cabinet: its own override (if any), else the scope finish.
+function cabMaterialFor(scopes: any, cabMats: any, ck: string, scope: string): any {
+  return (cabMats && cabMats[ck]) || (scopes && (scopes[scope] || primaryMaterial(scopes))) || null;
+}
+function mm2ToSqft(mm2: number): number { return Math.round(mm2 / 92903 * 10) / 10; }
+// Finish-material face lines (mm²) for costing/BOQ — scope aggregates (EXCLUDING overridden
+// cabinets) + one grouped line per per-cabinet override material. With no overrides this is
+// exactly the per-scope set (same faces) the quote/BOQ produced before. Consumers gate/format.
+function materialFaceLines(layout: any, scopes: any, cabMats?: any): { scope: string; mat: any; faceMm2: number; override: boolean }[] {
+  cabMats = cabMats || {};
+  if (layout.furniture) { const m = scopes && (scopes.base || primaryMaterial(scopes)); return [{ scope: "base", mat: m || null, faceMm2: (layout.furniture.widthMM || 0) * (layout.furniture.heightMM || 0), override: false }]; }
+  const scopeMm2: Record<string, number> = { base: 0, wall: 0, tall: 0 };
+  const ovr = new Map<string, { mat: any; faceMm2: number }>();
+  (layout.runs || []).forEach((run: any, ri: number) => {
+    const tally = (arr: any[], section: string) => (arr || []).forEach((c, bi) => {
+      const mm2 = cabFaceMm2(c, section); if (mm2 <= 0) return;
+      const o = cabMats[section + ":" + ri + ":" + bi];
+      if (o && o.code) { const k = "ovr:" + o.code; const e = ovr.get(k) || { mat: o, faceMm2: 0 }; e.faceMm2 += mm2; ovr.set(k, e); }
+      else scopeMm2[cabScope(c, section)] += mm2;
+    });
+    tally(run.base, "base"); tally(run.wallCabs, "wall");
+  });
+  const out: { scope: string; mat: any; faceMm2: number; override: boolean }[] = [];
+  for (const s of MAT_SCOPES) out.push({ scope: s, mat: scopes ? scopes[s] : null, faceMm2: scopeMm2[s], override: false });
+  for (const e of ovr.values()) out.push({ scope: "custom", mat: e.mat, faceMm2: e.faceMm2, override: true });
+  return out;
+}
 // Visible front/face area (sqft) per scope — basis for material costing (12.pdf).
 function scopeFaceSqft(layout: any, scope: string): number {
   const u = layout.furniture; if (u) return scope === "base" ? Math.round((u.widthMM || 0) * (u.heightMM || 0) / 92903 * 10) / 10 : 0;   // furniture front = "base"
@@ -9936,7 +10059,7 @@ function scopeFaceSqft(layout: any, scope: string): number {
   return Math.round(mm2 / 92903 * 10) / 10;   // 1 sqft = 92903 mm²
 }
 const SCOPE_LABEL: Record<string, string> = { base: "Base cabinets", wall: "Wall cabinets", tall: "Tall units" };
-function priceQuote(layout: any, rates: Record<string, number>, scopes?: Record<string, any>) {
+function priceQuote(layout: any, rates: Record<string, number>, scopes?: Record<string, any>, cabMats?: any) {
   const r = { ...DEFAULT_RATES, ...(rates || {}) };
   const lines = boq(layout).map((row) => {
     const key = rateKeyFor(row.item);
@@ -9944,12 +10067,14 @@ function priceQuote(layout: any, rates: Record<string, number>, scopes?: Record<
     const amount = Math.round(row.qty * rate);
     return { item: row.item, qty: row.qty, unit: row.unit, rate, amount };
   });
-  // §8/§13: finish material as costed lines — per scope, face area × rate + 15% factory wastage.
-  if (scopes) for (const scope of MAT_SCOPES) {
-    const mat = scopes[scope]; if (!mat || !(Number(mat.customerRate) > 0)) continue;
-    const face = scopeFaceSqft(layout, scope); if (face <= 0) continue;
+  // §8/§13 + §2: finish material as costed lines — per scope (overridden cabinets excluded)
+  // plus a grouped line per per-cabinet override, each face area × rate + 15% factory wastage.
+  if (scopes) for (const fl of materialFaceLines(layout, scopes, cabMats)) {
+    const mat = fl.mat; if (!mat || !(Number(mat.customerRate) > 0)) continue;
+    const face = mm2ToSqft(fl.faceMm2); if (face <= 0) continue;
     const qty = Math.round(face * 1.15 * 10) / 10, rate = Math.round(Number(mat.customerRate) * 100) / 100;
-    const label = "Finish [" + (SCOPE_LABEL[scope] || scope) + "] — " + [mat.brand, mat.colorName].filter(Boolean).join(" ") + (mat.code ? " (" + mat.code + ")" : "") + " · +15% wastage";
+    const scopeLbl = fl.override ? "Custom · per-cabinet" : (SCOPE_LABEL[fl.scope] || fl.scope);
+    const label = "Finish [" + scopeLbl + "] — " + matLabelOf(mat) + " · +15% wastage";
     lines.push({ item: label, qty, unit: mat.unit || "sqft", rate, amount: Math.round(qty * rate) });
   }
   const subtotal = lines.reduce((s, l) => s + l.amount, 0);
@@ -10009,20 +10134,20 @@ app.put("/api/designs/:id/rate-card", async (c) => {
   sqlite.prepare(`INSERT INTO rate_cards(design_id,rates,updated_at) VALUES(?,?,?)
     ON CONFLICT(design_id) DO UPDATE SET rates=excluded.rates, updated_at=excluded.updated_at`).run(id, JSON.stringify(merged), Date.now());
   auditEdit(id, d.row.designType, "adjustment", "rate-card updated");
-  const quote = priceQuote(d.layout, merged, materialScopes(id));
+  const quote = priceQuote(d.layout, merged, materialScopes(id), cabinetMaterials(id));
   broadcast(id, "quote", { total: quote.total });
   return c.json({ data: { ok: true, rates: merged, quote } });
 });
 app.get("/api/designs/:id/quote", (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
-  return c.json({ data: priceQuote(d.layout, quoteRates(id), materialScopes(id)) });
+  return c.json({ data: priceQuote(d.layout, quoteRates(id), materialScopes(id), cabinetMaterials(id)) });
 });
 app.get("/api/designs/:id/quote.csv", (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
   const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-quote.csv`;
   c.header("Content-Type", "text/csv");
   c.header("Content-Disposition", `attachment; filename="${fname}"`);
-  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id), materialScopes(id)), quoteClient(id)));
+  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id), materialScopes(id), cabinetMaterials(id)), quoteClient(id)));
 });
 // Per-design selected material (Material Management Module). Whitelisted catalog fields.
 app.get("/api/designs/:id/material", (c) => { const d = loadDesign(c.req.param("id")); if (!d) return c.json({ error: "Design not found" }, 404); return c.json({ data: designMaterial(c.req.param("id")) }); });
@@ -10033,14 +10158,25 @@ app.put("/api/designs/:id/material", async (c) => {
   const m: any = {}; for (const k of allow) if (b[k] != null) m[k] = typeof b[k] === "number" ? b[k] : String(b[k]).slice(0, 80);
   if (m.colorCode && !/^#[0-9a-fA-F]{6}$/.test(m.colorCode)) delete m.colorCode;
   // §4 Apply-To: scope = all | base | wall | tall (default all → whole unit).
-  const scope = ["all", "base", "wall", "tall"].includes(b.scope) ? b.scope : "all";
-  const cur = materialScopes(id);
-  if (scope === "all") { cur.base = m; cur.wall = m; cur.tall = m; } else { cur[scope] = m; }
+  // §2 per-cabinet: scope = cabinet (+ cabinetKey) sets/clears one cabinet's own finish.
+  const scope = ["all", "base", "wall", "tall", "cabinet"].includes(b.scope) ? b.scope : "all";
+  const cur: any = materialScopes(id);
+  const existingCab = cabinetMaterials(id);
+  if (Object.keys(existingCab).length) cur.cabinets = { ...existingCab };   // preserve per-cabinet overrides across any material write
+  let tag = "[" + scope + "]";
+  if (scope === "cabinet") {
+    const ck = String(b.cabinetKey || "");
+    if (!CK_RE.test(ck)) return c.json({ error: "invalid cabinetKey" }, 400);
+    cur.cabinets = cur.cabinets || {};
+    if (b.clear) { delete cur.cabinets[ck]; if (!Object.keys(cur.cabinets).length) delete cur.cabinets; tag = "cleared cabinet " + ck; }
+    else { cur.cabinets[ck] = m; tag = "cabinet " + ck; }
+  } else if (scope === "all") { cur.base = m; cur.wall = m; cur.tall = m; }
+  else { cur[scope] = m; }
   sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
     ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify(cur), Date.now());
-  auditEdit(id, d.row.designType, "adjustment", "material [" + scope + "]: " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
-  pushMaterialHistory(id, "Material [" + scope + "]: " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
-  broadcast(id, "material", { code: m.code || "", scope });
+  auditEdit(id, d.row.designType, "adjustment", "material " + tag + ": " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
+  pushMaterialHistory(id, "Material " + tag + ": " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
+  broadcast(id, "material", { code: m.code || "", scope, ck: scope === "cabinet" ? b.cabinetKey : undefined });
   return c.json({ data: { ok: true, scope, scopes: cur } });
 });
 
@@ -10076,12 +10212,14 @@ app.post("/api/designs/:id/apply-theme", async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const theme = listThemes().find((t) => t.id === b.themeId); if (!theme) return c.json({ error: "Theme not found" }, 404);
   const sc = theme.scopes || {};
+  const blob: any = { base: sc.base, wall: sc.wall, tall: sc.tall };
+  const existCab = cabinetMaterials(id); if (Object.keys(existCab).length) blob.cabinets = existCab;   // §2: keep per-cabinet overrides when a whole-unit theme is applied
   sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
-    ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify({ base: sc.base, wall: sc.wall, tall: sc.tall }), Date.now());
+    ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify(blob), Date.now());
   auditEdit(id, d.row.designType, "adjustment", "theme applied: " + theme.name);
   pushMaterialHistory(id, "Theme: " + theme.name);
   broadcast(id, "material", { theme: theme.name });
-  const quote = priceQuote(d.layout, quoteRates(id), materialScopes(id));
+  const quote = priceQuote(d.layout, quoteRates(id), materialScopes(id), cabinetMaterials(id));
   return c.json({ data: { ok: true, theme: theme.name, primary: primaryMaterial(sc), total: quote.total } });
 });
 
@@ -10089,7 +10227,7 @@ app.post("/api/designs/:id/apply-theme", async (c) => {
 sqlite.exec(`CREATE TABLE IF NOT EXISTS material_history (id TEXT PRIMARY KEY, design_id TEXT NOT NULL, snapshot TEXT NOT NULL, label TEXT NOT NULL, created_at INTEGER NOT NULL);`);
 function pushMaterialHistory(id: string, label: string) {
   try {
-    sqlite.prepare(`INSERT INTO material_history(id,design_id,snapshot,label,created_at) VALUES(?,?,?,?,?)`).run(randomUUID(), id, JSON.stringify(materialScopes(id)), String(label).slice(0, 80), Date.now());
+    sqlite.prepare(`INSERT INTO material_history(id,design_id,snapshot,label,created_at) VALUES(?,?,?,?,?)`).run(randomUUID(), id, JSON.stringify(fullMaterial(id)), String(label).slice(0, 80), Date.now());
     const old = (sqlite.prepare(`SELECT id FROM material_history WHERE design_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 50`).all(id) as any[]).map((r) => r.id);   // keep last 50
     if (old.length) { const del = sqlite.prepare(`DELETE FROM material_history WHERE id=?`); for (const x of old) del.run(x); }
   } catch { /* history is best-effort */ }
@@ -10107,7 +10245,7 @@ app.post("/api/designs/:id/material-revert", async (c) => {
     ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, row.snapshot, Date.now());
   pushMaterialHistory(id, "Reverted → " + row.label);
   broadcast(id, "material", { revert: true });
-  const quote = priceQuote(d.layout, quoteRates(id), materialScopes(id));
+  const quote = priceQuote(d.layout, quoteRates(id), materialScopes(id), cabinetMaterials(id));
   return c.json({ data: { ok: true, total: quote.total } });
 });
 // Client / "Bill To" details — persisted per design, addressed onto the quote + proposal.
