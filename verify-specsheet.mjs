@@ -111,6 +111,10 @@ try {
   let histOk = false;
   for (let i = 0; i < 14; i++) { await sleep(250); histOk = await page.evaluate(() => /Material history/.test(document.body.innerText)); if (histOk) break; }
   ok("material history records the change", histOk);
+  // §7 comparison — add a material to the compare strip
+  const cmp = await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => x.title === "Add to compare"); if (b) { b.click(); return true; } return false; });
+  await sleep(300);
+  ok("compare strip adds a material", cmp && await page.evaluate(() => /Compare \(\d\/4\)/.test(document.body.innerText)));
   // §12 Theme creator — select a built-in theme and apply it
   const themed = await page.evaluate(() => {
     const sel = [...document.querySelectorAll("select")].find((s) => [...s.options].some((o) => /Modern Luxury/.test(o.textContent || "")));

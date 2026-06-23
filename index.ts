@@ -7797,6 +7797,24 @@ const frontendHTML = `<!DOCTYPE html>
       const [matHistory, setMatHistory] = useState([]);     // §11 material change history
       const loadHistory = () => { if (result && result.id) fetch("/api/designs/" + result.id + "/material-history").then((r) => r.json()).then((j) => setMatHistory(j.data || [])).catch(() => {}); };
       const revertMaterial = (hid) => { if (!result || !result.id) return; fetch("/api/designs/" + result.id + "/material-revert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ historyId: hid }) }).then((r) => r.json()).then(() => { if (typeof refreshQuote === "function") refreshQuote(); loadHistory(); setMatPicked({ brand: "Reverted to", colorName: "a previous material", code: "↩", colorCode: "#64748b" }); }).catch(() => {}); };
+      // §7 comparison — up to 4 materials side-by-side on a cabinet silhouette
+      const [compare, setCompare] = useState([]);
+      const addCompare = (m, e) => { if (e) e.stopPropagation(); if (compare.some((x) => x.materialId === m.materialId)) return; if (compare.length >= 4) { alert("Compare up to 4 materials at a time."); return; } setCompare([...compare, m]); };
+      const removeCompare = (id) => setCompare(compare.filter((x) => x.materialId !== id));
+      const matSilhouette = (m) => (
+        <svg viewBox="0 0 120 150" style={{ width: "100%", maxWidth: 150, display: "block" }}>
+          <rect width="120" height="150" fill="#f1f5f9" />
+          <rect x="8" y="12" width="48" height="42" fill={m.colorCode} stroke="#94a3b8" strokeWidth="0.7" />
+          <rect x="64" y="12" width="48" height="42" fill={m.colorCode} stroke="#94a3b8" strokeWidth="0.7" />
+          <rect x="6" y="68" width="108" height="6" fill="#dbe3ee" />
+          <rect x="8" y="78" width="48" height="60" fill={m.colorCode} stroke="#94a3b8" strokeWidth="0.7" />
+          <rect x="64" y="78" width="48" height="60" fill={m.colorCode} stroke="#94a3b8" strokeWidth="0.7" />
+          <rect x="52" y="98" width="3" height="18" rx="1" fill="#334155" />
+          <rect x="65" y="98" width="3" height="18" rx="1" fill="#334155" />
+          <line x1="32" y1="44" x2="32" y2="52" stroke="#334155" strokeWidth="2" />
+          <line x1="88" y1="44" x2="88" y2="52" stroke="#334155" strokeWidth="2" />
+        </svg>
+      );
       React.useEffect(() => { if (!matFacets) fetch("/api/materials/facets").then((r) => r.json()).then((j) => setMatFacets(j.data)).catch(() => {}); }, [matFacets]);
       React.useEffect(() => {
         if (!matOpen) return;
@@ -8439,9 +8457,30 @@ const frontendHTML = `<!DOCTYPE html>
                         <button onClick={applyTheme} disabled={!themeSel} className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-40">Apply theme</button>
                         <button onClick={saveTheme} className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded">💾 Save current as Theme</button>
                       </div>
+                      {compare.length > 0 && (
+                        <div className="mb-3 p-2 bg-teal-50 border border-teal-200 rounded">
+                          <div className="font-semibold text-teal-800 text-xs mb-1">⊞ Compare ({compare.length}/4) <button onClick={() => setCompare([])} className="ml-2 underline text-teal-600 font-normal">clear</button></div>
+                          <div className="grid grid-cols-4 gap-2">
+                            {compare.map((m) => <div key={m.materialId} className="border border-slate-200 rounded overflow-hidden bg-white">
+                              {matSilhouette(m)}
+                              <div className="px-1 py-0.5">
+                                <div className="text-[10px] font-semibold text-slate-700 truncate">{m.colorName}</div>
+                                <div className="text-[9px] text-slate-500 truncate">{m.code} · {m.finishType} · ₹{m.customerRate}</div>
+                                <div className="flex gap-1 mt-0.5">
+                                  <button onClick={() => pickMaterial(m)} className="text-[9px] px-1 py-0.5 bg-teal-600 hover:bg-teal-500 text-white rounded">Use</button>
+                                  <button onClick={() => removeCompare(m.materialId)} className="text-[9px] px-1 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-slate-700">✕</button>
+                                </div>
+                              </div>
+                            </div>)}
+                          </div>
+                        </div>
+                      )}
                       <div style={{ maxHeight: "52vh", overflow: "auto" }} className="grid grid-cols-4 sm:grid-cols-6 gap-2">
                         {matRows.map((m) => <div key={m.materialId} onClick={() => pickMaterial(m)} title={m.brand + " · " + m.collection} style={{ opacity: m.outOfStock && !matAdmin ? 0.45 : 1, cursor: "pointer" }} className={"text-left border rounded-md overflow-hidden hover:ring-2 hover:ring-teal-400 " + (matPicked && matPicked.materialId === m.materialId ? "ring-2 ring-teal-600 border-teal-600" : "border-slate-200")}>
-                          <div style={{ background: m.colorCode, height: 44, position: "relative" }}>{m.outOfStock && <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.4)", color: "#fff", fontSize: 8, fontWeight: 700, letterSpacing: 0.5 }}>OUT OF STOCK</span>}</div>
+                          <div style={{ background: m.colorCode, height: 44, position: "relative" }}>
+                            {m.outOfStock && <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.4)", color: "#fff", fontSize: 8, fontWeight: 700, letterSpacing: 0.5 }}>OUT OF STOCK</span>}
+                            <button onClick={(e) => addCompare(m, e)} title="Add to compare" style={{ position: "absolute", top: 2, right: 2, fontSize: 9, lineHeight: 1, padding: "1px 3px", background: "rgba(255,255,255,0.85)", borderRadius: 3, border: "1px solid #cbd5e1", color: "#334155" }}>⊞</button>
+                          </div>
                           <div className="px-1.5 py-1">
                             <div className="text-[10px] font-semibold text-slate-700 truncate">{m.colorName}</div>
                             <div className="text-[9px] text-slate-500 truncate">{m.code} · {m.finishType}</div>
