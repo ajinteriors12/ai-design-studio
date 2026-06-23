@@ -1628,6 +1628,97 @@ function renderFurniturePlan(unit: FurnitureUnit): string {
   return p.join("");
 }
 
+// Canonical wardrobe internal bands (bottom→top, mm), normalised to the unit height.
+function wardrobeBands(unit: FurnitureUnit): { label: string; mm: number; kind: string }[] {
+  const top = unit.loftMM > 0 ? unit.loftMM : 450;
+  const raw = [
+    { label: "Bottom Shelf", mm: 350, kind: "shelf" },
+    { label: "Drawer", mm: 150, kind: "drawer" },
+    { label: "Drawer", mm: 150, kind: "drawer" },
+    { label: "Shelf", mm: 300, kind: "shelf" },
+    { label: "Hanging", mm: 1150, kind: "hang" },
+    { label: "Top Shelf", mm: top, kind: "shelf" },
+  ];
+  const sum = raw.reduce((a, b) => a + b.mm, 0), k = unit.heightMM / sum;
+  return raw.map((b) => ({ ...b, mm: Math.round(b.mm * k) }));
+}
+// Wardrobe INSIDE VIEW — shutters removed, internal layout with a right-side dimension chain.
+function renderWardrobeInside(unit: FurnitureUnit): string {
+  const S = 0.14, padL = 46, padR = 150, padT = 34, padB = 36;
+  const W = unit.widthMM * S + padL + padR, H = unit.heightMM * S + padT + padB;
+  const floorY = padT + unit.heightMM * S, yOf = (mm: number) => floorY - mm * S, xOf = (mm: number) => padL + mm * S;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${S}" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace">`);
+  p.push(`<rect width="${W}" height="${H}" fill="#ffffff"/>`);
+  p.push(`<text x="${xOf(unit.widthMM / 2)}" y="20" fill="#1e3a5f" font-size="11" text-anchor="middle">Inside View — Internal Layout</text>`);
+  const x0 = xOf(0), x1 = xOf(unit.widthMM), mid = xOf(unit.widthMM / 2);
+  p.push(`<rect x="${x0}" y="${padT}" width="${unit.widthMM * S}" height="${unit.heightMM * S}" fill="#faf7f1" stroke="#334155" stroke-width="1.4"/>`);
+  const bands = wardrobeBands(unit);
+  let acc = 0; const bandTop: Record<string, number> = {};
+  // draw horizontal band dividers + elements; group the dim chain by distinct band label runs
+  const segs: { label: string; y0: number; y1: number; kind: string }[] = [];
+  for (const b of bands) { const yb0 = yOf(acc), yb1 = yOf(acc + b.mm); segs.push({ label: b.label, y0: yb0, y1: yb1, kind: b.kind }); acc += b.mm; bandTop[b.label] = acc; }
+  for (const s of segs) {
+    p.push(`<line x1="${x0}" y1="${s.y1}" x2="${x1}" y2="${s.y1}" stroke="#94a3b8" stroke-width="0.8"/>`);
+    if (s.kind === "hang") {
+      p.push(`<line x1="${x0}" y1="${(s.y0 + s.y1) / 2}" x2="${mid - 4}" y2="${(s.y0 + s.y1) / 2}" stroke="#94a3b8" stroke-width="1.4"/>`);  // rod (left half)
+      const rodY = (s.y0 + s.y1) / 2; for (let h = 1; h <= 6; h++) { const hx = x0 + (mid - x0) * h / 7; p.push(`<path d="M${hx} ${rodY} l-4 ${Math.min(40, (s.y1 - s.y0) * 0.5)} l8 0 z" fill="#e9e1cd" stroke="#b9a98a" stroke-width="0.5"/>`); }  // clothes hint
+      p.push(`<line x1="${mid}" y1="${s.y0}" x2="${mid}" y2="${s.y1}" stroke="#94a3b8" stroke-width="0.8"/>`);  // divider in hanging zone
+      for (let sh = 1; sh <= 2; sh++) { const sy = s.y0 + (s.y1 - s.y0) * sh / 3; p.push(`<line x1="${mid}" y1="${sy}" x2="${x1}" y2="${sy}" stroke="#94a3b8" stroke-width="0.7"/>`); }  // shelves on right of hang zone
+    } else if (s.kind === "drawer") {
+      p.push(`<rect x="${x0 + 6}" y="${s.y1 + 3}" width="${unit.widthMM * S - 12}" height="${(s.y0 - s.y1) - 6}" fill="#efe9dd" stroke="#64748b" stroke-width="0.7"/>`);
+      p.push(`<line x1="${mid - 10}" y1="${(s.y0 + s.y1) / 2}" x2="${mid + 10}" y2="${(s.y0 + s.y1) / 2}" stroke="#334155" stroke-width="1.4"/>`);
+    } else {
+      p.push(`<rect x="${x0 + 4}" y="${s.y1 + 2}" width="${unit.widthMM * S - 8}" height="${(s.y0 - s.y1) - 4}" fill="#f4f7fb" stroke="#cbd5e1" stroke-width="0.5"/>`);
+    }
+  }
+  // right-side dimension chain — collapse consecutive identical labels into one (e.g. two drawers → "Drawer 150 ×2")
+  const dimX = x1 + 26; p.push(`<line x1="${x1 + 8}" y1="${padT}" x2="${x1 + 8}" y2="${floorY}" stroke="#cbd5e1" stroke-width="0.6"/>`);
+  acc = 0;
+  for (const b of bands) {
+    const yb0 = yOf(acc), yb1 = yOf(acc + b.mm);
+    p.push(`<line x1="${x1 + 4}" y1="${yb0}" x2="${x1 + 12}" y2="${yb0}" stroke="#64748b" stroke-width="0.7"/><line x1="${x1 + 4}" y1="${yb1}" x2="${x1 + 12}" y2="${yb1}" stroke="#64748b" stroke-width="0.7"/>`);
+    p.push(`<text x="${dimX}" y="${(yb0 + yb1) / 2 - 2}" fill="#334155" font-size="8">${b.label}</text>`);
+    p.push(`<text x="${dimX}" y="${(yb0 + yb1) / 2 + 8}" fill="#0f766e" font-size="8" font-weight="bold">${b.mm} mm</text>`);
+    acc += b.mm;
+  }
+  p.push(`<text x="${xOf(unit.widthMM / 2)}" y="${floorY + 22}" fill="#475569" font-size="9" text-anchor="middle">${Math.round(unit.widthMM)} mm</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+// Wardrobe SECTION — internal depth (side cut), bands at the same heights against depth D.
+function renderWardrobeSection(unit: FurnitureUnit): string {
+  const S = 0.14, padL = 96, padR = 120, padT = 40, padB = 36, D = unit.depthMM;
+  const W = D * S + padL + padR, H = unit.heightMM * S + padT + padB;
+  const floorY = padT + unit.heightMM * S, yOf = (mm: number) => floorY - mm * S, xOf = (mm: number) => padL + mm * S;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${S}" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace">`);
+  p.push(`<rect width="${W}" height="${H}" fill="#ffffff"/>`);
+  p.push(`<text x="${(padL + xOf(D)) / 2}" y="20" fill="#1e3a5f" font-size="11" text-anchor="middle">Section — Internal Depth</text>`);
+  p.push(`<rect x="${padL}" y="${padT}" width="${D * S}" height="${unit.heightMM * S}" fill="#faf7f1" stroke="#334155" stroke-width="1.4"/>`);
+  const bands = wardrobeBands(unit); let acc = 0;
+  for (const b of bands) {
+    const yb1 = yOf(acc + b.mm), ymid = yOf(acc + b.mm / 2);
+    p.push(`<line x1="${padL}" y1="${yb1}" x2="${xOf(D)}" y2="${yb1}" stroke="#94a3b8" stroke-width="0.8"/>`);
+    if (b.kind === "hang") p.push(`<circle cx="${xOf(D * 0.5)}" cy="${yOf(acc + b.mm) + 8}" r="2.5" fill="none" stroke="#64748b" stroke-width="1"/>`);   // rod end (section)
+    if (b.kind === "drawer") p.push(`<rect x="${padL + 4}" y="${yOf(acc + b.mm) + 3}" width="${D * S - 8}" height="${b.mm * S - 6}" fill="#efe9dd" stroke="#64748b" stroke-width="0.6"/>`);
+    // left dim
+    p.push(`<text x="${padL - 8}" y="${ymid + 3}" fill="#0f766e" font-size="8" text-anchor="end">${b.mm}</text>`);
+    acc += b.mm;
+  }
+  p.push(`<line x1="${padL}" y1="${padT - 8}" x2="${xOf(D)}" y2="${padT - 8}" stroke="#64748b" stroke-width="0.7"/>`);
+  p.push(`<text x="${(padL + xOf(D)) / 2}" y="${padT - 12}" fill="#475569" font-size="9" text-anchor="middle">${D} mm</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+// Extra dimensioned views per type for the spec sheet (wardrobe inside + section, …).
+function ssExtraViews(type: string, layout: any): { title: string; svg: string }[] {
+  const t = (type || "").toLowerCase();
+  const u = layout.furniture;
+  if (t.includes("wardrobe") && u) return [{ title: "Inside View", svg: renderWardrobeInside(u) }, { title: "Section", svg: renderWardrobeSection(u) }];
+  return [];
+}
+
 // 13.pdf §3 — strict collision/visibility/width validator. No cabinet may be wider than its wall,
 // extend past the wall boundary, sit hidden behind a tall unit, or overlap another. Oversized widths
 // are clamped to the wall (fixes the hidden 4690 mm-behind-tall bug); wall cabinets hidden behind a
@@ -3208,6 +3299,20 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
       parts.push(ssText(cx + cw / 2, y + elH - 12, elevs[i].name || ("View " + (i + 1)), 9, SS.sub, "600", "middle"));
     }
     y += elH + gut;
+  }
+
+  // ── 4a. Extra dimensioned views (wardrobe inside view + depth section, …) ─
+  const extra = ssExtraViews(type, layout);
+  if (extra.length) {
+    const evH = 300;
+    parts.push(ssCard(M, y, innerW, evH, "Internal Layout & Section"));
+    const n = extra.length, cw = (innerW - 28 - (n - 1) * 12) / n;
+    for (let i = 0; i < n; i++) {
+      const cx = M + 14 + i * (cw + 12);
+      parts.push(ssEmbed(extra[i].svg, cx, y + 36, cw, evH - 50));
+      if (i < n - 1) parts.push(`<line x1="${(cx + cw + 6).toFixed(1)}" y1="${y + 42}" x2="${(cx + cw + 6).toFixed(1)}" y2="${y + evH - 14}" stroke="${SS.hair}" stroke-width="1"/>`);
+    }
+    y += evH + gut;
   }
 
   // ── 4b. Detailing drawings (construction sections) ───────────────────────
