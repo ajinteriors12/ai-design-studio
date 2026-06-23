@@ -2969,6 +2969,145 @@ function ssSchedule(type: string, layout: any): { label: string; frac: number }[
   return out.slice(0, 8);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  CONSTRUCTION DETAILING / SECTION DRAWINGS  (the reference "Detailing Drawings")
+//  Small annotated cross-sections — layered materials + leader-line callouts:
+//  base-cabinet section, wall-cabinet section, L-corner detail, countertop +
+//  backsplash junction, sliding-door track, and a generic carcass section for
+//  furniture (wardrobe / TV / mandir / wall panel). Each returns a self-contained
+//  ~250×220 SVG that the spec sheet embeds in its "Detailing Drawings" row.
+// ════════════════════════════════════════════════════════════════════════════
+const D_INK = "#3a352c", D_LINE = "#6b6557", D_PLY = "#d9c29a", D_PLY2 = "#c7ab7c",
+  D_STONE = "#e7e2d6", D_METAL = "#bcc0c6", D_GLASS = "#cfe6ee", D_WOOD = "#7a4a25", D_LED = "#f3d59f", D_BACK = "#efe9dd";
+const DW = 250, DH = 224;
+function dLeader(x1: number, y1: number, x2: number, y2: number, text: string, anchor = "start"): string {
+  return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${D_LINE}" stroke-width="0.6"/>` +
+    `<circle cx="${x1}" cy="${y1}" r="1.7" fill="${D_INK}"/>` +
+    `<text x="${x2 + (anchor === "end" ? -3 : 3)}" y="${y2 + 2.8}" fill="${D_INK}" font-size="7.6" text-anchor="${anchor}" font-family="${SS.font}">${ssEsc(text)}</text>`;
+}
+function dWrap(title: string, inner: string): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${DW}" height="${DH}" viewBox="0 0 ${DW} ${DH}" font-family="${SS.font}">` +
+    `<rect width="${DW}" height="${DH}" fill="#ffffff"/>` +
+    `<text x="${DW / 2}" y="14" fill="${D_INK}" font-size="9.5" font-weight="700" text-anchor="middle" letter-spacing="0.3">${ssEsc(title.toUpperCase())}</text>` +
+    `<line x1="20" y1="20" x2="${DW - 20}" y2="20" stroke="${D_BACK}" stroke-width="1"/>` + inner + `</svg>`;
+}
+// Vertical section through a base cabinet (kitchen / general base unit).
+function detailBaseCabinet(): string {
+  const cx = 95, cw = 70, top = 42, bot = 196, sw = 7;   // carcass box
+  const p: string[] = [];
+  p.push(`<rect x="${cx - 6}" y="${top - 12}" width="${cw + 12}" height="12" fill="${D_STONE}" stroke="${D_LINE}" stroke-width="0.8"/>`);   // countertop
+  p.push(`<rect x="${cx}" y="${top}" width="${cw}" height="${bot - top}" fill="#fff" stroke="${D_LINE}" stroke-width="0.9"/>`);             // carcass outline
+  p.push(`<rect x="${cx}" y="${top}" width="${sw}" height="${bot - top}" fill="${D_PLY}"/>`);                                              // left side panel
+  p.push(`<rect x="${cx + cw - sw}" y="${top}" width="${sw}" height="${bot - top}" fill="${D_PLY}"/>`);                                    // right side panel
+  // 3 drawer fronts
+  for (let i = 0; i < 3; i++) { const dy = top + 8 + i * 46; p.push(`<rect x="${cx + sw}" y="${dy}" width="${cw - sw * 2}" height="40" fill="${D_PLY2}" stroke="${D_LINE}" stroke-width="0.6"/>`); p.push(`<line x1="${cx + cw / 2 - 7}" y1="${dy + 20}" x2="${cx + cw / 2 + 7}" y2="${dy + 20}" stroke="${D_INK}" stroke-width="1.4"/>`); }
+  p.push(`<rect x="${cx + sw}" y="${bot - 18}" width="${cw - sw * 2}" height="6" fill="${D_METAL}"/>`);          // toe-kick recess
+  p.push(`<line x1="${cx + 10}" y1="${bot}" x2="${cx + 10}" y2="${bot + 10}" stroke="${D_INK}" stroke-width="2"/><line x1="${cx + cw - 10}" y1="${bot}" x2="${cx + cw - 10}" y2="${bot + 10}" stroke="${D_INK}" stroke-width="2"/>`);  // adjustable legs
+  p.push(`<line x1="${cx}" y1="${bot + 10}" x2="${cx + cw}" y2="${bot + 10}" stroke="${D_LINE}" stroke-width="2"/>`);  // floor
+  p.push(dLeader(cx + cw / 2, top - 8, cx + cw + 60, top - 6, "20 mm Countertop"));
+  p.push(dLeader(cx + sw / 2, top + 30, cx - 12, top + 34, "18 mm Ply", "end"));
+  p.push(dLeader(cx + cw / 2, top + 54, cx + cw + 60, top + 60, "Soft-close Channel"));
+  p.push(dLeader(cx + cw / 2, bot - 15, cx + cw + 60, bot - 24, "Toe Kick"));
+  p.push(dLeader(cx + 10, bot + 6, cx - 12, bot + 8, "Adjustable Leg", "end"));
+  return dWrap("Base Cabinet Detail", p.join(""));
+}
+// Vertical section through a wall cabinet.
+function detailWallCabinet(): string {
+  const cx = 95, cw = 70, top = 40, bot = 180, sw = 7;
+  const p: string[] = [];
+  p.push(`<rect x="${cx}" y="${top}" width="${cw}" height="${bot - top}" fill="#fff" stroke="${D_LINE}" stroke-width="0.9"/>`);
+  p.push(`<rect x="${cx}" y="${top}" width="${cw}" height="${sw}" fill="${D_PLY}"/><rect x="${cx}" y="${bot - sw}" width="${cw}" height="${sw}" fill="${D_PLY}"/>`);  // top/bottom
+  p.push(`<rect x="${cx}" y="${top}" width="${sw}" height="${bot - top}" fill="${D_PLY}"/>`);
+  p.push(`<line x1="${cx + sw}" y1="${(top + bot) / 2}" x2="${cx + cw}" y2="${(top + bot) / 2}" stroke="${D_LINE}" stroke-width="0.8"/>`);  // shelf
+  p.push(`<rect x="${cx + cw}" y="${top + 6}" width="6" height="${bot - top - 12}" fill="${D_PLY2}" stroke="${D_LINE}" stroke-width="0.6"/>`);  // shutter
+  p.push(`<circle cx="${cx + cw + 3}" cy="${top + 18}" r="2.4" fill="${D_METAL}"/>`);  // hinge
+  p.push(dLeader(cx + cw / 2, top + 3, cx + cw + 58, top + 2, "18 mm Ply"));
+  p.push(dLeader(cx + cw, top + 18, cx + cw + 58, top + 26, "Soft-close Hinge"));
+  p.push(dLeader(cx + cw / 2, (top + bot) / 2, cx - 12, (top + bot) / 2 + 8, "Adjustable Shelf", "end"));
+  p.push(dLeader(cx + cw + 3, bot - 14, cx + cw + 58, bot - 6, "Shutter"));
+  return dWrap("Wall Cabinet Detail", p.join(""));
+}
+// Plan detail of an L-shaped corner junction.
+function detailCorner(): string {
+  const p: string[] = [];
+  const ox = 70, oy = 44, t = 14;
+  p.push(`<rect x="${ox}" y="${oy}" width="120" height="${t}" fill="${D_BACK}" stroke="${D_LINE}" stroke-width="0.7"/>`);  // wall A
+  p.push(`<rect x="${ox}" y="${oy}" width="${t}" height="120" fill="${D_BACK}" stroke="${D_LINE}" stroke-width="0.7"/>`);  // wall B
+  p.push(`<rect x="${ox + t}" y="${oy + t}" width="106" height="40" fill="${D_PLY}" stroke="${D_LINE}" stroke-width="0.8"/>`);  // counter A
+  p.push(`<rect x="${ox + t}" y="${oy + t}" width="40" height="106" fill="${D_PLY}" stroke="${D_LINE}" stroke-width="0.8"/>`);  // counter B
+  p.push(`<rect x="${ox + t + 40}" y="${oy + t + 40}" width="66" height="66" fill="#fff" stroke="${D_LINE}" stroke-width="0.7" stroke-dasharray="3 2"/>`);  // dead corner
+  p.push(`<path d="M${ox + t + 40} ${oy + t + 106} L${ox + t + 106} ${oy + t + 40}" stroke="${D_WOOD}" stroke-width="1.4"/>`);   // corner shutter line
+  p.push(dLeader(ox + 60, oy + 7, ox + 150, oy + 4, "Back Wall"));
+  p.push(dLeader(ox + t + 50, oy + t + 20, ox + 168, oy + 60, "Countertop"));
+  p.push(dLeader(ox + t + 73, oy + t + 73, ox + 150, oy + 150, "Blind-corner Carousel"));
+  p.push(dLeader(ox + 7, oy + 70, ox - 12, oy + 90, "Base Cabinet", "end"));
+  return dWrap("Corner Detail (L-Shape)", p.join(""));
+}
+// Countertop edge + backsplash junction.
+function detailCounterBacksplash(): string {
+  const p: string[] = [];
+  const wallX = 150, floorRefY = 60, ct = 60;
+  p.push(`<rect x="${wallX}" y="40" width="14" height="150" fill="${D_BACK}" stroke="${D_LINE}" stroke-width="0.7"/>`);  // wall
+  p.push(`<rect x="${wallX - 6}" y="${floorRefY}" width="6" height="70" fill="${D_GLASS}" stroke="${D_LINE}" stroke-width="0.6"/>`);  // backsplash
+  p.push(`<rect x="${ct}" y="${floorRefY + 64}" width="${wallX - 6 - ct}" height="14" fill="${D_STONE}" stroke="${D_LINE}" stroke-width="0.8"/>`);  // countertop slab
+  p.push(`<rect x="${ct + 4}" y="${floorRefY + 78}" width="${wallX - 14 - ct}" height="70" fill="${D_PLY}" stroke="${D_LINE}" stroke-width="0.7"/>`);  // carcass below
+  p.push(`<path d="M${wallX - 6} ${floorRefY + 64} q-5 0 -5 5" fill="none" stroke="${D_WOOD}" stroke-width="1.4"/>`);   // sealant fillet
+  p.push(dLeader(wallX - 3, floorRefY + 20, wallX + 36, floorRefY + 8, "Backsplash"));
+  p.push(dLeader(wallX - 8, floorRefY + 66, wallX + 36, floorRefY + 40, "Sealant Joint"));
+  p.push(dLeader(ct + 30, floorRefY + 71, ct - 8, floorRefY + 60, "20 mm Countertop", "end"));
+  p.push(dLeader(ct + 30, floorRefY + 110, ct - 8, floorRefY + 120, "18 mm Carcass", "end"));
+  return dWrap("Countertop & Backsplash", p.join(""));
+}
+// Sliding-door track cross-section (wardrobe).
+function detailSlidingTrack(): string {
+  const p: string[] = [];
+  // top track
+  p.push(`<text x="${DW / 2}" y="34" fill="${D_INK}" font-size="8" text-anchor="middle" font-weight="600">Top Track</text>`);
+  p.push(`<rect x="60" y="40" width="130" height="12" fill="${D_METAL}" stroke="${D_LINE}" stroke-width="0.7"/>`);
+  p.push(`<rect x="74" y="40" width="6" height="6" fill="#fff" stroke="${D_LINE}" stroke-width="0.5"/><rect x="170" y="40" width="6" height="6" fill="#fff" stroke="${D_LINE}" stroke-width="0.5"/>`);
+  p.push(`<rect x="86" y="52" width="50" height="44" fill="${D_PLY2}" stroke="${D_LINE}" stroke-width="0.7"/><rect x="116" y="52" width="50" height="44" fill="${D_PLY}" stroke="${D_LINE}" stroke-width="0.7"/>`);  // overlapping shutters
+  // bottom track
+  p.push(`<text x="${DW / 2}" y="130" fill="${D_INK}" font-size="8" text-anchor="middle" font-weight="600">Bottom Track</text>`);
+  p.push(`<rect x="86" y="138" width="50" height="44" fill="${D_PLY2}" stroke="${D_LINE}" stroke-width="0.7"/><rect x="116" y="138" width="50" height="44" fill="${D_PLY}" stroke="${D_LINE}" stroke-width="0.7"/>`);
+  p.push(`<rect x="60" y="182" width="130" height="12" fill="${D_METAL}" stroke="${D_LINE}" stroke-width="0.7"/>`);
+  p.push(`<circle cx="100" cy="182" r="4" fill="#fff" stroke="${D_LINE}" stroke-width="0.6"/><circle cx="150" cy="182" r="4" fill="#fff" stroke="${D_LINE}" stroke-width="0.6"/>`);  // wheels
+  p.push(dLeader(190, 46, 210, 40, "Alu Top Track", "end"));
+  p.push(dLeader(141, 74, 210, 74, "18 mm Shutter", "end"));
+  p.push(dLeader(150, 182, 210, 188, "Roller Wheel", "end"));
+  p.push(dLeader(60, 188, 44, 196, "Alu Bottom Track", "start"));
+  return dWrap("Sliding Door Track", p.join(""));
+}
+// Generic carcass section (side panel + shelves + back) for furniture units.
+function detailCarcassSection(opts: { hang?: boolean; back?: string; topLabel?: string } = {}): string {
+  const cx = 92, cw = 76, top = 42, bot = 196, sw = 7;
+  const p: string[] = [];
+  p.push(`<rect x="${cx}" y="${top}" width="${cw}" height="${bot - top}" fill="#fff" stroke="${D_LINE}" stroke-width="0.9"/>`);
+  p.push(`<rect x="${cx}" y="${top}" width="${sw}" height="${bot - top}" fill="${D_PLY}"/><rect x="${cx + cw - sw}" y="${top}" width="${sw}" height="${bot - top}" fill="${D_PLY}"/>`);  // sides
+  p.push(`<rect x="${cx}" y="${top}" width="${cw}" height="${sw}" fill="${D_PLY}"/><rect x="${cx}" y="${bot - sw}" width="${cw}" height="${sw}" fill="${D_PLY}"/>`);  // top/bottom
+  p.push(`<rect x="${cx + cw}" y="${top}" width="5" height="${bot - top}" fill="${D_BACK}" stroke="${D_LINE}" stroke-width="0.5"/>`);  // back panel
+  if (opts.hang) { p.push(`<line x1="${cx + sw + 4}" y1="${top + 22}" x2="${cx + cw - sw - 4}" y2="${top + 22}" stroke="${D_METAL}" stroke-width="2.4"/>`); p.push(dLeader(cx + cw / 2, top + 22, cx + cw + 56, top + 18, "Hanging Rod")); }
+  for (let i = 1; i <= 3; i++) { const sy = top + (opts.hang ? 60 : 30) + i * 32; if (sy < bot - sw) p.push(`<line x1="${cx + sw}" y1="${sy}" x2="${cx + cw - sw}" y2="${sy}" stroke="${D_LINE}" stroke-width="0.8"/>`); }
+  p.push(dLeader(cx + sw / 2, top + 70, cx - 12, top + 74, "18 mm Side Panel", "end"));
+  p.push(dLeader(cx + cw / 2, top + (opts.hang ? 92 : 62), cx + cw + 56, top + (opts.hang ? 96 : 66), "Adjustable Shelf"));
+  p.push(dLeader(cx + cw + 2, bot - 30, cx + cw + 56, bot - 26, opts.back || "6 mm Back Panel"));
+  p.push(dLeader(cx + cw / 2, top + 3, cx - 12, top + 6, opts.topLabel || "Carcass Top", "end"));
+  return dWrap("Carcass Section", p.join(""));
+}
+// Pick the detailing drawings appropriate to the design type.
+function ssDetails(type: string, layout: any): { title: string; svg: string }[] {
+  const t = (type || "").toLowerCase();
+  if (t.includes("kitchen")) {
+    const out = [{ title: "Base", svg: detailBaseCabinet() }, { title: "Wall", svg: detailWallCabinet() }, { title: "Counter", svg: detailCounterBacksplash() }];
+    if (t.includes("l-shape") || t.includes("u-shape") || t.includes("parallel") || t.includes("peninsula") || t.includes("island")) out.splice(2, 0, { title: "Corner", svg: detailCorner() });
+    return out.slice(0, 4);
+  }
+  if (t.includes("wardrobe")) return [{ title: "Track", svg: detailSlidingTrack() }, { title: "Carcass", svg: detailCarcassSection({ hang: true, topLabel: "Loft / Top Shelf" }) }, { title: "Base", svg: detailBaseCabinet() }];
+  if (t.includes("crockery")) return [{ title: "Carcass", svg: detailCarcassSection({ topLabel: "Loft" }) }, { title: "Wall", svg: detailWallCabinet() }];
+  if (t.includes("lcd") || t.includes("tv")) return [{ title: "Carcass", svg: detailCarcassSection({ topLabel: "Open Shelf" }) }, { title: "Counter", svg: detailCounterBacksplash() }];
+  if (t.includes("vanity") || t.includes("dress")) return [{ title: "Carcass", svg: detailCarcassSection({ topLabel: "Mirror Unit" }) }, { title: "Base", svg: detailBaseCabinet() }];
+  return [{ title: "Carcass", svg: detailCarcassSection() }];
+}
+
 const SHEET_W = 1240;        // fixed presentation-sheet width (px)
 // Build the full presentation spec sheet for a generated layout.
 function specSheet(layout: any, meta: { type?: string; id?: string } = {}): string {
@@ -3072,6 +3211,20 @@ function specSheet(layout: any, meta: { type?: string; id?: string } = {}): stri
       parts.push(ssText(cx + cw / 2, y + elH - 12, ssEsc(elevs[i].name || ("View " + (i + 1))), 9, SS.sub, "600", "middle"));
     }
     y += elH + gut;
+  }
+
+  // ── 4b. Detailing drawings (construction sections) ───────────────────────
+  const details = ssDetails(type, layout);
+  if (details.length) {
+    const dwH = 220;
+    parts.push(ssCard(M, y, innerW, dwH, "Detailing Drawings"));
+    const n = details.length, cw = (innerW - 28 - (n - 1) * 12) / n;
+    for (let i = 0; i < n; i++) {
+      const cx = M + 14 + i * (cw + 12);
+      parts.push(ssEmbed(details[i].svg, cx, y + 36, cw, dwH - 50));
+      if (i < n - 1) parts.push(`<line x1="${(cx + cw + 6).toFixed(1)}" y1="${y + 42}" x2="${(cx + cw + 6).toFixed(1)}" y2="${y + dwH - 14}" stroke="${SS.hair}" stroke-width="1"/>`);
+    }
+    y += dwH + gut;
   }
 
   // ── 5. Specifications + Key features / notes ──────────────────────────────
