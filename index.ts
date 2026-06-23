@@ -3130,8 +3130,8 @@ function ssMaterials(type: string, layout: any, finish?: string, finishColor?: s
   return list;
 }
 
-// Specifications rows (label, value) derived from the layout.
-function ssSpecs(type: string, layout: any): [string, string][] {
+// Specifications rows (label, value) derived from the layout (+ the chosen material).
+function ssSpecs(type: string, layout: any, material?: any): [string, string][] {
   const t = (type || "").toLowerCase();
   const rows: [string, string][] = [];
   if (t.includes("kitchen")) {
@@ -3161,6 +3161,13 @@ function ssSpecs(type: string, layout: any): [string, string][] {
     rows.push(["Hardware", "Soft-close hinges & telescopic channels"]);
     rows.push(["Finish", "Matte laminate / wood texture"]);
     rows.push(["Lighting", "Warm-white LED profile (optional)"]);
+  }
+  // Selected material (from the catalog) — overrides the generic shutter/finish lines.
+  if (material && (material.brand || material.colorName)) {
+    rows.push(["Finish material", [material.brand, material.colorName].filter(Boolean).join(" ").slice(0, 42)]);
+    if (material.code || material.colorCode) rows.push(["Colour code", String(material.code || material.colorCode)]);
+    if (material.finishType) rows.push(["Finish type", String(material.finishType)]);
+    if (material.customerRate) rows.push(["Material rate", "₹" + material.customerRate + " / " + (material.unit || "sqft")]);
   }
   return rows;
 }
@@ -3392,7 +3399,7 @@ const SHEET_W = 1240;        // fixed presentation-sheet width (px)
 // meta.finish = the user's actual chosen 3D finish (palette reflects it);
 // meta.client = Bill-To dict (shows "Prepared for"); meta.heroDataUrl = a rendered
 // 3D / photoreal image to use as the hero instead of the line elevation.
-function specSheet(layout: any, meta: { type?: string; id?: string; finish?: string; finishColor?: string; client?: any; heroDataUrl?: string } = {}): string {
+function specSheet(layout: any, meta: { type?: string; id?: string; finish?: string; finishColor?: string; client?: any; material?: any; heroDataUrl?: string } = {}): string {
   const type = meta.type || layout.designType || layout.type || "Modular Kitchen";
   const W = SHEET_W, M = 22, gut = 16;
   const innerW = W - M * 2;
@@ -3534,7 +3541,7 @@ function specSheet(layout: any, meta: { type?: string; id?: string; finish?: str
   }
 
   // ── 5. Specifications + Key features / notes ──────────────────────────────
-  const specRows = ssSpecs(type, layout), notes = ssNotes(type);
+  const specRows = ssSpecs(type, layout, meta.material), notes = ssNotes(type);
   const specH = Math.max(190, 52 + specRows.length * 19);
   const halfW = (innerW - gut) / 2;
   parts.push(ssCard(M, y, halfW, specH, "Specifications & Materials"));
@@ -4393,7 +4400,11 @@ app.get("/api/designs/:id/export.svg", (c) => {
 // the hero can be the rendered 3D / photoreal view.
 function emitSpecSheet(c: any, d: any, extra: { finish?: string; finishColor?: string; heroDataUrl?: string }) {
   const client = (() => { try { return quoteClient(d.row.id); } catch { return {}; } })();
-  const svg = specSheet(d.layout, { type: d.row.designType, id: d.row.id, client, ...extra });
+  const material = (() => { try { return designMaterial(d.row.id); } catch { return null; } })();
+  // the persisted material seeds the finish name/colour when the client didn't POST a live one
+  const finish = extra.finish || (material ? [material.brand, material.colorName].filter(Boolean).join(" ") + (material.code ? " (" + material.code + ")" : "") : undefined);
+  const finishColor = extra.finishColor || (material && /^#[0-9a-fA-F]{6}$/.test(material.colorCode || "") ? material.colorCode : undefined);
+  const svg = specSheet(d.layout, { type: d.row.designType, id: d.row.id, client, material, heroDataUrl: extra.heroDataUrl, finish, finishColor });
   c.header("Content-Type", "image/svg+xml");
   if (c.req.query("inline") !== "1") {
     const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-spec-sheet.svg`;
@@ -7674,7 +7685,11 @@ const frontendHTML = `<!DOCTYPE html>
         }, 180);
         return () => clearTimeout(id);
       }, [matOpen, matCat, matBrand, matQ]);
-      const pickMaterial = (m) => { try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {} setMatPicked(m); };
+      const pickMaterial = (m) => {
+        try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {}
+        setMatPicked(m);
+        try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(m) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); }); } catch (e) {}   // persist → flows into quote + sheet
+      };
       const [editRun, setEditRun] = useState(0);
       const [activeView, setActiveView] = useState(0);   // Project Tree selection: 'plan' | run index
       React.useEffect(() => { if (activeView !== "3d") last2dRef.current = activeView; }, [activeView]);   // 5.12: remember last 2D view
@@ -9579,7 +9594,23 @@ function rateKeyFor(item: string): string {
   if (/cutlery tray/.test(s)) return "cutlery_tray";
   return "accessory_default";
 }
-function priceQuote(layout: any, rates: Record<string, number>) {
+// Per-design selected MATERIAL (from the catalog) — drives finish colour, costing + docs.
+sqlite.exec(`CREATE TABLE IF NOT EXISTS design_materials (
+  design_id TEXT PRIMARY KEY, material TEXT NOT NULL, updated_at INTEGER NOT NULL);`);
+function designMaterial(id: string): any {
+  try { const row = sqlite.prepare(`SELECT material FROM design_materials WHERE design_id=?`).get(id) as any; return row ? JSON.parse(row.material) : null; } catch { return null; }
+}
+// Visible front/face area (sqft) a finish/coat covers — basis for material costing (12.pdf).
+function finishFaceSqft(layout: any): number {
+  let mm2 = 0;
+  for (const run of (layout.runs || [])) {
+    for (const c of (run.base || [])) { if (c.kind === "filler" || c.kind === "sidepanel") continue; mm2 += (c.w || 0) * (c.h || STD.baseHeight); }
+    for (const c of (run.wallCabs || [])) { if (c.kind === "filler" || c.kind === "sidepanel") continue; mm2 += (c.w || 0) * (c.h || STD.wallHeight); }
+  }
+  const u = layout.furniture; if (u) mm2 += (u.widthMM || 0) * (u.heightMM || 0);
+  return Math.round(mm2 / 92903 * 10) / 10;   // 1 sqft = 92903 mm²
+}
+function priceQuote(layout: any, rates: Record<string, number>, material?: any) {
   const r = { ...DEFAULT_RATES, ...(rates || {}) };
   const lines = boq(layout).map((row) => {
     const key = rateKeyFor(row.item);
@@ -9587,6 +9618,12 @@ function priceQuote(layout: any, rates: Record<string, number>) {
     const amount = Math.round(row.qty * rate);
     return { item: row.item, qty: row.qty, unit: row.unit, rate, amount };
   });
+  // §8/§13: finish material as a costed line — face area × rate + 15% factory wastage.
+  if (material && Number(material.customerRate) > 0) {
+    const face = finishFaceSqft(layout), qty = Math.round(face * 1.15 * 10) / 10, rate = Math.round(Number(material.customerRate) * 100) / 100;
+    const label = "Finish — " + [material.brand, material.colorName].filter(Boolean).join(" ") + (material.code ? " (" + material.code + ")" : "") + " · incl. 15% wastage";
+    lines.unshift({ item: label, qty, unit: material.unit || "sqft", rate, amount: Math.round(qty * rate) });
+  }
   const subtotal = lines.reduce((s, l) => s + l.amount, 0);
   const marginPct = r.margin_pct ?? 0, gstPct = r.gst_pct ?? 0;
   const margin = Math.round(subtotal * marginPct / 100);
@@ -9642,20 +9679,34 @@ app.put("/api/designs/:id/rate-card", async (c) => {
   sqlite.prepare(`INSERT INTO rate_cards(design_id,rates,updated_at) VALUES(?,?,?)
     ON CONFLICT(design_id) DO UPDATE SET rates=excluded.rates, updated_at=excluded.updated_at`).run(id, JSON.stringify(merged), Date.now());
   auditEdit(id, d.row.designType, "adjustment", "rate-card updated");
-  const quote = priceQuote(d.layout, merged);
+  const quote = priceQuote(d.layout, merged, designMaterial(id));
   broadcast(id, "quote", { total: quote.total });
   return c.json({ data: { ok: true, rates: merged, quote } });
 });
 app.get("/api/designs/:id/quote", (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
-  return c.json({ data: priceQuote(d.layout, quoteRates(id)) });
+  return c.json({ data: priceQuote(d.layout, quoteRates(id), designMaterial(id)) });
 });
 app.get("/api/designs/:id/quote.csv", (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
   const fname = `${d.row.designType.replace(/[^\w-]/g, "_")}-${d.row.id.slice(0, 8)}-quote.csv`;
   c.header("Content-Type", "text/csv");
   c.header("Content-Disposition", `attachment; filename="${fname}"`);
-  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id)), quoteClient(id)));
+  return c.body(quoteCsv(priceQuote(d.layout, quoteRates(id), designMaterial(id)), quoteClient(id)));
+});
+// Per-design selected material (Material Management Module). Whitelisted catalog fields.
+app.get("/api/designs/:id/material", (c) => { const d = loadDesign(c.req.param("id")); if (!d) return c.json({ error: "Design not found" }, 404); return c.json({ data: designMaterial(c.req.param("id")) }); });
+app.put("/api/designs/:id/material", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const allow = ["materialId", "code", "category", "brand", "collection", "colorName", "colorCode", "finishType", "sheen", "dealerRate", "customerRate", "unit"];
+  const m: any = {}; for (const k of allow) if (b[k] != null) m[k] = typeof b[k] === "number" ? b[k] : String(b[k]).slice(0, 80);
+  if (m.colorCode && !/^#[0-9a-fA-F]{6}$/.test(m.colorCode)) delete m.colorCode;
+  sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
+    ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify(m), Date.now());
+  auditEdit(id, d.row.designType, "adjustment", "material selected: " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
+  broadcast(id, "material", { code: m.code || "" });
+  return c.json({ data: { ok: true, material: m } });
 });
 // Client / "Bill To" details — persisted per design, addressed onto the quote + proposal.
 app.get("/api/designs/:id/client", (c) => {
