@@ -3851,9 +3851,19 @@ function cutListCsv(layout: any, scopes?: any): string {
   rows.forEach((r, i) => { const mat = r.face ? (materialLabelFor(scopes, r.scope || "base") || "Finish: laminate / acrylic / PU") : "18 mm BWP ply"; lines.push(`${i + 1},${r.h},${r.w},${r.qty},"${mat.replace(/"/g, '""')}","${r.desc.replace(/"/g, '""')}"`); });
   return lines.join("\n");
 }
+// BOQ summary with finish-material lines appended (face area × +15% wastage per scope).
+function boqWithMaterial(layout: any, scopes: any): { item: string; qty: number; unit: string }[] {
+  const rows = boq(layout);
+  if (scopes) for (const scope of MAT_SCOPES) {
+    const m = scopes[scope]; if (!m) continue;
+    const face = scopeFaceSqft(layout, scope); if (face <= 0) continue;
+    rows.push({ item: "Finish [" + (SCOPE_LABEL[scope] || scope) + "] — " + [m.brand, m.colorName].filter(Boolean).join(" ") + (m.code ? " (" + m.code + ")" : "") + " · incl. 15% wastage", qty: Math.round(face * 1.15 * 10) / 10, unit: "sq.ft" });
+  }
+  return rows;
+}
 // Production data with the chosen MATERIAL joined per scope — cut list (face panels
-// get the finish material, carcass panels get 18 mm ply) + cabinet schedule.
-function productionData(layout: any, scopes: any): { cutList: any[]; cabinetSchedule: any[] } {
+// get the finish material, carcass panels get 18 mm ply) + cabinet schedule + BOQ.
+function productionData(layout: any, scopes: any): { cutList: any[]; cabinetSchedule: any[]; boq: any[] } {
   const shN = (w: number) => (w <= 600 ? 1 : w <= 1200 ? 2 : 3);
   const cl = (layout.cutList || cutList(layout)).map((r: any) => ({ h: r.h, w: r.w, qty: r.qty, desc: r.desc, material: r.face ? (materialLabelFor(scopes, r.scope || "base") || "Finish: laminate / acrylic / PU") : "18 mm BWP ply" }));
   const cab: any[] = []; let n = 0;
@@ -3870,7 +3880,7 @@ function productionData(layout: any, scopes: any): { cutList: any[]; cabinetSche
       cab.push([++n, r.name || "", "Wall", c.label || c.kind, Math.round(c.w), STD.wallHeight, STD.wallDepth, c.kind === "open-shelf" ? "open" : shN(c.w) + " shutter" + (shN(c.w) > 1 ? "s" : ""), ...matCols(m)]);
     }
   }
-  return { cutList: cl, cabinetSchedule: cab };
+  return { cutList: cl, cabinetSchedule: cab, boq: boqWithMaterial(layout, scopes) };
 }
 
 // ── Hardware schedule (12.pdf master rule) — soft-close hinges, drawer slides,
@@ -8601,9 +8611,9 @@ const frontendHTML = `<!DOCTYPE html>
                   {/* 18.pdf §6: standalone production documents — Cut List PDF · BOQ Excel/PDF · Cabinet Schedule Excel/PDF */}
                   {result.cutList && result.cutList.length > 0 && <button onClick={async () => { const pd = await loadProduction(); if (!pd) return; exportTablePdf("Production Cut List — " + type, ["S.No", "Height (mm)", "Width (mm)", "Qty", "Material", "Description"], [40, 95, 175, 255, 310, 470], pd.cutList.map((r, i) => [i + 1, r.h, r.w, r.qty, r.material, r.desc]), (type + "-cutlist.pdf").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg">⬇ Cut List (PDF)</button>}
-                  {result.boq && result.boq.length > 0 && <button onClick={() => saveCsvAs(["Item", "Qty", "Unit"], result.boq.map((r) => [r.item, r.qty, r.unit]), (type + "-boq.csv").replace(/[^\\w.-]/g, "_"))}
+                  {result.boq && result.boq.length > 0 && <button onClick={async () => { const pd = await loadProduction(); const rows = (pd && pd.boq) || result.boq; saveCsvAs(["Item", "Qty", "Unit"], rows.map((r) => [r.item, r.qty, r.unit]), (type + "-boq.csv").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-sky-600 hover:bg-sky-500 text-white rounded-lg">⬇ BOQ (Excel)</button>}
-                  {result.boq && result.boq.length > 0 && <button onClick={() => exportTablePdf("BOQ Summary — " + type, ["Item", "Qty", "Unit"], [40, 420, 520], result.boq.map((r) => [r.item, r.qty, r.unit]), (type + "-boq.pdf").replace(/[^\\w.-]/g, "_"))}
+                  {result.boq && result.boq.length > 0 && <button onClick={async () => { const pd = await loadProduction(); const rows = (pd && pd.boq) || result.boq; exportTablePdf("BOQ Summary — " + type, ["Item", "Qty", "Unit"], [40, 420, 520], rows.map((r) => [r.item, r.qty, r.unit]), (type + "-boq.pdf").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-sky-700 hover:bg-sky-600 text-white rounded-lg">⬇ BOQ (PDF)</button>}
                   {type.indexOf("Kitchen") >= 0 && <button onClick={async () => { const pd = await loadProduction(); if (!pd) return; saveCsvAs(CAB_SCHED_HEADERS, pd.cabinetSchedule, (type + "-cabinet-schedule.csv").replace(/[^\\w.-]/g, "_")); }}
                     className="px-3 py-1.5 text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white rounded-lg">⬇ Cabinet Schedule (Excel)</button>}
