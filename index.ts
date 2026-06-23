@@ -3435,20 +3435,23 @@ function specSheet(layout: any, meta: { type?: string; id?: string; finish?: str
     }
   } else {
     // Annotated line elevation with TRUE leader-line callouts — names in a top band,
-    // each connected by a fanning leader to its component on the elevation.
-    const bandY0 = y + 34, elevY = y + 80, elevH = heroH - 92;
-    parts.push(ssEmbed(heroSvg, ex, elevY, ew, elevH));
+    // each connected by a fanning leader to its component. The elevation's own centred
+    // title (#1e3a5f / 11px) is stripped from the hero copy so it doesn't collide with
+    // the callouts — the card header already reads "Annotated Elevation".
+    const heroClean = heroSvg.replace(/<text\b[^>]*fill="#1e3a5f"[^>]*font-size="11"[^>]*text-anchor="middle"[^>]*>[^<]*<\/text>/g, "");
+    const bandY0 = y + 33, elevY = y + 74, elevH = heroH - 86;
+    parts.push(ssEmbed(heroClean, ex, elevY, ew, elevH));
     if (heroSvg && sched.length) {
       const mt = ssMeet(heroSvg, ex, elevY, ew, elevH);
       const t = (type || "").toLowerCase(), isKit = t.includes("kitchen");
       const padL = isKit ? 60 : 50, padSum = isKit ? 190 : 80, drawPx = mt.w - padSum;
-      const n = sched.length, slot = (ew - 20) / n, trackY = elevY + 4;
+      const n = sched.length, slot = (ew - 20) / n, elbowY = bandY0 + 34, trackY = elevY + Math.round(elevH * 0.1) + 8;
       sched.forEach((s, i) => {
         const sx = mt.ox + (padL + s.frac * drawPx) * mt.k;             // component x on the elevation
-        const lx = ex + 10 + slot * (i + 0.5), row = i % 2, labY = bandY0 + 8 + row * 15;
-        parts.push(ssText(lx, labY, s.label, 7.6, SS.ink, "600", "middle", ssFit(s.label, 7.6, slot - 2)));
-        parts.push(`<path d="M${lx.toFixed(1)} ${(labY + 3).toFixed(1)} L${lx.toFixed(1)} ${(trackY - 6).toFixed(1)} L${sx.toFixed(1)} ${(trackY + 4).toFixed(1)}" fill="none" stroke="${SS.accent}" stroke-width="0.7"/>`);
-        parts.push(`<circle cx="${sx.toFixed(1)}" cy="${(trackY + 4).toFixed(1)}" r="2.4" fill="${SS.band}"/>`);
+        const lx = ex + 10 + slot * (i + 0.5), row = i % 2, labY = bandY0 + 8 + row * 14;
+        parts.push(ssText(lx, labY, s.label, 7.6, SS.ink, "700", "middle", ssFit(s.label, 7.6, slot - 2)));
+        parts.push(`<path d="M${lx.toFixed(1)} ${(labY + 3).toFixed(1)} L${lx.toFixed(1)} ${elbowY.toFixed(1)} L${sx.toFixed(1)} ${trackY.toFixed(1)}" fill="none" stroke="${SS.accent}" stroke-width="0.7"/>`);
+        parts.push(`<circle cx="${sx.toFixed(1)}" cy="${trackY.toFixed(1)}" r="2.4" fill="${SS.band}"/>`);
       });
     }
   }
