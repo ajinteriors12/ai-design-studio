@@ -31,6 +31,10 @@ for (const t of ["L-Shape Kitchen", "U-Shape Kitchen", "Wardrobe", "Vanity Unit"
   const r = await fetch(B + "/api/designs/" + d.id + "/spec-sheet.svg?inline=1", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ finish: "Merino White Gloss Acrylic" }) });
   const svg = await r.text();
   ok("POST sheet shows finish swatch + Prepared-for", r.status === 200 && /Acrylic Finish/.test(svg) && /Prepared for: Test Client/.test(svg));
+  // Sirca PU: the sheet leads with a "PU Paint (Sirca)" swatch in the EXACT chosen colour
+  const rs = await fetch(B + "/api/designs/" + d.id + "/spec-sheet.svg?inline=1", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ finish: "Sirca - Red R-06 PU painted", finishColor: "#e93011" }) });
+  const ssvg = await rs.text();
+  ok("Sirca PU colour reflected on sheet", /PU Paint \(Sirca\)/.test(ssvg) && /fill="#e93011"/.test(ssvg));
 }
 { // Phase 7: a valid raster hero is embedded; an svg+xml hero is rejected (XSS guard) → falls back
   const d = (await post("/api/generate", { designType: "Straight Kitchen", wall: 3000 })).data;

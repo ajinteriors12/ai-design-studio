@@ -3092,7 +3092,7 @@ function ssTitleFor(type: string): { title: string; sub: string } {
 // Material palette swatches per type (name, sub-line, fill, optional fluted overlay).
 // `finish` (when supplied) is the user's actual chosen 3D finish — its swatch is
 // shown FIRST so the sheet reflects the real selection, not just a per-type default.
-function ssMaterials(type: string, layout: any, finish?: string): { name: string; sub: string; fill: string; flute?: boolean; glass?: boolean }[] {
+function ssMaterials(type: string, layout: any, finish?: string, finishColor?: string): { name: string; sub: string; fill: string; flute?: boolean; glass?: boolean }[] {
   const t = (type || "").toLowerCase();
   const fin = String(finish || (layout && layout.finish) || "").toLowerCase();
   const base = (): { name: string; sub: string; fill: string; flute?: boolean; glass?: boolean }[] => {
@@ -3120,10 +3120,11 @@ function ssMaterials(type: string, layout: any, finish?: string): { name: string
   const list = base();
   if (finish && fin && !/color-?coded/.test(fin)) {   // prepend the user's actual finish swatch
     const isAcr = fin.includes("acrylic"), isVen = fin.includes("veneer"), isPu = fin.includes("pu ") || fin.endsWith(" pu") || fin.includes("paint");
-    const fcol = isAcr ? "#f2efe9" : isVen ? "#7a4a25" : isPu ? "#e7e2d6" : "#d8c9b0";
-    const fname = isAcr ? "Acrylic Finish" : isVen ? "Veneer Finish" : isPu ? "PU Paint" : "Laminate Finish";
-    const sub = finish.length > 20 ? finish.slice(0, 20) : finish;
-    list.unshift({ name: fname, sub, fill: fcol, flute: isVen });
+    const valid = typeof finishColor === "string" && /^#[0-9a-fA-F]{6}$/.test(finishColor);
+    const fcol = valid ? finishColor! : isAcr ? "#f2efe9" : isVen ? "#7a4a25" : isPu ? "#e7e2d6" : "#d8c9b0";   // the exact chosen colour when available
+    const fname = isAcr ? "Acrylic Finish" : isVen ? "Veneer Finish" : isPu ? "PU Paint (Sirca)" : "Laminate Finish";
+    const sub = finish.length > 22 ? finish.slice(0, 22) : finish;
+    list.unshift({ name: fname, sub, fill: fcol, flute: isVen && !valid });
     if (list.length > 6) list.length = 6;
   }
   return list;
@@ -3391,7 +3392,7 @@ const SHEET_W = 1240;        // fixed presentation-sheet width (px)
 // meta.finish = the user's actual chosen 3D finish (palette reflects it);
 // meta.client = Bill-To dict (shows "Prepared for"); meta.heroDataUrl = a rendered
 // 3D / photoreal image to use as the hero instead of the line elevation.
-function specSheet(layout: any, meta: { type?: string; id?: string; finish?: string; client?: any; heroDataUrl?: string } = {}): string {
+function specSheet(layout: any, meta: { type?: string; id?: string; finish?: string; finishColor?: string; client?: any; heroDataUrl?: string } = {}): string {
   const type = meta.type || layout.designType || layout.type || "Modular Kitchen";
   const W = SHEET_W, M = 22, gut = 16;
   const innerW = W - M * 2;
@@ -3456,7 +3457,7 @@ function specSheet(layout: any, meta: { type?: string; id?: string; finish?: str
     }
   }
   // right column: material palette
-  const mats = ssMaterials(type, layout, meta.finish);
+  const mats = ssMaterials(type, layout, meta.finish, meta.finishColor);
   const palH = 200;
   parts.push(ssCard(rcX, y, rcW, palH, "Material Palette"));
   const swPerRow = 3, swGap = 10, swW = (rcW - 26 - swGap * (swPerRow - 1)) / swPerRow, swH = 52;
@@ -4390,7 +4391,7 @@ app.get("/api/designs/:id/export.svg", (c) => {
 // The Bill-To client (when set) is stamped on every sheet. GET = plain; POST carries
 // the optional live { finish, hero } so the palette reflects the real selection and
 // the hero can be the rendered 3D / photoreal view.
-function emitSpecSheet(c: any, d: any, extra: { finish?: string; heroDataUrl?: string }) {
+function emitSpecSheet(c: any, d: any, extra: { finish?: string; finishColor?: string; heroDataUrl?: string }) {
   const client = (() => { try { return quoteClient(d.row.id); } catch { return {}; } })();
   const svg = specSheet(d.layout, { type: d.row.designType, id: d.row.id, client, ...extra });
   c.header("Content-Type", "image/svg+xml");
@@ -4414,11 +4415,12 @@ app.post("/api/designs/:id/spec-sheet.svg", async (c) => {
   let body: any = {};
   try { body = await c.req.json(); } catch { /* no body — fine */ }
   const finish = typeof body.finish === "string" ? body.finish.slice(0, 60) : undefined;
+  const finishColor = typeof body.finishColor === "string" && /^#[0-9a-fA-F]{6}$/.test(body.finishColor) ? body.finishColor : undefined;
   // Hero must be a strict RASTER image data-URL (base64 only). SVG-in-SVG is rejected
   // (it could carry <script> → stored XSS); the regex structurally forbids quotes/angle
   // brackets so it is safe to embed in an <image href="…"> attribute.
   const heroDataUrl = typeof body.hero === "string" && body.hero.length < 9_000_000 && /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/]+=*$/.test(body.hero) ? body.hero : undefined;
-  return emitSpecSheet(c, d, { finish, heroDataUrl });
+  return emitSpecSheet(c, d, { finish, finishColor, heroDataUrl });
 });
 // 4-type modular kitchen comparison sheet (standalone — generates the four shapes).
 app.get("/api/spec-sheet/kitchens.svg", (c) => {
@@ -4852,6 +4854,7 @@ const frontendHTML = `<!DOCTYPE html>
     const fetchSpecSheet = async (result) => {
       const body = {};
       try { if (window.__adsFinish) body.finish = window.__adsFinish; } catch (e) {}   // user's actual 3D finish → palette
+      try { if (window.__adsFinishColor) body.finishColor = window.__adsFinishColor; } catch (e) {}   // exact chosen colour (e.g. a Sirca PU shade)
       try { if (window.__ads3D || window.__adsPR) body.hero = window.__ads3D || window.__adsPR; } catch (e) {}   // rendered hero (if the 3D / photoreal view has been visited)
       const r = await fetch("/api/designs/" + result.id + "/spec-sheet.svg?inline=1", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -5913,9 +5916,18 @@ const frontendHTML = `<!DOCTYPE html>
           "Duro":              [{ n: "Golden Teak", c: 0xa9743b, w: 1 }, { n: "Dark Walnut", c: 0x4c3624, w: 1 }, { n: "Natural Maple", c: 0xd9b98a, w: 1 }],
         } },
         pu: { tag: "PU painted", r: 0.26, m: 0.05, smooth: true, env: 0.55, brands: {
+          // Sirca Supercolour palette — colours sampled from the official Sirca/OIKOS
+          // Supercolor catalogue (D:\Catalogs\Sirca\sirca-color-pallate_compressed.pdf),
+          // grouped by family. Codes N/E/Y/R/P/G/B-NN are our catalogue indices.
+          "Sirca · Neutral": [{ n: "N-01", c: 0x0f1316 }, { n: "N-02", c: 0x26210e }, { n: "N-03", c: 0x213438 }, { n: "N-04", c: 0x40483b }, { n: "N-05", c: 0x434c53 }, { n: "N-06", c: 0x555a60 }, { n: "N-07", c: 0x74716c }, { n: "N-08", c: 0x877c84 }, { n: "N-09", c: 0x819498 }, { n: "N-10", c: 0xa4a8ab }, { n: "N-11", c: 0xb5abb3 }, { n: "N-12", c: 0xc8b3b0 }, { n: "N-13", c: 0xcabfc7 }, { n: "N-14", c: 0xc7d1b9 }, { n: "N-15", c: 0xdbd4cc }, { n: "N-16", c: 0xe4dbde }],
+          "Sirca · Earth": [{ n: "E-01", c: 0x584338 }, { n: "E-02", c: 0xc45220 }, { n: "E-03", c: 0xa0684d }, { n: "E-04", c: 0xba6c17 }, { n: "E-05", c: 0xa57b4b }, { n: "E-06", c: 0xbc812f }, { n: "E-07", c: 0xff7906 }, { n: "E-08", c: 0xb68a5b }, { n: "E-09", c: 0xcf9031 }, { n: "E-10", c: 0xf79307 }, { n: "E-11", c: 0xafa393 }, { n: "E-12", c: 0xce9f81 }, { n: "E-13", c: 0xfba74d }, { n: "E-14", c: 0xe7b43e }, { n: "E-15", c: 0xf7b060 }, { n: "E-16", c: 0xf7ba9e }, { n: "E-17", c: 0xeccc79 }, { n: "E-18", c: 0xfecd64 }],
+          "Sirca · Sunlight": [{ n: "Y-01", c: 0x333412 }, { n: "Y-02", c: 0x526803 }, { n: "Y-03", c: 0x6d765b }, { n: "Y-04", c: 0x8e8a0d }, { n: "Y-05", c: 0xa38d3a }, { n: "Y-06", c: 0xc8a002 }, { n: "Y-07", c: 0xa9a580 }, { n: "Y-08", c: 0xd7ad1b }, { n: "Y-09", c: 0xaec16f }, { n: "Y-10", c: 0xb6bc98 }, { n: "Y-11", c: 0xd0c38f }, { n: "Y-12", c: 0xbccb88 }, { n: "Y-13", c: 0xe1cf5f }, { n: "Y-14", c: 0xc7de8c }, { n: "Y-15", c: 0xfed839 }, { n: "Y-16", c: 0xffe114 }],
+          "Sirca · Red": [{ n: "R-01", c: 0x381114 }, { n: "R-02", c: 0x991018 }, { n: "R-03", c: 0xd00d1e }, { n: "R-04", c: 0x563331 }, { n: "R-05", c: 0x863a2a }, { n: "R-06", c: 0xe93011 }, { n: "R-07", c: 0xb74429 }, { n: "R-08", c: 0x8f5756 }, { n: "R-09", c: 0x985a67 }, { n: "R-10", c: 0xd85640 }, { n: "R-11", c: 0xf54b72 }, { n: "R-12", c: 0x93756d }, { n: "R-13", c: 0xfc664d }, { n: "R-14", c: 0xea6e4c }, { n: "R-15", c: 0xf3826e }, { n: "R-16", c: 0xf3939f }, { n: "R-17", c: 0xfb9daf }, { n: "R-18", c: 0xfaada5 }],
+          "Sirca · Blush": [{ n: "P-01", c: 0x5d1837 }, { n: "P-02", c: 0x602659 }, { n: "P-03", c: 0x4d378c }, { n: "P-04", c: 0x5d3e7a }, { n: "P-05", c: 0x8b375b }, { n: "P-06", c: 0xbc4180 }, { n: "P-07", c: 0x8656a2 }, { n: "P-08", c: 0xd15d9c }, { n: "P-09", c: 0xb47296 }, { n: "P-10", c: 0xeb69a7 }, { n: "P-11", c: 0xb78ab5 }, { n: "P-12", c: 0xcf8a9c }, { n: "P-13", c: 0xf38eba }, { n: "P-14", c: 0xcfa2c9 }],
+          "Sirca · Green": [{ n: "G-01", c: 0x233d30 }, { n: "G-02", c: 0x135d2c }, { n: "G-03", c: 0x385537 }, { n: "G-04", c: 0x486144 }, { n: "G-05", c: 0x177946 }, { n: "G-06", c: 0x008141 }, { n: "G-07", c: 0x2b7a0f }, { n: "G-08", c: 0x409b56 }, { n: "G-09", c: 0x739475 }, { n: "G-10", c: 0x39ab6d }, { n: "G-11", c: 0x67a05c }, { n: "G-12", c: 0x6ba483 }, { n: "G-13", c: 0x4db262 }, { n: "G-14", c: 0x7bbba0 }, { n: "G-15", c: 0x9db498 }, { n: "G-16", c: 0x8fc07f }],
+          "Sirca · Aqua": [{ n: "B-01", c: 0x0c1326 }, { n: "B-02", c: 0x172741 }, { n: "B-03", c: 0x143733 }, { n: "B-04", c: 0x044587 }, { n: "B-05", c: 0x344f94 }, { n: "B-06", c: 0x325d80 }, { n: "B-07", c: 0x655ea2 }, { n: "B-08", c: 0x1e809b }, { n: "B-09", c: 0x1b9691 }, { n: "B-10", c: 0x00ab98 }, { n: "B-11", c: 0x449baf }, { n: "B-12", c: 0x2da7da }, { n: "B-13", c: 0x8ba0b1 }, { n: "B-14", c: 0x4eb8aa }, { n: "B-15", c: 0x67c3ac }, { n: "B-16", c: 0x87ceea }],
           "AICA":         [{ n: "Pearl White Satin", c: 0xf2f3f2 }, { n: "Ivory Silk", c: 0xece2cc }, { n: "Wine Red", c: 0x6a2330 }, { n: "Charcoal", c: 0x3a3f45 }],
           "Action Tesa":  [{ n: "Super White", c: 0xf6f7f8 }, { n: "Dove Grey", c: 0xa6acb3 }, { n: "Olive Green", c: 0x6f7a52 }, { n: "Royal Blue", c: 0x32436b }],
-          "Sirca":        [{ n: "Bianco Gloss", c: 0xf7f8f9 }, { n: "Tortora", c: 0xb9aa98 }, { n: "Bordeaux", c: 0x5c2230 }, { n: "Nero Matt", c: 0x24262a }],
           "Asian Paints": [{ n: "Linen White", c: 0xf1efe6 }, { n: "Misty Grey", c: 0xb5bcc2 }, { n: "Teal", c: 0x2f6e6a }, { n: "Mustard", c: 0xc99a2e }],
         } },
       };
@@ -5942,7 +5954,7 @@ const frontendHTML = `<!DOCTYPE html>
           color: S.c, roughness: S.r != null ? S.r : T.r, metalness: T.m, wood: !!S.w, smooth: !!T.smooth, env: T.env };
       };
       const FIN = finOf();
-      try { window.__adsFinish = FIN && FIN.name; } catch (e) {}   // stash current finish for the spec-sheet palette
+      try { window.__adsFinish = FIN && FIN.name; window.__adsFinishColor = (FIN && typeof FIN.color === "number") ? "#" + (FIN.color >>> 0).toString(16).padStart(6, "0") : null; } catch (e) {}   // stash current finish (name + exact colour) for the spec-sheet palette
       const [lightKey, setLightKey] = useState("warm");   // warm key default — cosier, richer "designer render" feel (neutral read cool/clinical)
       const [demoOn, setDemoOn] = useState(false);   // 🎛 live accessory demo (doors/drawers/pull-outs/carousel in motion)
       const demoRef = React.useRef(false), demoT0Ref = React.useRef(0);
