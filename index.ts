@@ -7794,6 +7794,9 @@ const frontendHTML = `<!DOCTYPE html>
       const [matPicked, setMatPicked] = useState(null);
       const [matScope, setMatScope] = useState("all");   // §4 Apply-To: all | base | wall | tall
       const [matHarmony, setMatHarmony] = useState(null);   // §5 colour-harmony suggestions
+      const [matHistory, setMatHistory] = useState([]);     // §11 material change history
+      const loadHistory = () => { if (result && result.id) fetch("/api/designs/" + result.id + "/material-history").then((r) => r.json()).then((j) => setMatHistory(j.data || [])).catch(() => {}); };
+      const revertMaterial = (hid) => { if (!result || !result.id) return; fetch("/api/designs/" + result.id + "/material-revert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ historyId: hid }) }).then((r) => r.json()).then(() => { if (typeof refreshQuote === "function") refreshQuote(); loadHistory(); setMatPicked({ brand: "Reverted to", colorName: "a previous material", code: "↩", colorCode: "#64748b" }); }).catch(() => {}); };
       React.useEffect(() => { if (!matFacets) fetch("/api/materials/facets").then((r) => r.json()).then((j) => setMatFacets(j.data)).catch(() => {}); }, [matFacets]);
       React.useEffect(() => {
         if (!matOpen) return;
@@ -7808,13 +7811,13 @@ const frontendHTML = `<!DOCTYPE html>
         try { window.__adsFinish = m.brand + " " + m.colorName + " (" + m.code + ")"; window.__adsFinishColor = m.colorCode; } catch (e) {}
         setMatPicked(m);
         try { if (m.colorCode) fetch("/api/materials/harmony?hex=" + m.colorCode.replace("#", "")).then((r) => r.json()).then((j) => setMatHarmony(j.data || null)).catch(() => {}); } catch (e) {}   // §5 pairing suggestions
-        try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...m, scope: matScope }) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); }); } catch (e) {}   // persist (scoped) → flows into quote + sheet
+        try { if (result && result.id) fetch("/api/designs/" + result.id + "/material", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...m, scope: matScope }) }).then(() => { if (typeof refreshQuote === "function") refreshQuote(); loadHistory(); }); } catch (e) {}   // persist (scoped) → flows into quote + sheet
       };
       // §12 Theme creator
       const [themes, setThemes] = useState([]);
       const [themeSel, setThemeSel] = useState("");
       const loadThemes = () => fetch("/api/themes").then((r) => r.json()).then((j) => setThemes(j.data || [])).catch(() => {});
-      React.useEffect(() => { if (matOpen) loadThemes(); }, [matOpen]);
+      React.useEffect(() => { if (matOpen) { loadThemes(); loadHistory(); } }, [matOpen]);
       const applyTheme = () => {
         if (!themeSel || !result || !result.id) return;
         fetch("/api/designs/" + result.id + "/apply-theme", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ themeId: themeSel }) }).then((r) => r.json()).then((j) => {
@@ -7822,6 +7825,7 @@ const frontendHTML = `<!DOCTYPE html>
           try { window.__adsFinish = t.name + " theme"; window.__adsFinishColor = pm.colorCode || null; } catch (e) {}
           setMatPicked({ brand: "Theme", colorName: t.name || "", code: "applied", colorCode: pm.colorCode || "#6366f1" });
           if (typeof refreshQuote === "function") refreshQuote();
+          loadHistory();
         }).catch(() => {});
       };
       const saveTheme = () => {
@@ -8467,6 +8471,18 @@ const frontendHTML = `<!DOCTYPE html>
                             ) : null)}
                           </div>
                           <div className="mt-1.5 text-[10px] text-slate-600">Countertop: <b>{matHarmony.pairing.countertop}</b> · Handle: <b>{matHarmony.pairing.handle}</b> · Backsplash: <b>{matHarmony.pairing.backsplash}</b></div>
+                        </div>
+                      )}
+                      {matHistory.length > 0 && (
+                        <div className="mt-2 p-2 bg-slate-50 border border-slate-200 rounded text-xs">
+                          <div className="font-semibold text-slate-600 mb-1">🕘 Material history</div>
+                          <div className="space-y-0.5" style={{ maxHeight: 120, overflow: "auto" }}>
+                            {matHistory.slice(0, 8).map((h, i) => <div key={h.id} className="flex items-center gap-2">
+                              <span style={{ background: h.color || "#e2e8f0", width: 12, height: 12, borderRadius: 2, display: "inline-block", border: "1px solid #cbd5e1" }}></span>
+                              <span className="text-slate-600 truncate flex-1">{i === 0 ? "● " : ""}{h.label}</span>
+                              {i > 0 && <button onClick={() => revertMaterial(h.id)} className="text-[10px] px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-slate-700">Revert</button>}
+                            </div>)}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -9938,6 +9954,7 @@ app.put("/api/designs/:id/material", async (c) => {
   sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
     ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify(cur), Date.now());
   auditEdit(id, d.row.designType, "adjustment", "material [" + scope + "]: " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
+  pushMaterialHistory(id, "Material [" + scope + "]: " + [m.brand, m.colorName, m.code].filter(Boolean).join(" "));
   broadcast(id, "material", { code: m.code || "", scope });
   return c.json({ data: { ok: true, scope, scopes: cur } });
 });
@@ -9977,9 +9994,36 @@ app.post("/api/designs/:id/apply-theme", async (c) => {
   sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
     ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, JSON.stringify({ base: sc.base, wall: sc.wall, tall: sc.tall }), Date.now());
   auditEdit(id, d.row.designType, "adjustment", "theme applied: " + theme.name);
+  pushMaterialHistory(id, "Theme: " + theme.name);
   broadcast(id, "material", { theme: theme.name });
   const quote = priceQuote(d.layout, quoteRates(id), materialScopes(id));
   return c.json({ data: { ok: true, theme: theme.name, primary: primaryMaterial(sc), total: quote.total } });
+});
+
+// ── §11 Material history (memento) — snapshot on every material change; revert. ──
+sqlite.exec(`CREATE TABLE IF NOT EXISTS material_history (id TEXT PRIMARY KEY, design_id TEXT NOT NULL, snapshot TEXT NOT NULL, label TEXT NOT NULL, created_at INTEGER NOT NULL);`);
+function pushMaterialHistory(id: string, label: string) {
+  try {
+    sqlite.prepare(`INSERT INTO material_history(id,design_id,snapshot,label,created_at) VALUES(?,?,?,?,?)`).run(randomUUID(), id, JSON.stringify(materialScopes(id)), String(label).slice(0, 80), Date.now());
+    const old = (sqlite.prepare(`SELECT id FROM material_history WHERE design_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 50`).all(id) as any[]).map((r) => r.id);   // keep last 50
+    if (old.length) { const del = sqlite.prepare(`DELETE FROM material_history WHERE id=?`); for (const x of old) del.run(x); }
+  } catch { /* history is best-effort */ }
+}
+function materialHistory(id: string): any[] {
+  return (sqlite.prepare(`SELECT id,snapshot,label,created_at FROM material_history WHERE design_id=? ORDER BY created_at DESC LIMIT 60`).all(id) as any[]).map((r) => { const p = primaryMaterial(JSON.parse(r.snapshot)); return { id: r.id, label: r.label, at: r.created_at, color: p ? p.colorCode : null, summary: p ? (p.brand + " " + p.colorName) : "—" }; });
+}
+app.get("/api/designs/:id/material-history", (c) => { const d = loadDesign(c.req.param("id")); if (!d) return c.json({ error: "Design not found" }, 404); return c.json({ data: materialHistory(c.req.param("id")) }); });
+app.post("/api/designs/:id/material-revert", async (c) => {
+  const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const row = sqlite.prepare(`SELECT snapshot,label FROM material_history WHERE id=? AND design_id=?`).get(b.historyId, id) as any;
+  if (!row) return c.json({ error: "History entry not found" }, 404);
+  sqlite.prepare(`INSERT INTO design_materials(design_id,material,updated_at) VALUES(?,?,?)
+    ON CONFLICT(design_id) DO UPDATE SET material=excluded.material, updated_at=excluded.updated_at`).run(id, row.snapshot, Date.now());
+  pushMaterialHistory(id, "Reverted → " + row.label);
+  broadcast(id, "material", { revert: true });
+  const quote = priceQuote(d.layout, quoteRates(id), materialScopes(id));
+  return c.json({ data: { ok: true, total: quote.total } });
 });
 // Client / "Bill To" details — persisted per design, addressed onto the quote + proposal.
 app.get("/api/designs/:id/client", (c) => {

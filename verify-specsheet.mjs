@@ -107,6 +107,10 @@ try {
   let harmonyOk = false;
   for (let i = 0; i < 14; i++) { await sleep(250); harmonyOk = await page.evaluate(() => /Pairs well with/.test(document.body.innerText)); if (harmonyOk) break; }
   ok("colour-harmony suggestions appear", harmonyOk);
+  // §11 material history records the change
+  let histOk = false;
+  for (let i = 0; i < 14; i++) { await sleep(250); histOk = await page.evaluate(() => /Material history/.test(document.body.innerText)); if (histOk) break; }
+  ok("material history records the change", histOk);
   // §12 Theme creator — select a built-in theme and apply it
   const themed = await page.evaluate(() => {
     const sel = [...document.querySelectorAll("select")].find((s) => [...s.options].some((o) => /Modern Luxury/.test(o.textContent || "")));
