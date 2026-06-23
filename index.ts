@@ -4503,7 +4503,7 @@ function newMaterial(b: any, fallbackCollection: string): any | { error: string 
   if (!/^[0-9a-fA-F]{6}$/.test(hex)) return { error: "colorCode must be #rrggbb" };
   const [d, cu] = MAT_RATE[category] || [0, 0];
   const s = (v: any, n: number, dflt = "") => (v == null ? dflt : String(v).slice(0, n));
-  return { materialId: "CUSTOM_" + randomUUID().slice(0, 8).toUpperCase(), code: s(b.code, 24) || "CUST", category, brand: s(b.brand, 40) || "Custom", collection: s(b.collection, 40) || fallbackCollection, colorName: s(b.colorName, 40) || "Colour", colorCode: "#" + hex.toLowerCase(), hex: hex.toLowerCase(), finishType: s(b.finishType, 20) || "Matt", sheen: Number(b.sheen) || 15, dealerRate: Number(b.dealerRate) || d, customerRate: Number(b.customerRate) || cu, unit: s(b.unit, 16) || "sqft" };
+  return { materialId: "CUSTOM_" + randomUUID().slice(0, 8).toUpperCase(), code: s(b.code, 24) || "CUST", category, brand: s(b.brand, 40) || "Custom", collection: s(b.collection, 40) || fallbackCollection, colorName: s(b.colorName, 40) || "Colour", colorCode: "#" + hex.toLowerCase(), hex: hex.toLowerCase(), finishType: s(b.finishType, 20) || "Matt", sheen: Number(b.sheen) || 15, dealerRate: Math.max(0, Number(b.dealerRate) || d), customerRate: Math.max(0, Number(b.customerRate) || cu), unit: s(b.unit, 16) || "sqft" };
 }
 function materialFacets() {
   const all = catalogAll();
@@ -4533,6 +4533,7 @@ app.post("/api/materials/import", async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const csv = String(b.csv || ""); if (!csv.trim()) return c.json({ error: "empty CSV" }, 400);
   const lines = csv.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length > 5000) return c.json({ error: "too many rows (max 5000)" }, 400);   // bound the synchronous bulk insert
   let header: string[] | null = null; let added = 0; const errors: string[] = [];
   const ins = sqlite.prepare(`INSERT INTO custom_materials(material_id,material,created_at) VALUES(?,?,?)`);
   for (let i = 0; i < lines.length; i++) {
@@ -9874,8 +9875,10 @@ function hasClient(cl: any): boolean { return !!(cl && (cl.name || cl.phone || c
 function quoteCsv(q: ReturnType<typeof priceQuote>, client?: any): string {
   const out: string[] = [];
   const cl = client || {};
+  // Neutralise spreadsheet formula-injection: a value beginning =,+,-,@,tab,CR gets a leading apostrophe.
+  const csvSafe = (v: any) => { const s = String(v == null ? "" : v); return (/^[=+\-@\t\r]/.test(s) ? "'" + s : s).replace(/"/g, '""'); };
   if (hasClient(cl)) {
-    const f = (label: string, v: string) => out.push(`${label},"${String(v || "").replace(/"/g, '""')}"`);
+    const f = (label: string, v: string) => out.push(`${label},"${csvSafe(v)}"`);
     if (cl.name) f("Bill To", cl.name);
     if (cl.phone) f("Phone", cl.phone);
     if (cl.email) f("Email", cl.email);
@@ -9884,7 +9887,7 @@ function quoteCsv(q: ReturnType<typeof priceQuote>, client?: any): string {
     out.push("");
   }
   out.push("S.No,Item,Qty,Unit,Rate (INR),Amount (INR)");
-  q.lines.forEach((l, i) => out.push(`${i + 1},"${l.item.replace(/"/g, '""')}",${l.qty},${l.unit},${l.rate},${l.amount}`));
+  q.lines.forEach((l, i) => out.push(`${i + 1},"${csvSafe(l.item)}",${l.qty},${l.unit},${l.rate},${l.amount}`));
   out.push(`,,,,Subtotal,${q.subtotal}`);
   out.push(`,,,,Margin (${q.marginPct}%),${q.margin}`);
   out.push(`,,,,Taxable,${q.taxable}`);
