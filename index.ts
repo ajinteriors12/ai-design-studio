@@ -192,6 +192,23 @@ const STD = {
   viewHeight: 2400,                                  // elevation canvas height (floor→ceiling)
 };
 
+// Indian ergonomic standards (web-researched 2026-06-30) — acceptance BANDS [min, max] in mm,
+// used by validateStandards() to cross-check the GENERATED geometry, not just the STD constants.
+// Wardrobe: short hang 950–1100, long 1600–1800, shelf gap 250–400, depth 600, drawer 150–230.
+// Kitchen: counter 850–900, base depth 560–610, wall sill gap 450–600, chimney 600/900.
+const STD_RANGES = {
+  wardrobeDepth: [550, 650], loftMin: 300,
+  shortHang: [900, 1250],   // shirts/trousers/folded — rod-to-shelf clear
+  longHang: [1500, 1900],   // kurta / saree / coat / gown
+  hangMin: 850,             // below this nothing actually hangs (catches the 20 cm / 68 cm errors)
+  shelfGap: [250, 450], shelfMin: 200,
+  drawerH: [120, 320],
+  baseHeight: [820, 920], counterTop: [840, 940], baseDepth: [550, 620],
+  wallDepth: [280, 380], wallHeight: [400, 760], counterToWall: [400, 650],
+  chimneyW: [550, 950],
+};
+const inRange = (v: number, r: number[]): boolean => v >= r[0] && v <= r[1];
+
 // The 23 exact admin commands from the prompt's Command Center.
 const COMMANDS: string[] = [
   "Learn cabinet construction standards", "Learn only wardrobe designs",
@@ -2330,6 +2347,15 @@ function buildLayout(type: string, dims: { wall: number; wallB?: number; wallC?:
     if (GEN_LOG.conflicts.length) layout.appliedRules.push("⚠ Conflicts (mandatory enforced): " + GEN_LOG.conflicts.join(" "));
     if (GEN_LOG.adjustments.length) layout.appliedRules.push("Non-standard adjustments: " + GEN_LOG.adjustments.join(" "));
   }
+  // Indian ergonomic-standards validation — runs for EVERY design type (wardrobe + kitchen).
+  const std = validateStandards(layout);
+  (layout as any).standardsChecks = std;
+  const stdFails = std.filter((s) => !s.ok);
+  const stdErr = stdFails.filter((s) => s.level === "error"), stdWarn = stdFails.filter((s) => s.level === "warning");
+  stdFails.forEach((s) => GEN_LOG.conflicts.push(`Indian-standards ${s.level} — ${s.name}: ${s.note}`));
+  layout.appliedRules.push(`Indian standards validation: ${std.length - stdFails.length}/${std.length} dimensions within standard${stdFails.length ? ` — ${stdErr.length} error, ${stdWarn.length} warning flagged for review` : " — all ergonomic"}.`);
+  // Furniture doesn't surface GEN_LOG.conflicts above (kitchen-only block) — emit the flags here.
+  if (!type.toLowerCase().includes("kitchen") && stdFails.length) layout.appliedRules.push("⚠ Standards flags: " + stdFails.map((s) => `[${s.level}] ${s.note}`).join(" "));
   return layout;
 }
 
@@ -3865,6 +3891,71 @@ function validateManufacturing(layout: any): { name: string; ok: boolean; note: 
   }
   return checks;
 }
+
+// ── Indian ergonomic-standards validation (Output: standardsChecks) ────────────
+// Cross-checks the GENERATED geometry against published Indian wardrobe & modular-kitchen
+// standards (STD_RANGES). Same {name,ok,note} shape as validateManufacturing + a severity
+// `level`: "error" = unusable / not buildable as drawn (hanging rod too short to hang clothes,
+// columns/bands that don't sum to the carcass — the exact mistakes found in AI-drawn dimension
+// images); "warning" = buildable but outside the ideal band. Runs for every design type.
+function validateStandards(layout: any): { name: string; ok: boolean; note: string; level: string }[] {
+  const R = STD_RANGES, checks: { name: string; ok: boolean; note: string; level: string }[] = [];
+  const add = (name: string, ok: boolean, note: string, level = "warning") => checks.push({ name, ok, note, level: ok ? "ok" : level });
+  const t = String(layout.type || "").toLowerCase();
+  const isKitchen = t.includes("kitchen");
+
+  // ── FURNITURE (wardrobe / crockery / vanity / TV …) — read the actual columns/cells ──
+  const u = layout.furniture;
+  if (u && Array.isArray(u.columns)) {
+    const isWardrobe = t.includes("wardrobe") || t.includes("crockery");
+    if (isWardrobe) {
+      add("Wardrobe depth (550–650 mm)", inRange(u.depthMM, R.wardrobeDepth), `Depth ${u.depthMM} mm` + (inRange(u.depthMM, R.wardrobeDepth) ? " — fits hangers." : " — outside 550–650 mm (hangers need ~600)."));
+      add("Loft height (≥300 mm)", u.loftMM === 0 || u.loftMM >= R.loftMin, `Loft ${u.loftMM} mm` + (u.loftMM === 0 || u.loftMM >= R.loftMin ? "." : " — too shallow for storage bins."));
+      // Parts-to-whole: columns must sum to the carcass width (the carcass-deduction lesson).
+      const wSum = u.columns.reduce((s: number, c: any) => s + (c.wMM || 0), 0);
+      add("Width closes to overall", Math.abs(wSum - u.widthMM) <= 5, `Columns Σ ${Math.round(wSum)} vs ${Math.round(u.widthMM)} mm` + (Math.abs(wSum - u.widthMM) <= 5 ? " — parts sum to the whole." : " — columns do not fill the carcass width."), "error");
+      // Per-column: bands must sum to the body height (loft + body = total).
+      const body = u.heightMM - (u.loftMM || 0);
+      u.columns.forEach((col: any, ci: number) => {
+        const hSum = (col.cells || []).reduce((s: number, c: any) => s + (c.hMM || 0), 0);
+        if (Math.abs(hSum - body) > 15) add(`Column ${ci + 1} bands close`, false, `Cells Σ ${Math.round(hSum)} vs body ${Math.round(body)} mm — bands don't sum to height.`, "error");
+      });
+    }
+    // Per-cell ergonomics (valid for any furniture column).
+    u.columns.forEach((col: any, ci: number) => {
+      for (const cell of (col.cells || [])) {
+        const h = Math.round(cell.hMM || 0);
+        if (cell.kind === "hang") {
+          if (h < R.hangMin) add(`Hanging rod usable (col ${ci + 1})`, false, `Hanging gap ${h} mm — too short to hang clothes (need ≥${R.shortHang[0]} short / ${R.longHang[0]}–${R.longHang[1]} long).`, "error");
+          else if (!inRange(h, R.shortHang) && !inRange(h, R.longHang)) add(`Hanging height band (col ${ci + 1})`, false, `Hanging ${h} mm — between short (${R.shortHang[0]}–${R.shortHang[1]}) and long (${R.longHang[0]}–${R.longHang[1]}) bands.`, "warning");
+        } else if (cell.kind === "drawer") {
+          if (!inRange(h, R.drawerH)) add(`Drawer height (col ${ci + 1})`, false, `Drawer ${h} mm — outside ${R.drawerH[0]}–${R.drawerH[1]} mm.`, "warning");
+        } else if (cell.kind === "shelf" && /shelf$/i.test(String(cell.label || ""))) {
+          // singular "Shelf" = one gap; "Shelves" (plural, aggregate stack) is skipped for the upper bound.
+          if (h < R.shelfMin) add(`Shelf spacing (col ${ci + 1})`, false, `Shelf gap ${h} mm — too tight (min ~${R.shelfMin}).`, "warning");
+          else if (h > R.shelfGap[1] + 150) add(`Shelf spacing (col ${ci + 1})`, false, `Shelf gap ${h} mm — wider than the ${R.shelfGap[0]}–${R.shelfGap[1]} mm folded-clothes band.`, "warning");
+        }
+      }
+    });
+  }
+
+  // ── KITCHEN — scalar ergonomics (driven by STD / learned standards + chosen chimney) ──
+  if (isKitchen) {
+    const counter = STD.baseHeight + STD.counterThk;
+    add("Base cabinet height", inRange(STD.baseHeight, R.baseHeight), `Carcass ${STD.baseHeight} mm (+${STD.counterThk} top = ${counter} mm counter).`);
+    add("Countertop height", inRange(counter, R.counterTop), `Finished counter ${counter} mm` + (inRange(counter, R.counterTop) ? " — ergonomic." : " — outside 840–940 mm."));
+    add("Base depth", inRange(STD.baseDepth, R.baseDepth), `Base depth ${STD.baseDepth} mm.`);
+    add("Wall cabinet depth", inRange(STD.wallDepth, R.wallDepth), `Wall depth ${STD.wallDepth} mm.`);
+    add("Wall cabinet height", inRange(STD.wallHeight, R.wallHeight), `Wall height ${STD.wallHeight} mm.`);
+    const gap = STD.wallStart - counter;
+    add("Counter→wall-cabinet gap", inRange(gap, R.counterToWall), `Gap ${gap} mm (sill ${STD.wallStart} − counter ${counter})` + (inRange(gap, R.counterToWall) ? " — 450–650 mm worktop clearance." : " — outside 450–650 mm."));
+    const cw = GEN.chimneyWidth || STD.chimneyWidth;
+    add("Chimney width", inRange(cw, R.chimneyW), `Chimney ${cw} mm (standard 600 / 900).`);
+  }
+
+  return checks;
+}
+
 function cutListCsv(layout: any, scopes?: any, cabMats?: any): string {
   cabMats = cabMats || {};
   const rows = cutList(layout);
