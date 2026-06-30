@@ -9417,7 +9417,7 @@ const frontendHTML = `<!DOCTYPE html>
 
     // Reconstruct the cabinets in 3D from the generated package; right-click any
     // panel/part to change its parent cabinet's dimensions → re-derives everything.
-    function Fabrik3D({ cabinets, cabsByCode, onEditCab, busy }) {
+    function Fabrik3D({ cabinets, cabsByCode, onEditCab, onOverridePanel, busy }) {
       const hostRef = useRef(null);
       const [menu, setMenu] = useState(null);   // {x,y,code,part,w,h,d,shutters,drawerCount,shutterless}
       const [err, setErr] = useState("");
@@ -9447,26 +9447,29 @@ const frontendHTML = `<!DOCTYPE html>
         const maxH = cabinets.reduce((m, c) => Math.max(m, c.h), 0);
         const maxD = cabinets.reduce((m, c) => Math.max(m, c.d), 0);
         let x = -total / 2;
-        const addBox = (w, h, d, cx, cy, cz, mat, code, part) => {
+        const addBox = (w, h, d, cx, cy, cz, mat, code, part, panel) => {
           const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), mat);
-          m.position.set(cx, cy, cz); m.userData = { code, part, baseColor: mat.color.getHex() };
+          m.position.set(cx, cy, cz);
+          m.userData = { code, part, panelCode: panel && panel.code, pw: panel && panel.w, ph: panel && panel.h, pthk: panel && panel.thk, overridden: !!(panel && panel.overridden), baseColor: mat.color.getHex() };
           scene.add(m); meshes.push(m); return m;
         };
         for (const c of cabinets) {
           const w = c.w, h = c.h, d = c.d, code = c.code;
-          addBox(T, h, d, x + T / 2, h / 2, d / 2, carcassMat(), code, "Left Side");
-          addBox(T, h, d, x + w - T / 2, h / 2, d / 2, carcassMat(), code, "Right Side");
-          addBox(w - 2 * T, T, d, x + w / 2, T / 2, d / 2, carcassMat(), code, "Bottom");
-          addBox(w - 2 * T, T, d, x + w / 2, h - T / 2, d / 2, carcassMat(), code, h > 1000 ? "Top" : "Top Rail");
-          addBox(w - 2 * T, h - 2 * T, TB, x + w / 2, h / 2, TB / 2, carcassMat(), code, "Back Panel");
+          const find = (re) => (c.panels || []).find(p => re.test(p.panel));
+          addBox(T, h, d, x + T / 2, h / 2, d / 2, carcassMat(), code, "Left Side", find(/^Left Side/));
+          addBox(T, h, d, x + w - T / 2, h / 2, d / 2, carcassMat(), code, "Right Side", find(/^Right Side/));
+          addBox(w - 2 * T, T, d, x + w / 2, T / 2, d / 2, carcassMat(), code, "Bottom", find(/^Bottom/));
+          addBox(w - 2 * T, T, d, x + w / 2, h - T / 2, d / 2, carcassMat(), code, h > 1000 ? "Top" : "Top Rail", find(/^Top/));
+          addBox(w - 2 * T, h - 2 * T, TB, x + w / 2, h / 2, TB / 2, carcassMat(), code, "Back Panel", find(/Back Panel/));
           // fronts
           const drawers = (c.drawers || []).length;
           if (drawers > 0) {
+            const fronts = (c.drawerComponents || []).filter(p => /Drawer Front/.test(p.panel));
             const fh = (h - (drawers + 1) * 3) / drawers;
-            for (let i = 0; i < drawers; i++) addBox(w - 6, fh - 3, T, x + w / 2, 3 + i * (fh + 3) + fh / 2, d - T / 2, frontMat(), code, "Drawer Front");
+            for (let i = 0; i < drawers; i++) addBox(w - 6, fh - 3, T, x + w / 2, 3 + i * (fh + 3) + fh / 2, d - T / 2, frontMat(), code, "Drawer Front", fronts[i]);
           } else if ((c.shutters || []).length > 0) {
             const n = c.shutters.length, sw = (w - 3 * (n + 1)) / n;
-            for (let i = 0; i < n; i++) addBox(sw, h - 6, T, x + 3 + i * (sw + 3) + sw / 2, h / 2, d - T / 2, frontMat(), code, "Shutter");
+            for (let i = 0; i < n; i++) addBox(sw, h - 6, T, x + 3 + i * (sw + 3) + sw / 2, h / 2, d - T / 2, frontMat(), code, "Shutter", c.shutters[i]);
           }
           x += w + GAP;
         }
@@ -9491,7 +9494,7 @@ const frontendHTML = `<!DOCTYPE html>
           ev.preventDefault(); const hit = pick(ev);
           if (!hit) { setMenu(null); return; }
           const u = hit.object.userData, src = cabsByCode[u.code] || {};
-          setMenu({ x: ev.clientX, y: ev.clientY, code: u.code, part: u.part, w: src.w, h: src.h, d: src.d, shutters: src.shutters || "", drawerCount: src.drawerCount || 0, shutterless: !!src.shutterless });
+          setMenu({ x: ev.clientX, y: ev.clientY, code: u.code, part: u.part, w: src.w, h: src.h, d: src.d, shutters: src.shutters || "", drawerCount: src.drawerCount || 0, shutterless: !!src.shutterless, panelCode: u.panelCode, pw: u.pw, ph: u.ph, pthk: u.pthk });
         };
         renderer.domElement.addEventListener("contextmenu", onCtx);
         renderer.domElement.addEventListener("pointermove", onMove);
@@ -9501,6 +9504,7 @@ const frontendHTML = `<!DOCTYPE html>
 
       const inp = "w-20 px-2 py-1 border border-slate-300 rounded text-xs";
       const apply = () => { const p = { w: +menu.w || 0, h: +menu.h || 0, d: +menu.d || 0, shutters: menu.shutters === "" ? "" : +menu.shutters, drawerCount: +menu.drawerCount || 0, shutterless: !!menu.shutterless }; onEditCab(menu.code, p); setMenu(null); };
+      const applyPanel = () => { onOverridePanel(menu.panelCode, { w: +menu.pw || 0, h: +menu.ph || 0, thk: +menu.pthk || 0 }); setMenu(null); };
 
       return (
         <div style={{ position: "relative" }}>
@@ -9508,9 +9512,10 @@ const frontendHTML = `<!DOCTYPE html>
           <div ref={hostRef} style={{ width: "100%", height: 480, borderRadius: 10, overflow: "hidden", background: "#eef2f7" }} />
           {err && <div className="text-xs text-rose-600 mt-2">{err}</div>}
           {menu && (
-            <div className="bg-white border border-slate-300 rounded-lg shadow-xl text-xs p-3 w-60" style={{ position: "fixed", zIndex: 80, left: Math.min(menu.x, (typeof window !== "undefined" ? window.innerWidth : 1200) - 260), top: Math.min(menu.y, (typeof window !== "undefined" ? window.innerHeight : 800) - 280) }} onClick={e => e.stopPropagation()}>
-              <div className="font-semibold text-slate-700 mb-1">{menu.code} · {menu.part}</div>
-              <div className="text-slate-400 mb-2">Edit the cabinet — all panels, shutters, edge-banding, nesting & CNC re-derive.</div>
+            <div className="bg-white border border-slate-300 rounded-lg shadow-xl text-xs p-3 w-64 max-h-[80vh] overflow-y-auto" style={{ position: "fixed", zIndex: 80, left: Math.min(menu.x, (typeof window !== "undefined" ? window.innerWidth : 1200) - 272), top: Math.min(menu.y, (typeof window !== "undefined" ? window.innerHeight : 800) - 420) }} onClick={e => e.stopPropagation()}>
+              <div className="font-semibold text-slate-700 mb-2">{menu.code} · {menu.part}</div>
+              <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Resize cabinet</div>
+              <div className="text-slate-400 mb-2">Re-derives all panels, shutters, edge-banding, nesting & CNC.</div>
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between"><span className="text-slate-500">Width (mm)</span><input className={inp} type="number" value={menu.w} onChange={e => setMenu({ ...menu, w: e.target.value })} /></div>
                 <div className="flex items-center justify-between"><span className="text-slate-500">Height (mm)</span><input className={inp} type="number" value={menu.h} onChange={e => setMenu({ ...menu, h: e.target.value })} /></div>
@@ -9518,10 +9523,20 @@ const frontendHTML = `<!DOCTYPE html>
                 {/Shutter/.test(menu.part) && <div className="flex items-center justify-between"><span className="text-slate-500">Shutters</span><input className={inp} type="number" placeholder="auto" value={menu.shutters} onChange={e => setMenu({ ...menu, shutters: e.target.value })} /></div>}
                 {/Drawer/.test(menu.part) && <div className="flex items-center justify-between"><span className="text-slate-500">Drawers</span><input className={inp} type="number" value={menu.drawerCount} onChange={e => setMenu({ ...menu, drawerCount: e.target.value })} /></div>}
               </div>
-              <div className="flex gap-2 mt-3">
-                <button onClick={apply} className="flex-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded">Apply</button>
-                <button onClick={() => setMenu(null)} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded">Cancel</button>
-              </div>
+              <button onClick={apply} className="w-full mt-2 px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded">Apply to cabinet</button>
+              {menu.panelCode && (
+                <div className="mt-3 pt-3 border-t border-slate-200">
+                  <div className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide">Override only this part</div>
+                  <div className="text-slate-400 mb-2">Force panel <span className="font-mono">{menu.panelCode}</span> to a custom size — independent of the cabinet.</div>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between"><span className="text-slate-500">Width (mm)</span><input className={inp} type="number" value={menu.pw} onChange={e => setMenu({ ...menu, pw: e.target.value })} /></div>
+                    <div className="flex items-center justify-between"><span className="text-slate-500">Height (mm)</span><input className={inp} type="number" value={menu.ph} onChange={e => setMenu({ ...menu, ph: e.target.value })} /></div>
+                    <div className="flex items-center justify-between"><span className="text-slate-500">Thk (mm)</span><input className={inp} type="number" value={menu.pthk} onChange={e => setMenu({ ...menu, pthk: e.target.value })} /></div>
+                  </div>
+                  <button onClick={applyPanel} className="w-full mt-2 px-2 py-1 bg-amber-500 hover:bg-amber-400 text-white rounded">Override this part</button>
+                </div>
+              )}
+              <button onClick={() => setMenu(null)} className="w-full mt-2 px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded">Cancel</button>
             </div>
           )}
         </div>
@@ -9533,6 +9548,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [proj, setProj] = useState({ name: "Kitchen Project", client: "", unitType: "kitchen", material: "18mm BWR Plywood", sheet: "8x4", finish: "Laminate" });
       const [cabs, setCabs] = useState([{ code: "C-001", name: "Base Unit", w: 800, h: 720, d: 560, material: "18mm BWR Plywood", finish: "Laminate", shutters: "", drawerCount: 0, shutterless: false }]);
       const [pkg, setPkg] = useState(null);
+      const [overrides, setOverrides] = useState({});   // freeform per-panel size overrides {panelCode:{w,h,thk,qty}}
       const [meta, setMeta] = useState({ materials: FAB_MATERIALS_C, sheets: [{ key: "8x4", label: "8' × 4'" }], finishes: ["Laminate", "Acrylic", "PU Paint", "Veneer", "Membrane", "Glass"] });
       const [view, setView] = useState("Summary");
       const [busy, setBusy] = useState(false);
@@ -9549,31 +9565,43 @@ const frontendHTML = `<!DOCTYPE html>
       const addCab = () => setCabs(cs => [...cs, { ...blankCab(), code: "C-" + String(cs.length + 1).padStart(3, "0") }]);
       const delCab = (i) => setCabs(cs => cs.filter((_, j) => j !== i));
 
-      const buildSpecFrom = (cabsArr, projObj) => ({
+      const buildSpecFrom = (cabsArr, projObj, ov) => ({
         project: { name: projObj.name, client: projObj.client }, unitType: projObj.unitType,
         defaults: { material: projObj.material, sheet: projObj.sheet, shutterFinish: projObj.finish },
+        overrides: ov || overrides,
         cabinets: cabsArr.map((c, i) => ({
           code: c.code || ("C-" + String(i + 1).padStart(3, "0")), name: c.name, w: +c.w || 0, h: +c.h || 0, d: +c.d || 0,
           material: c.material, shutterFinish: c.finish, shutters: c.shutters ? +c.shutters : undefined,
           shutterless: !!c.shutterless, drawers: +c.drawerCount > 0 ? Array.from({ length: +c.drawerCount }, () => ({})) : [],
         })),
       });
-      const buildSpec = () => buildSpecFrom(cabs, proj);
+      const buildSpec = () => buildSpecFrom(cabs, proj, overrides);
 
-      const generateFrom = async (cabsArr, projObj, keepView) => {
+      const generateFrom = async (cabsArr, projObj, keepView, ov) => {
         setBusy(true); setMsg("");
-        const j = await api("/api/fabrik/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buildSpecFrom(cabsArr, projObj)) });
+        const j = await api("/api/fabrik/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buildSpecFrom(cabsArr, projObj, ov)) });
         if (j.data) { setPkg(j.data); if (!keepView) setView("Summary"); } else setMsg(j.error || "Generation failed");
         setBusy(false);
       };
-      const generate = () => generateFrom(cabs, proj, false);
+      const generate = () => generateFrom(cabs, proj, false, overrides);
 
       // Right-click-in-3D edit: patch ONE cabinet (matched by code) and re-derive the whole package live.
       const editCabByCode = (code, patch) => {
         const next = cabs.map(c => (c.code === code ? { ...c, ...patch } : c));
         setCabs(next);
-        generateFrom(next, proj, true);   // keep the 3D view open
+        generateFrom(next, proj, true, overrides);   // keep the 3D view open
       };
+
+      // Freeform per-PANEL override (independent of the cabinet) — keyed by panel/shutter code.
+      const setPanelOverride = (code, patch) => {
+        const merged = { ...(overrides[code] || {}), ...patch };
+        Object.keys(merged).forEach(k => { if (merged[k] === "" || merged[k] == null) delete merged[k]; });
+        const next = { ...overrides };
+        if (Object.keys(merged).length) next[code] = merged; else delete next[code];
+        setOverrides(next); generateFrom(cabs, proj, true, next);
+      };
+      const resetPanelOverride = (code) => { const next = { ...overrides }; delete next[code]; setOverrides(next); generateFrom(cabs, proj, true, next); };
+      const clearOverrides = () => { setOverrides({}); generateFrom(cabs, proj, true, {}); };
 
       const onFile = async (e) => {
         const f = e.target.files && e.target.files[0]; if (!f) return;
@@ -9619,6 +9647,13 @@ const frontendHTML = `<!DOCTYPE html>
       const inp = "w-full px-2 py-1 border border-slate-200 rounded text-xs";
       const th = "px-2 py-1.5 text-left font-semibold text-slate-600 border-b border-slate-200 bg-slate-50";
       const td = "px-2 py-1 border-b border-slate-100 text-slate-700";
+      // Uncontrolled cell input (commit on blur/Enter) → overrides ONE panel's dimension.
+      const EditNum = ({ value, onCommit, overridden }) => (
+        <input key={value} type="number" defaultValue={value}
+          className={"w-16 px-1 py-0.5 border rounded text-xs " + (overridden ? "border-amber-400 bg-amber-50 font-semibold text-amber-700" : "border-slate-200 hover:border-cyan-300")}
+          onBlur={e => { if (+e.target.value !== +value) onCommit(e.target.value); }}
+          onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }} />
+      );
 
       return (
         <div className="fade-in">
@@ -9728,20 +9763,37 @@ const frontendHTML = `<!DOCTYPE html>
               )}
 
               {view === "3D Model" && (
-                <Fabrik3D cabinets={pkg.cabinets} cabsByCode={Object.fromEntries(cabs.map(c => [c.code, c]))} onEditCab={editCabByCode} busy={busy} />
+                <Fabrik3D cabinets={pkg.cabinets} cabsByCode={Object.fromEntries(cabs.map(c => [c.code, c]))} onEditCab={editCabByCode} onOverridePanel={setPanelOverride} busy={busy} />
               )}
 
-              {view === "Panels" && pkg.cabinets.map(cb => (
-                <div key={cb.code} className="mb-4">
-                  <div className="text-sm font-semibold text-slate-700 mb-1">{cb.code} · {cb.name} <span className="text-slate-400 font-normal">({cb.w}×{cb.h}×{cb.d}mm)</span></div>
-                  <table className="w-full text-xs"><thead><tr>{["Panel", "Code", "W", "H", "Thk", "Qty", "Material", "Grain", "Edges", "Remarks"].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
-                    <tbody>{cb.panels.map((p, i) => (
-                      <tr key={i}><td className={td}>{p.panel}</td><td className={td + " font-mono text-slate-400"}>{p.code}</td><td className={td}>{p.w}</td><td className={td}>{p.h}</td><td className={td}>{p.thk}</td><td className={td}>{p.qty}</td><td className={td}>{p.material}</td><td className={td}>{p.grain}</td>
-                        <td className={td}>{p.edges ? ["top", "bottom", "left", "right"].filter(k => p.edges[k]).map(k => k[0].toUpperCase()).join("") || "—" : "—"}</td><td className={td + " text-slate-400"}>{p.remarks}</td></tr>
-                    ))}</tbody>
-                  </table>
+              {view === "Panels" && (
+                <div>
+                  <div className="flex items-center gap-2 mb-3 text-xs flex-wrap">
+                    <span className="text-slate-500">Edit any <b>W / H / Thk / Qty</b> cell to <b>override that single panel</b> (independent of the cabinet); overridden cells turn amber. Use ↺ to revert one.</span>
+                    <div className="flex-1" />
+                    {busy && <span className="text-cyan-600">re-deriving…</span>}
+                    {pkg.summary.overrides > 0 && <span className="text-amber-700 font-medium">{pkg.summary.overrides} panel override(s)</span>}
+                    {pkg.summary.overrides > 0 && <button onClick={clearOverrides} className="px-2 py-0.5 rounded border border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100">Clear all overrides</button>}
+                  </div>
+                  {pkg.cabinets.map(cb => (
+                    <div key={cb.code} className="mb-4">
+                      <div className="text-sm font-semibold text-slate-700 mb-1">{cb.code} · {cb.name} <span className="text-slate-400 font-normal">({cb.w}×{cb.h}×{cb.d}mm)</span></div>
+                      <table className="w-full text-xs"><thead><tr>{["Panel", "Code", "W", "H", "Thk", "Qty", "Material", "Grain", "Edges", "Remarks", ""].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                        <tbody>{cb.panels.map((p, i) => (
+                          <tr key={i} className={p.overridden ? "bg-amber-50/40" : ""}><td className={td}>{p.panel}</td><td className={td + " font-mono text-slate-400"}>{p.code}</td>
+                            <td className={td}><EditNum value={p.w} overridden={p.overridden && p.orig && p.orig.w !== p.w} onCommit={v => setPanelOverride(p.code, { w: v })} /></td>
+                            <td className={td}><EditNum value={p.h} overridden={p.overridden && p.orig && p.orig.h !== p.h} onCommit={v => setPanelOverride(p.code, { h: v })} /></td>
+                            <td className={td}><EditNum value={p.thk} overridden={p.overridden && p.orig && p.orig.thk !== p.thk} onCommit={v => setPanelOverride(p.code, { thk: v })} /></td>
+                            <td className={td}><EditNum value={p.qty} overridden={p.overridden && p.orig && p.orig.qty !== p.qty} onCommit={v => setPanelOverride(p.code, { qty: v })} /></td>
+                            <td className={td}>{p.material}</td><td className={td}>{p.grain}</td>
+                            <td className={td}>{p.edges ? ["top", "bottom", "left", "right"].filter(k => p.edges[k]).map(k => k[0].toUpperCase()).join("") || "—" : "—"}</td><td className={td + " text-slate-400"}>{p.remarks}{p.overridden && p.orig ? <span className="text-amber-500"> · was {p.orig.w}×{p.orig.h}×{p.orig.thk} ×{p.orig.qty}</span> : ""}</td>
+                            <td className={td}>{p.overridden && <button onClick={() => resetPanelOverride(p.code)} className="text-amber-600 hover:text-amber-800" title="Revert this panel">↺</button>}</td></tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
 
               {view === "Shutters" && (
                 <table className="w-full text-xs"><thead><tr>{["Shutter", "Cabinet", "W", "H", "Thk", "Finish", "Overlay", "Gap", "Hinges", "Hinge type", "Handle", "Grain"].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
@@ -10170,21 +10222,33 @@ function fabrikGenerate(spec: any) {
     shutters: c.shutters, shutterless: !!c.shutterless, drawers: c.drawers || [], toeKick: c.toeKick,
   })).filter((c: any) => c.w && c.h);
 
+  // Freeform per-panel overrides (keyed by panel/shutter code) — a single part can be
+  // forced to a custom W/H/Thk/Qty independent of the cabinet derivation.
+  const overrides: Record<string, any> = (spec.overrides && typeof spec.overrides === "object") ? spec.overrides : {};
+  const applyOv = (p: any) => {
+    const o = overrides[p.code]; if (!o) return p;
+    const num = (v: any, d: number) => (v === undefined || v === null || v === "" || isNaN(+v)) ? d : +v;
+    return { ...p, w: num(o.w, p.w), h: num(o.h, p.h), thk: num(o.thk, p.thk), qty: Math.max(1, Math.round(num(o.qty, p.qty))), overridden: true, orig: { w: p.w, h: p.h, thk: p.thk, qty: p.qty } };
+  };
+
   const cabinets: any[] = [], geos: any[] = [], allPanels: any[] = [], allShutters: any[] = [], drawerData: any[] = [];
   for (const c of cabs) {
     const geo = fabCabinetPanels(c);
     geos.push(geo);
-    const shutters = fabCabinetShutters(c, geo);
+    const shutters = fabCabinetShutters(c, geo).map(applyOv);
     const dr = fabCabinetDrawers(c, geo);
-    geo.panels.push(...dr.components.map((x: any) => ({ ...x, edges: { top: false, bottom: false, left: false, right: false } })));
-    allPanels.push(...geo.panels);
+    const drComps = dr.components.map((x: any) => applyOv({ ...x, edges: { top: false, bottom: false, left: false, right: false } }));
+    const carcass = geo.panels.map(applyOv);
+    const panels = carcass.concat(drComps);
+    allPanels.push(...panels);
     allShutters.push(...shutters);
     drawerData.push(dr);
     cabinets.push({
       code: c.code, name: c.name, w: geo.W, h: geo.H, d: geo.D, material: geo.mat, thk: geo.thk,
-      panels: geo.panels, shutters, drawers: dr.drawers, drawerComponents: dr.components,
+      panels, shutters, drawers: dr.drawers, drawerComponents: drComps,
     });
   }
+  const overrideCount = Object.keys(overrides).length;
   const edgeBanding = fabEdgeBanding(allPanels);
   const nest = fabNest(allPanels, sheetKey);
   const bom = fabBom(cabs, allPanels, allShutters, drawerData, nest);
@@ -10197,7 +10261,7 @@ function fabrikGenerate(spec: any) {
     summary: {
       cabinets: cabinets.length, panels: allPanels.reduce((s, p) => s + p.qty, 0), shutters: allShutters.length,
       drawers: drawerData.reduce((s, d) => s + d.drawers.length, 0), sheets: totalSheets,
-      edgeBandM: edgeBanding.totalRunningM, verifyPass: verify.passed + "/" + verify.total,
+      edgeBandM: edgeBanding.totalRunningM, verifyPass: verify.passed + "/" + verify.total, overrides: overrideCount,
     },
     cabinets, edgeBanding, nest, bom, cnc, verify, sheetKey,
     standards: { thickness: FAB.carcassThk + "mm carcass / " + FAB.backThk + "mm back", system: "32mm", gap: FAB.shutterGap + "mm full-overlay", note: "Indian modular-furniture standards" },
