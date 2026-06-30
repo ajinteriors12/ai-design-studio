@@ -9389,6 +9389,31 @@ const frontendHTML = `<!DOCTYPE html>
     const csvCell = (x) => '"' + String(x == null ? "" : x).replace(/"/g, '""') + '"';
     const downloadCsv = (rows, fname) => saveBlobAs(new Blob([rows.map(r => r.map(csvCell).join(",")).join("\\n")], { type: "text/csv" }), fname);
 
+    // Constraint solver: invert a PANEL dimension edit into the CABINET dimension that
+    // drives it, so re-deriving keeps every related panel mutually consistent. Returns a
+    // cabinet patch {w?,h?,d?} or null when there's no clean single-cabinet mapping
+    // (thk/qty, shutter/drawer width, top-rail height → caller falls back to freeform).
+    const fabThkC = (mat) => { const m = String(mat || "").match(/(\\d+)\\s*mm/); return m ? +m[1] : 18; };
+    const linkedCabPatch = (part, field, val, cab) => {
+      const v = Math.round(+val || 0); if (!v) return null;
+      const thk = fabThkC(cab && cab.material);
+      if (field === "h") {
+        if (/Side/.test(part)) return { h: v };                 // side height === cabinet height
+        if (/Back/.test(part)) return { h: v + 12 };            // back = H - 2*inset + 12
+        if (/Shutter/.test(part)) return { h: v + 6 };          // shutter = H - 6
+        if (part === "Bottom" || part === "Top" || /Shelf/.test(part)) return { d: v + (/Shelf/.test(part) ? 20 : 0) }; // their "H" column is depth
+        return null;                                            // Top Rail / Drawer Front height
+      }
+      if (field === "w") {
+        if (/Side/.test(part)) return { d: v };                 // side "W" column is depth
+        if (/Shelf/.test(part)) return { w: v + 2 + 2 * thk };
+        if (part === "Bottom" || /Top/.test(part)) return { w: v + 2 * thk }; // innerW = W - 2*thk
+        if (/Back/.test(part)) return { w: v + 12 };
+        return null;                                            // shutter / drawer width
+      }
+      return null;
+    };
+
     function FabBars({ seed }) {
       // pseudo-barcode strip (deterministic from a string) — visual only
       const bars = [];
@@ -9505,6 +9530,15 @@ const frontendHTML = `<!DOCTYPE html>
       const inp = "w-20 px-2 py-1 border border-slate-300 rounded text-xs";
       const apply = () => { const p = { w: +menu.w || 0, h: +menu.h || 0, d: +menu.d || 0, shutters: menu.shutters === "" ? "" : +menu.shutters, drawerCount: +menu.drawerCount || 0, shutterless: !!menu.shutterless }; onEditCab(menu.code, p); setMenu(null); };
       const applyPanel = () => { onOverridePanel(menu.panelCode, { w: +menu.pw || 0, h: +menu.ph || 0, thk: +menu.pthk || 0 }); setMenu(null); };
+      const applyPanelLinked = () => {
+        const cab = cabsByCode[menu.code] || {};
+        let patch = {};
+        const pw = linkedCabPatch(menu.part, "w", menu.pw, cab); if (pw) patch = { ...patch, ...pw };
+        const ph = linkedCabPatch(menu.part, "h", menu.ph, cab); if (ph) patch = { ...patch, ...ph };
+        if (Object.keys(patch).length) onEditCab(menu.code, patch);
+        else onOverridePanel(menu.panelCode, { w: +menu.pw || 0, h: +menu.ph || 0, thk: +menu.pthk || 0 });
+        setMenu(null);
+      };
 
       return (
         <div style={{ position: "relative" }}>
@@ -9526,14 +9560,15 @@ const frontendHTML = `<!DOCTYPE html>
               <button onClick={apply} className="w-full mt-2 px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded">Apply to cabinet</button>
               {menu.panelCode && (
                 <div className="mt-3 pt-3 border-t border-slate-200">
-                  <div className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide">Override only this part</div>
-                  <div className="text-slate-400 mb-2">Force panel <span className="font-mono">{menu.panelCode}</span> to a custom size — independent of the cabinet.</div>
+                  <div className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide">Change this part</div>
+                  <div className="text-slate-400 mb-2">Set panel <span className="font-mono">{menu.panelCode}</span> to a custom size.</div>
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between"><span className="text-slate-500">Width (mm)</span><input className={inp} type="number" value={menu.pw} onChange={e => setMenu({ ...menu, pw: e.target.value })} /></div>
                     <div className="flex items-center justify-between"><span className="text-slate-500">Height (mm)</span><input className={inp} type="number" value={menu.ph} onChange={e => setMenu({ ...menu, ph: e.target.value })} /></div>
                     <div className="flex items-center justify-between"><span className="text-slate-500">Thk (mm)</span><input className={inp} type="number" value={menu.pthk} onChange={e => setMenu({ ...menu, pthk: e.target.value })} /></div>
                   </div>
-                  <button onClick={applyPanel} className="w-full mt-2 px-2 py-1 bg-amber-500 hover:bg-amber-400 text-white rounded">Override this part</button>
+                  <button onClick={applyPanel} className="w-full mt-2 px-2 py-1 bg-amber-500 hover:bg-amber-400 text-white rounded">Override this part only</button>
+                  <button onClick={applyPanelLinked} className="w-full mt-1.5 px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded" title="Map this change to the cabinet so related panels auto-adjust">Adjust cabinet to fit ↔</button>
                 </div>
               )}
               <button onClick={() => setMenu(null)} className="w-full mt-2 px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded">Cancel</button>
@@ -9549,6 +9584,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [cabs, setCabs] = useState([{ code: "C-001", name: "Base Unit", w: 800, h: 720, d: 560, material: "18mm BWR Plywood", finish: "Laminate", shutters: "", drawerCount: 0, shutterless: false }]);
       const [pkg, setPkg] = useState(null);
       const [overrides, setOverrides] = useState({});   // freeform per-panel size overrides {panelCode:{w,h,thk,qty}}
+      const [linkMode, setLinkMode] = useState(false);  // true = edits auto-adjust the cabinet (related panels follow)
       const [meta, setMeta] = useState({ materials: FAB_MATERIALS_C, sheets: [{ key: "8x4", label: "8' × 4'" }], finishes: ["Laminate", "Acrylic", "PU Paint", "Veneer", "Membrane", "Glass"] });
       const [view, setView] = useState("Summary");
       const [busy, setBusy] = useState(false);
@@ -9602,6 +9638,16 @@ const frontendHTML = `<!DOCTYPE html>
       };
       const resetPanelOverride = (code) => { const next = { ...overrides }; delete next[code]; setOverrides(next); generateFrom(cabs, proj, true, next); };
       const clearOverrides = () => { setOverrides({}); generateFrom(cabs, proj, true, {}); };
+
+      // Route a panel-cell edit: in link mode, map it to the cabinet (related panels follow);
+      // otherwise (or when no clean mapping exists) store a freeform per-panel override.
+      const commitPanelEdit = (panel, field, val) => {
+        if (linkMode) {
+          const cab = cabs.find(c => c.code && panel.code.indexOf(c.code + "-") === 0);
+          if (cab) { const patch = linkedCabPatch(panel.panel, field, val, cab); if (patch && Object.keys(patch).length) { editCabByCode(cab.code, patch); return; } }
+        }
+        setPanelOverride(panel.code, { [field]: val });
+      };
 
       const onFile = async (e) => {
         const f = e.target.files && e.target.files[0]; if (!f) return;
@@ -9768,23 +9814,28 @@ const frontendHTML = `<!DOCTYPE html>
 
               {view === "Panels" && (
                 <div>
-                  <div className="flex items-center gap-2 mb-3 text-xs flex-wrap">
-                    <span className="text-slate-500">Edit any <b>W / H / Thk / Qty</b> cell to <b>override that single panel</b> (independent of the cabinet); overridden cells turn amber. Use ↺ to revert one.</span>
+                  <div className="flex items-center gap-2 mb-1 text-xs flex-wrap">
+                    <span className="text-slate-500">Editing mode:</span>
+                    <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+                      <button onClick={() => setLinkMode(false)} className={"px-2 py-0.5 " + (!linkMode ? "bg-amber-500 text-white" : "bg-white text-slate-600 hover:bg-slate-50")}>This panel only</button>
+                      <button onClick={() => setLinkMode(true)} className={"px-2 py-0.5 " + (linkMode ? "bg-indigo-600 text-white" : "bg-white text-slate-600 hover:bg-slate-50")}>Adjust related panels</button>
+                    </div>
                     <div className="flex-1" />
                     {busy && <span className="text-cyan-600">re-deriving…</span>}
                     {pkg.summary.overrides > 0 && <span className="text-amber-700 font-medium">{pkg.summary.overrides} panel override(s)</span>}
                     {pkg.summary.overrides > 0 && <button onClick={clearOverrides} className="px-2 py-0.5 rounded border border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100">Clear all overrides</button>}
                   </div>
+                  <div className="text-xs text-slate-400 mb-3">{linkMode ? "Linked: editing a W/H/Thk/Qty cell maps to the cabinet so related panels auto-adjust (a dimension with no clean mapping falls back to a single-panel override)." : "Freeform: editing a W/H/Thk/Qty cell overrides ONLY that panel (independent of the cabinet); overridden cells turn amber, ↺ reverts one."}</div>
                   {pkg.cabinets.map(cb => (
                     <div key={cb.code} className="mb-4">
                       <div className="text-sm font-semibold text-slate-700 mb-1">{cb.code} · {cb.name} <span className="text-slate-400 font-normal">({cb.w}×{cb.h}×{cb.d}mm)</span></div>
                       <table className="w-full text-xs"><thead><tr>{["Panel", "Code", "W", "H", "Thk", "Qty", "Material", "Grain", "Edges", "Remarks", ""].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
                         <tbody>{cb.panels.map((p, i) => (
                           <tr key={i} className={p.overridden ? "bg-amber-50/40" : ""}><td className={td}>{p.panel}</td><td className={td + " font-mono text-slate-400"}>{p.code}</td>
-                            <td className={td}><EditNum value={p.w} overridden={p.overridden && p.orig && p.orig.w !== p.w} onCommit={v => setPanelOverride(p.code, { w: v })} /></td>
-                            <td className={td}><EditNum value={p.h} overridden={p.overridden && p.orig && p.orig.h !== p.h} onCommit={v => setPanelOverride(p.code, { h: v })} /></td>
-                            <td className={td}><EditNum value={p.thk} overridden={p.overridden && p.orig && p.orig.thk !== p.thk} onCommit={v => setPanelOverride(p.code, { thk: v })} /></td>
-                            <td className={td}><EditNum value={p.qty} overridden={p.overridden && p.orig && p.orig.qty !== p.qty} onCommit={v => setPanelOverride(p.code, { qty: v })} /></td>
+                            <td className={td}><EditNum value={p.w} overridden={p.overridden && p.orig && p.orig.w !== p.w} onCommit={v => commitPanelEdit(p, "w", v)} /></td>
+                            <td className={td}><EditNum value={p.h} overridden={p.overridden && p.orig && p.orig.h !== p.h} onCommit={v => commitPanelEdit(p, "h", v)} /></td>
+                            <td className={td}><EditNum value={p.thk} overridden={p.overridden && p.orig && p.orig.thk !== p.thk} onCommit={v => commitPanelEdit(p, "thk", v)} /></td>
+                            <td className={td}><EditNum value={p.qty} overridden={p.overridden && p.orig && p.orig.qty !== p.qty} onCommit={v => commitPanelEdit(p, "qty", v)} /></td>
                             <td className={td}>{p.material}</td><td className={td}>{p.grain}</td>
                             <td className={td}>{p.edges ? ["top", "bottom", "left", "right"].filter(k => p.edges[k]).map(k => k[0].toUpperCase()).join("") || "—" : "—"}</td><td className={td + " text-slate-400"}>{p.remarks}{p.overridden && p.orig ? <span className="text-amber-500"> · was {p.orig.w}×{p.orig.h}×{p.orig.thk} ×{p.orig.qty}</span> : ""}</td>
                             <td className={td}>{p.overridden && <button onClick={() => resetPanelOverride(p.code)} className="text-amber-600 hover:text-amber-800" title="Revert this panel">↺</button>}</td></tr>
