@@ -446,15 +446,22 @@ async function visionReadDrawing(name: string, fileType: string, category: strin
   const b64 = buf.toString("base64");
   const ask =
     "You are a senior modular-furniture production engineer reading a shop drawing (kitchen / wardrobe / crockery / TV unit / vanity). " +
-    "Read ONLY the dimensions and labels actually printed on this drawing — never invent numbers. All sizes in millimetres. " +
+    "Read ONLY the dimensions and labels actually printed on this drawing — never invent numbers. " +
+    "STEP 1 — DETECT THE UNIT: find the measurement unit printed next to the numbers. Look for MM, CM, M, inch marks (\" or IN) or feet ('). " +
+    "Furniture/wardrobe drawings are VERY OFTEN in CENTIMETRES (e.g. '280 CM', '60 CM', '90 CM') or inches — do NOT assume millimetres. " +
+    "STEP 2 — CONVERT EVERY value to MILLIMETRES before you report it: cm × 10, m × 1000, inch × 25.4, foot × 304.8. " +
+    "Examples: 280 CM -> 2800, 240 CM -> 2400, 90 CM -> 900, 60 CM -> 600, 45 CM -> 450. NEVER report the raw centimetre number as if it were millimetres. " +
+    "STEP 3 — READ CAREFULLY: capture the OVERALL outer Width x Height x Depth of the whole unit (the big outermost dimension arrows, incl. the depth/side arrow even if small), " +
+    "AND each internal section or vertical column (hanging rails, shelf stacks, drawer banks, loft) with its own size. Scan all four edges for a depth/side dimension. " +
     "Filename: " + name + (category ? ", user-tagged category: " + category : "") + ". " +
-    "Reply with COMPACT JSON only, no prose, EXACTLY this shape: " +
-    '{"unitType":"kitchen|wardrobe|crockery|tv-unit|vanity|other","readable":true|false,' +
+    "Reply with COMPACT JSON only, no prose, EXACTLY this shape (all numbers already in MM): " +
+    '{"unitType":"kitchen|wardrobe|crockery|tv-unit|vanity|other","unitDetected":"mm|cm|inch|foot","readable":true|false,' +
+    '"overall":{"widthMm":number,"heightMm":number,"depthMm":number},' +
     '"cabinets":[{"label":"short name","widthMm":number,"heightMm":number,"depthMm":number}],' +
-    '"rawDimensionsMm":[numbers you can read on the drawing],' +
-    '"wallSequence":["left-to-right order of units, if shown"],' +
-    '"notes":["anything important you read (materials, hardware, finishes)"],"confidence":0-1}. ' +
-    "If a dimension is not legible, omit it rather than guessing. Set readable=false only if you can read nothing.";
+    '"rawDimensionsMm":[every printed dimension, CONVERTED to mm],' +
+    '"wallSequence":["left-to-right order of sections, if shown"],' +
+    '"notes":["the unit you detected, materials, hardware, finishes"],"confidence":0-1}. ' +
+    "If a section depth is not separately printed, use the overall depth for it. If a dimension is not legible, omit it rather than guessing. Set readable=false only if you can read nothing.";
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 60000);
   try {
     // ── Claude vision (handles both images and PDF) ──
@@ -481,8 +488,8 @@ async function visionReadDrawing(name: string, fileType: string, category: strin
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + keys.openai },
         body: JSON.stringify({
-          model: "gpt-4o", max_tokens: 2000,
-          messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: "data:" + media + ";base64," + b64 } }] }],
+          model: "gpt-4o", max_tokens: 2500,
+          messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: "data:" + media + ";base64," + b64, detail: "high" } }] }],
         }),
         signal: ac.signal,
       });
@@ -10336,12 +10343,22 @@ app.post("/api/fabrik/interpret", async (c) => {
     const vis = await visionReadDrawing(name, fileType, category, buf);
     if (!vis) return c.json({ data: { readable: false, cabinets: [], note: "No AI vision key available or the drawing was unreadable — add cabinets manually. (Set an OpenAI/Anthropic key under AI keys.)" } });
     const d = vis.data || {};
-    const cabinets = (Array.isArray(d.cabinets) ? d.cabinets : []).slice(0, 40).map((cb: any, i: number) => ({
+    const ov = d.overall || {};
+    const ovW = fabRound(+ov.widthMm || 0), ovH = fabRound(+ov.heightMm || 0), ovD = fabRound(+ov.depthMm || 0);
+    let cabinets = (Array.isArray(d.cabinets) ? d.cabinets : []).slice(0, 40).map((cb: any, i: number) => ({
       code: "C-" + String(i + 1).padStart(3, "0"), name: String(cb.label || ("Cabinet " + (i + 1))),
-      w: fabRound(+cb.widthMm || 0), h: fabRound(+cb.heightMm || 0), d: fabRound(+cb.depthMm || 0),
+      w: fabRound(+cb.widthMm || 0), h: fabRound(+cb.heightMm || 0),
+      d: fabRound(+cb.depthMm || 0) || ovD,                      // sections rarely show depth → use the overall depth
       material: "18mm BWR Plywood", shutterFinish: "Laminate", drawers: [],
     })).filter((cb: any) => cb.w || cb.h);
-    return c.json({ data: { readable: d.readable !== false, engine: vis.engine, unitType: d.unitType || "kitchen", cabinets, wallSequence: d.wallSequence || [], notes: d.notes || [], confidence: d.confidence || 0.7, raw: d.rawDimensionsMm || [] } });
+    // If the model gave only an overall box (no internal sections), seed one cabinet from it.
+    if (!cabinets.length && (ovW || ovH)) cabinets = [{ code: "C-001", name: String(d.unitType || "Unit") + " (overall)", w: ovW, h: ovH, d: ovD, material: "18mm BWR Plywood", shutterFinish: "Laminate", drawers: [] }];
+    const unitDetected = String(d.unitDetected || "mm").toLowerCase();
+    const factor = { cm: "10", inch: "25.4", foot: "304.8", mm: "1" }[unitDetected] || "1";
+    const unitNote = unitDetected !== "mm" ? ["Drawing read in " + unitDetected.toUpperCase() + " — converted to mm (×" + factor + ")."] : [];
+    const overallNote = (ovW || ovH || ovD) ? ["Overall unit: " + ovW + " × " + ovH + " × " + ovD + " mm (W×H×D)" + (ovD ? "" : " — depth not legible, set it manually")] : [];
+    const notes = unitNote.concat(overallNote, Array.isArray(d.notes) ? d.notes.map(String) : []);
+    return c.json({ data: { readable: d.readable !== false, engine: vis.engine, unitType: d.unitType || "kitchen", unitDetected, overall: { w: ovW, h: ovH, d: ovD }, cabinets, wallSequence: d.wallSequence || [], notes, confidence: d.confidence || 0.7, raw: d.rawDimensionsMm || [] } });
   } catch (err) { console.error("fabrik interpret", err); return c.json({ error: "Interpretation failed" }, 500); }
 });
 
