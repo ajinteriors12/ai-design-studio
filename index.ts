@@ -9385,7 +9385,7 @@ const frontendHTML = `<!DOCTYPE html>
     // a full factory-ready production package (panels / shutters / drawers /
     // edge-banding / BOM / CNC / plywood nesting / 3D-verify / error detection).
     // =========================================================================
-    const FAB_VIEWS = ["Summary", "Panels", "Shutters", "Drawers", "Edge Banding", "Material & Hardware", "CNC", "Nesting", "Verify"];
+    const FAB_VIEWS = ["Summary", "3D Model", "Panels", "Shutters", "Drawers", "Edge Banding", "Material & Hardware", "CNC", "Nesting", "Verify"];
     const csvCell = (x) => '"' + String(x == null ? "" : x).replace(/"/g, '""') + '"';
     const downloadCsv = (rows, fname) => saveBlobAs(new Blob([rows.map(r => r.map(csvCell).join(",")).join("\\n")], { type: "text/csv" }), fname);
 
@@ -9415,6 +9415,119 @@ const frontendHTML = `<!DOCTYPE html>
       );
     }
 
+    // Reconstruct the cabinets in 3D from the generated package; right-click any
+    // panel/part to change its parent cabinet's dimensions → re-derives everything.
+    function Fabrik3D({ cabinets, cabsByCode, onEditCab, busy }) {
+      const hostRef = useRef(null);
+      const [menu, setMenu] = useState(null);   // {x,y,code,part,w,h,d,shutters,drawerCount,shutterless}
+      const [err, setErr] = useState("");
+
+      useEffect(() => {
+        const THREE = window.THREE;
+        const host = hostRef.current;
+        if (!THREE || !host || !cabinets || !cabinets.length) return;
+        let renderer;
+        try { renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true }); }
+        catch (e) { setErr("3D viewer needs WebGL, which is unavailable in this browser/session."); return; }
+        const W = host.clientWidth || 820, H = 480;
+        renderer.setSize(W, H); renderer.setPixelRatio(window.devicePixelRatio || 1); renderer.setClearColor(0xeef2f7, 1);
+        host.innerHTML = ""; host.appendChild(renderer.domElement);
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, W / H, 5, 200000);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.78));
+        const dir = new THREE.DirectionalLight(0xffffff, 0.55); dir.position.set(0.6, 1.4, 1); scene.add(dir);
+        const dir2 = new THREE.DirectionalLight(0xffffff, 0.25); dir2.position.set(-1, 0.5, 0.4); scene.add(dir2);
+
+        const carcassMat = () => new THREE.MeshLambertMaterial({ color: 0xcdb48a });
+        const frontMat = () => new THREE.MeshLambertMaterial({ color: 0xe9dcc3 });
+        const hiMat = new THREE.MeshLambertMaterial({ color: 0x22d3ee });
+        const meshes = [];
+        const GAP = 60, T = 18, TB = 8;
+        const total = cabinets.reduce((s, c) => s + c.w + GAP, 0) - GAP;
+        const maxH = cabinets.reduce((m, c) => Math.max(m, c.h), 0);
+        const maxD = cabinets.reduce((m, c) => Math.max(m, c.d), 0);
+        let x = -total / 2;
+        const addBox = (w, h, d, cx, cy, cz, mat, code, part) => {
+          const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), mat);
+          m.position.set(cx, cy, cz); m.userData = { code, part, baseColor: mat.color.getHex() };
+          scene.add(m); meshes.push(m); return m;
+        };
+        for (const c of cabinets) {
+          const w = c.w, h = c.h, d = c.d, code = c.code;
+          addBox(T, h, d, x + T / 2, h / 2, d / 2, carcassMat(), code, "Left Side");
+          addBox(T, h, d, x + w - T / 2, h / 2, d / 2, carcassMat(), code, "Right Side");
+          addBox(w - 2 * T, T, d, x + w / 2, T / 2, d / 2, carcassMat(), code, "Bottom");
+          addBox(w - 2 * T, T, d, x + w / 2, h - T / 2, d / 2, carcassMat(), code, h > 1000 ? "Top" : "Top Rail");
+          addBox(w - 2 * T, h - 2 * T, TB, x + w / 2, h / 2, TB / 2, carcassMat(), code, "Back Panel");
+          // fronts
+          const drawers = (c.drawers || []).length;
+          if (drawers > 0) {
+            const fh = (h - (drawers + 1) * 3) / drawers;
+            for (let i = 0; i < drawers; i++) addBox(w - 6, fh - 3, T, x + w / 2, 3 + i * (fh + 3) + fh / 2, d - T / 2, frontMat(), code, "Drawer Front");
+          } else if ((c.shutters || []).length > 0) {
+            const n = c.shutters.length, sw = (w - 3 * (n + 1)) / n;
+            for (let i = 0; i < n; i++) addBox(sw, h - 6, T, x + 3 + i * (sw + 3) + sw / 2, h / 2, d - T / 2, frontMat(), code, "Shutter");
+          }
+          x += w + GAP;
+        }
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        // Frame the whole run: fit the scene bounding box, centred, from a 3/4 view.
+        const bbox = new THREE.Box3(); meshes.forEach(m => bbox.expandByObject(m));
+        const ctr = bbox.getCenter(new THREE.Vector3()), size = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z, 1);
+        const dist = (maxDim / (2 * Math.tan((Math.PI * camera.fov) / 360))) * 1.45;
+        camera.position.set(ctr.x + dist * 0.55, ctr.y + dist * 0.42, ctr.z + dist);
+        controls.target.copy(ctr); controls.update();
+
+        const onResize = () => { const nw = host.clientWidth || W; renderer.setSize(nw, H); camera.aspect = nw / H; camera.updateProjectionMatrix(); };
+        window.addEventListener("resize", onResize); onResize();
+
+        const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+        let hovered = null;
+        const pick = (ev) => { const r = renderer.domElement.getBoundingClientRect(); mouse.x = ((ev.clientX - r.left) / r.width) * 2 - 1; mouse.y = -((ev.clientY - r.top) / r.height) * 2 + 1; ray.setFromCamera(mouse, camera); return ray.intersectObjects(meshes, false)[0]; };
+        const onMove = (ev) => { const hit = pick(ev); if (hovered && (!hit || hit.object !== hovered)) { hovered.material.color.setHex(hovered.userData.baseColor); hovered = null; } if (hit && hit.object !== hovered) { hovered = hit.object; hovered.material = hovered.material.clone(); hovered.material.color.setHex(0x38bdf8); } renderer.domElement.style.cursor = hit ? "context-menu" : "grab"; };
+        const onCtx = (ev) => {
+          ev.preventDefault(); const hit = pick(ev);
+          if (!hit) { setMenu(null); return; }
+          const u = hit.object.userData, src = cabsByCode[u.code] || {};
+          setMenu({ x: ev.clientX, y: ev.clientY, code: u.code, part: u.part, w: src.w, h: src.h, d: src.d, shutters: src.shutters || "", drawerCount: src.drawerCount || 0, shutterless: !!src.shutterless });
+        };
+        renderer.domElement.addEventListener("contextmenu", onCtx);
+        renderer.domElement.addEventListener("pointermove", onMove);
+        let raf; const loop = () => { raf = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); }; loop();
+        return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); renderer.domElement.removeEventListener("contextmenu", onCtx); renderer.domElement.removeEventListener("pointermove", onMove); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
+      }, [cabinets]);
+
+      const inp = "w-20 px-2 py-1 border border-slate-300 rounded text-xs";
+      const apply = () => { const p = { w: +menu.w || 0, h: +menu.h || 0, d: +menu.d || 0, shutters: menu.shutters === "" ? "" : +menu.shutters, drawerCount: +menu.drawerCount || 0, shutterless: !!menu.shutterless }; onEditCab(menu.code, p); setMenu(null); };
+
+      return (
+        <div style={{ position: "relative" }}>
+          <div className="text-xs text-slate-500 mb-2">Drag to orbit · scroll to zoom · <b>right-click any part</b> to change its cabinet's dimensions. {busy && <span className="text-cyan-600">· re-deriving…</span>}</div>
+          <div ref={hostRef} style={{ width: "100%", height: 480, borderRadius: 10, overflow: "hidden", background: "#eef2f7" }} />
+          {err && <div className="text-xs text-rose-600 mt-2">{err}</div>}
+          {menu && (
+            <div className="bg-white border border-slate-300 rounded-lg shadow-xl text-xs p-3 w-60" style={{ position: "fixed", zIndex: 80, left: Math.min(menu.x, (typeof window !== "undefined" ? window.innerWidth : 1200) - 260), top: Math.min(menu.y, (typeof window !== "undefined" ? window.innerHeight : 800) - 280) }} onClick={e => e.stopPropagation()}>
+              <div className="font-semibold text-slate-700 mb-1">{menu.code} · {menu.part}</div>
+              <div className="text-slate-400 mb-2">Edit the cabinet — all panels, shutters, edge-banding, nesting & CNC re-derive.</div>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between"><span className="text-slate-500">Width (mm)</span><input className={inp} type="number" value={menu.w} onChange={e => setMenu({ ...menu, w: e.target.value })} /></div>
+                <div className="flex items-center justify-between"><span className="text-slate-500">Height (mm)</span><input className={inp} type="number" value={menu.h} onChange={e => setMenu({ ...menu, h: e.target.value })} /></div>
+                <div className="flex items-center justify-between"><span className="text-slate-500">Depth (mm)</span><input className={inp} type="number" value={menu.d} onChange={e => setMenu({ ...menu, d: e.target.value })} /></div>
+                {/Shutter/.test(menu.part) && <div className="flex items-center justify-between"><span className="text-slate-500">Shutters</span><input className={inp} type="number" placeholder="auto" value={menu.shutters} onChange={e => setMenu({ ...menu, shutters: e.target.value })} /></div>}
+                {/Drawer/.test(menu.part) && <div className="flex items-center justify-between"><span className="text-slate-500">Drawers</span><input className={inp} type="number" value={menu.drawerCount} onChange={e => setMenu({ ...menu, drawerCount: e.target.value })} /></div>}
+              </div>
+              <div className="flex gap-2 mt-3">
+                <button onClick={apply} className="flex-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded">Apply</button>
+                <button onClick={() => setMenu(null)} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded">Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function Fabrik() {
       const blankCab = () => ({ code: "", name: "New Cabinet", w: 600, h: 720, d: 560, material: "18mm BWR Plywood", finish: "Laminate", shutters: "", drawerCount: 0, shutterless: false });
       const [proj, setProj] = useState({ name: "Kitchen Project", client: "", unitType: "kitchen", material: "18mm BWR Plywood", sheet: "8x4", finish: "Laminate" });
@@ -9436,21 +9549,30 @@ const frontendHTML = `<!DOCTYPE html>
       const addCab = () => setCabs(cs => [...cs, { ...blankCab(), code: "C-" + String(cs.length + 1).padStart(3, "0") }]);
       const delCab = (i) => setCabs(cs => cs.filter((_, j) => j !== i));
 
-      const buildSpec = () => ({
-        project: { name: proj.name, client: proj.client }, unitType: proj.unitType,
-        defaults: { material: proj.material, sheet: proj.sheet, shutterFinish: proj.finish },
-        cabinets: cabs.map((c, i) => ({
+      const buildSpecFrom = (cabsArr, projObj) => ({
+        project: { name: projObj.name, client: projObj.client }, unitType: projObj.unitType,
+        defaults: { material: projObj.material, sheet: projObj.sheet, shutterFinish: projObj.finish },
+        cabinets: cabsArr.map((c, i) => ({
           code: c.code || ("C-" + String(i + 1).padStart(3, "0")), name: c.name, w: +c.w || 0, h: +c.h || 0, d: +c.d || 0,
           material: c.material, shutterFinish: c.finish, shutters: c.shutters ? +c.shutters : undefined,
           shutterless: !!c.shutterless, drawers: +c.drawerCount > 0 ? Array.from({ length: +c.drawerCount }, () => ({})) : [],
         })),
       });
+      const buildSpec = () => buildSpecFrom(cabs, proj);
 
-      const generate = async () => {
+      const generateFrom = async (cabsArr, projObj, keepView) => {
         setBusy(true); setMsg("");
-        const j = await api("/api/fabrik/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buildSpec()) });
-        if (j.data) { setPkg(j.data); setView("Summary"); } else setMsg(j.error || "Generation failed");
+        const j = await api("/api/fabrik/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buildSpecFrom(cabsArr, projObj)) });
+        if (j.data) { setPkg(j.data); if (!keepView) setView("Summary"); } else setMsg(j.error || "Generation failed");
         setBusy(false);
+      };
+      const generate = () => generateFrom(cabs, proj, false);
+
+      // Right-click-in-3D edit: patch ONE cabinet (matched by code) and re-derive the whole package live.
+      const editCabByCode = (code, patch) => {
+        const next = cabs.map(c => (c.code === code ? { ...c, ...patch } : c));
+        setCabs(next);
+        generateFrom(next, proj, true);   // keep the 3D view open
       };
 
       const onFile = async (e) => {
@@ -9603,6 +9725,10 @@ const frontendHTML = `<!DOCTYPE html>
                     ))}
                   </div>
                 </div>
+              )}
+
+              {view === "3D Model" && (
+                <Fabrik3D cabinets={pkg.cabinets} cabsByCode={Object.fromEntries(cabs.map(c => [c.code, c]))} onEditCab={editCabByCode} busy={busy} />
               )}
 
               {view === "Panels" && pkg.cabinets.map(cb => (
