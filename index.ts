@@ -5031,6 +5031,53 @@ function loadDesign(id: string) {
   if (!row) return null;
   return { row, layout: JSON.parse(row.layout) as any };
 }
+// §14 / wardrobe-corrective #8: derive structured wardrobe knowledge from a CORRECTED
+// wardrobe's geometry so the correction becomes reusable learned memory.
+function wardrobeFromUnit(unit: any, name: string): any {
+  const cols = unit.columns || [];
+  let drawers = 0, shelves = 0, hanging = 0;
+  for (const col of cols) for (const cell of (col.cells || [])) {
+    const k = (cell.kind || "").toLowerCase();
+    if (k.includes("drawer")) drawers++; else if (k.includes("shelf")) shelves++; else if (k.includes("hang")) hanging++;
+  }
+  return {
+    category: "wardrobe", type: wardrobeTypeOf(name, unit.type),
+    overall_size: { width: Math.round(unit.widthMM || 0), height: Math.round(unit.heightMM || 0), depth: Math.round(unit.depthMM || 600) },
+    shutters: cols.map((c: any, i: number) => ({ i, w: Math.round(c.wMM || 0) })),
+    loft: (unit.loftMM || 0) > 0 ? { height: Math.round(unit.loftMM) } : null,
+    internal_partitions: Math.max(1, cols.length - 1),
+    drawers, shelves, hanging_sections: hanging, safe: false, mirror: false,
+    hardware: ["Soft-close hinges", "Straight channels", "Handles / Gola profile"],
+    design_rules_learned: ["Learned from an approved/corrected design — reuse this proven division"],
+    presentation_style: { columns: cols.length }, manufacturing_logic: { edgeBanding: "1 mm PVC", board: "18 mm" },
+    confidence: 0.95,
+  };
+}
+// §14: APPROVE / CORRECT a design → it becomes learned memory. A corrected wardrobe is
+// stored as a high-confidence reference (so future similar wardrobes reuse it — the same
+// mistake isn't repeated); every type reinforces its exercised rule categories.
+app.post("/api/designs/:id/learn-correction", async (c) => {
+  const d = loadDesign(c.req.param("id"));
+  if (!d) return c.json({ error: "Design not found" }, 404);
+  const type = d.row.designType || d.layout.type || "";
+  let body: any = {}; try { body = await c.req.json(); } catch { /* no body — use stored layout */ }
+  const layout = (body && body.layout) || d.layout;
+  const unit = layout.furniture || (body && body.furniture) || null;
+  let learned: any = null;
+  if (/wardrobe/i.test(type) && unit && unit.columns) {
+    learned = wardrobeFromUnit(unit, type);
+    const analysis = { fileType: "corrected", format: "corrected-design", sizeKB: 0, confidence: 0.95, status: "learned",
+      detectedCabinets: (unit.columns || []).map((_: any, i: number) => "Column " + (i + 1)), utilities: [], unitType: "wardrobe", wardrobe: learned };
+    const id = randomUUID(), hash = createHash("sha256").update("correction:" + d.row.id).digest("hex").slice(0, 16);
+    const existing = db.select().from(references).where(eq(references.contentHash, hash)).get();
+    if (existing) db.update(references).set({ analysis: JSON.stringify(analysis), confidence: 0.95, createdAt: new Date() }).where(eq(references.id, (existing as any).id)).run();
+    else db.insert(references).values({ id, name: "✎ Correction: " + type + " " + d.row.id.slice(0, 6), fileType: "corrected", category: "wardrobe", status: "learned", approved: 1, confidence: 0.95, contentHash: hash, size: 0, analysis: JSON.stringify(analysis), createdAt: new Date() }).run();
+    cache.invalidatePrefix("kb:");
+  }
+  try { reinforceStandards(exercisedCategories(type)); } catch { /* advisory */ }
+  return c.json({ data: { learned: !!learned, wardrobe: learned,
+    message: learned ? "Correction saved to AI memory — future similar wardrobes will reuse this proven layout." : "Approved; rule confidence reinforced for " + type + "." } });
+});
 app.get("/api/designs/:id/export.svg", (c) => {
   const d = loadDesign(c.req.param("id"));
   if (!d) return c.json({ error: "Design not found" }, 404);
@@ -8449,6 +8496,15 @@ const frontendHTML = `<!DOCTYPE html>
       const [wallC, setWallC] = useState(2400);
       const [result, setResult] = useState(null);
       const [liveRuns, setLiveRuns] = useState(null);   // §7.9 shared room model (edits lifted from elevations)
+      const [teachMsg, setTeachMsg] = useState("");     // §14 correction-learning feedback
+      const learnCorrection = async () => {
+        if (!result || !result.id) return;
+        setTeachMsg("Teaching AI…");
+        try {
+          const j = await api("/api/designs/" + result.id + "/learn-correction", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ furniture: result.furniture, layout: { furniture: result.furniture } }) });
+          setTeachMsg("✓ " + ((j.data && j.data.message) || "Saved to AI memory."));
+        } catch (e) { setTeachMsg("✗ Could not save correction"); }
+      };
       // §3.2 #1/#2: per-tab id, remote-echo guard, and live-presence state for the SSE coordination bus.
       const clientId = React.useRef(Math.random().toString(36).slice(2));
       const applyingRemote = React.useRef(false);
@@ -9526,6 +9582,13 @@ const frontendHTML = `<!DOCTYPE html>
                         <div key={i} className="bg-white rounded px-2 py-1 border border-indigo-100 flex justify-between gap-1"><span className="text-slate-500">{kv[0]}</span><span className="font-semibold text-slate-800">{kv[1]}</span></div>
                       ))}
                     </div>
+                  </div>
+                )}
+                {result.id && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 flex flex-wrap items-center gap-2">
+                    <button onClick={learnCorrection} className="text-xs px-3 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 transition-colors">✓ Approve &amp; teach AI from this design</button>
+                    <span className="text-[11px] text-slate-600">Save this (corrected) design to AI memory so future similar designs reuse it (§14).</span>
+                    {teachMsg && <span className="text-[11px] font-medium text-emerald-700 w-full">{teachMsg}</span>}
                   </div>
                 )}
                 {result.learnedFrom && result.learnedFrom.length > 0 && (
