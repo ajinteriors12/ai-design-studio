@@ -51,6 +51,7 @@ const references = sqliteTable("references", {
   contentHash: text("content_hash").notNull().default(""),
   size: integer("size").notNull().default(0),          // uploaded file size in bytes
   analysis: text("analysis").notNull().default(""),    // JSON "What AI Learned from Uploaded Drawing"
+  thumb: text("thumb").notNull().default(""),           // tiny browser-generated JPEG dataURL (reference thumbnail)
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
 
@@ -128,6 +129,7 @@ sqlite.exec(`
 // Additive migrations (idempotent) — uploaded-file size + per-drawing analysis.
 try { sqlite.exec(`ALTER TABLE "references" ADD COLUMN size INTEGER NOT NULL DEFAULT 0`); } catch { /* exists */ }
 try { sqlite.exec(`ALTER TABLE "references" ADD COLUMN analysis TEXT NOT NULL DEFAULT ''`); } catch { /* exists */ }
+try { sqlite.exec(`ALTER TABLE "references" ADD COLUMN thumb TEXT NOT NULL DEFAULT ''`); } catch { /* exists */ }
 try { sqlite.exec(`ALTER TABLE rules ADD COLUMN rule_class TEXT NOT NULL DEFAULT 'manufacturing'`); } catch { /* exists */ }
 
 // ── FABRIK — Manufacturing Intelligence Module: persisted production packages ──
@@ -1608,7 +1610,7 @@ function extractWardrobe(analysis: any, name: string, dimsHint?: any): any {
   };
 }
 // Pull every learned wardrobe out of the corpus (using stored .wardrobe, else extracting on the fly).
-function learnedWardrobes(): { name: string; conf: number; wd: any; id: string }[] {
+function learnedWardrobes(): { name: string; conf: number; wd: any; id: string; thumb: string }[] {
   try {
     const rows = db.select().from(references).all() as any[];
     const out: any[] = [];
@@ -1616,7 +1618,7 @@ function learnedWardrobes(): { name: string; conf: number; wd: any; id: string }
       let a: any = {}; try { a = JSON.parse(r.analysis) || {}; } catch { }
       const isWr = /(wardrobe|robe|almirah|closet|dresser)/i.test((r.category || "") + " " + (r.name || "") + " " + (a.unitType || ""));
       const wd = a.wardrobe || (isWr ? extractWardrobe(a, r.name) : null);
-      if (wd) out.push({ name: r.name, conf: r.confidence || 0.6, wd, id: r.id });
+      if (wd) out.push({ name: r.name, conf: r.confidence || 0.6, wd, id: r.id, thumb: r.thumb || "" });
     }
     return out;
   } catch { return []; }
@@ -1642,7 +1644,7 @@ function applyLearnedWardrobe(dims: any): any {
   const recipe = { columnCount: learnedCols, mix, loft: !!wd.loft, drawers: drawN };
   const top = scored.slice(0, 3).filter((x) => x.sim > 0.2);
   const learnedFrom = top.map((x) => ({
-    name: x.L.name, similarityPct: Math.round(x.sim * 100), type: x.L.wd.type,
+    name: x.L.name, similarityPct: Math.round(x.sim * 100), type: x.L.wd.type, thumb: x.L.thumb || "",
     copied: [`${(x.L.wd.shutters || []).length}-shutter division`, x.L.wd.loft ? "loft band" : "no loft"],
     adapted: [`re-proportioned to ${Math.round(w)}×${Math.round(h)} mm`, `${x.L.wd.hanging_sections} hanging / ${x.L.wd.drawers} drawer mix`],
     improved: ["standard Indian module widths enforced", "edge-banding + hardware schedule regenerated"],
@@ -4587,7 +4589,7 @@ function unzipEntries(zip: Buffer): { name: string; buf: Buffer }[] {
 }
 
 // Ingest ONE drawing (analyse → dedup → persist → features). Returns a summary row.
-async function ingestOne(name: string, buf: Buffer, category: string, approved: boolean): Promise<any> {
+async function ingestOne(name: string, buf: Buffer, category: string, approved: boolean, thumb = ""): Promise<any> {
   const ext = (name.split(".").pop() || "").toLowerCase();
   const fileType = UPLOAD_EXT[ext];
   if (!fileType || fileType === "zip") return { name, status: "skipped", error: `Unsupported .${ext}` };
@@ -4599,10 +4601,12 @@ async function ingestOne(name: string, buf: Buffer, category: string, approved: 
     (analysis as any).wardrobe = extractWardrobe(analysis, name);
   if (dup) analysis.status = "duplicate";
   const id = randomUUID();
+  // Only accept a small, well-formed image dataURL as the thumbnail (guards the stored blob).
+  const safeThumb = (typeof thumb === "string" && /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/.test(thumb) && thumb.length < 60000) ? thumb : "";
   db.insert(references).values({
     id, name, fileType, category, status: analysis.status === "duplicate" ? "duplicate" : "learned",
     approved: approved ? 1 : 0, confidence: dup ? 0 : analysis.confidence, contentHash: hash,
-    size: buf.length, analysis: JSON.stringify(analysis), createdAt: new Date(),
+    size: buf.length, analysis: JSON.stringify(analysis), thumb: safeThumb, createdAt: new Date(),
   }).run();
   if (!dup) {   // persist detected features for the dashboard / drill-down
     const insFeat = sqlite.prepare(`INSERT INTO features(id,ref_id,kind,label,created_at) VALUES(?,?,?,?,?)`);
@@ -4628,9 +4632,13 @@ app.post("/api/references/upload", async (c) => {
     }
     const files = raw.filter((f) => f && typeof f.arrayBuffer === "function");
     if (!files.length) return c.json({ error: "No file uploaded (field 'file')" }, 400);
+    // browser-generated thumbnails, one per uploaded file in order (empty for non-images / ZIP entries)
+    const thumbs: string[] = ([] as any[]).concat((body as any)["thumb"] || []).map((x) => String(x || ""));
 
     const results: any[] = [];
+    let fi = -1;
     for (const f of files) {
+      fi++;
       const name = (f as any).name || "drawing";
       const ext = (name.split(".").pop() || "").toLowerCase();
       const buf = Buffer.from(await (f as any).arrayBuffer());
@@ -4639,7 +4647,7 @@ app.post("/api/references/upload", async (c) => {
         if (!entries.length) { results.push({ name, status: "skipped", error: "Empty / unreadable ZIP" }); continue; }
         for (const e of entries) results.push(await ingestOne(e.name, e.buf, category, approved));
       } else if (UPLOAD_EXT[ext]) {
-        results.push(await ingestOne(name, buf, category, approved));
+        results.push(await ingestOne(name, buf, category, approved, thumbs[fi] || ""));
       } else {
         results.push({ name, status: "skipped", error: `Unsupported .${ext}` });
       }
@@ -5651,6 +5659,23 @@ const frontendHTML = `<!DOCTYPE html>
     const SAVE_TYPES = { png: ["PNG image", "image/png"], pdf: ["PDF document", "application/pdf"], dxf: ["AutoCAD DXF drawing", "image/vnd.dxf"], svg: ["SVG drawing", "image/svg+xml"], csv: ["CSV spreadsheet", "text/csv"], txt: ["Text file", "text/plain"], webm: ["WebM video", "video/webm"], glb: ["3D model (GLB)", "model/gltf-binary"], gltf: ["3D model (glTF)", "model/gltf+json"], json: ["Saved rendered view (JSON)", "application/json"], html: ["Rendered 360 viewer (HTML)", "text/html"] };
     let __saveQ = Promise.resolve();
     const __anchorDl = (blob, name) => { const a = document.createElement("a"); a.download = name; a.href = URL.createObjectURL(blob); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); };
+    // Downscale an uploaded image File to a tiny JPEG dataURL (~120px) for reference thumbnails —
+    // done in the browser so the server needs no image library. Non-images / failures resolve to "".
+    const makeThumb = (file) => new Promise((resolve) => {
+      if (!file || (file.type || "").indexOf("image/") !== 0) return resolve("");
+      const url = URL.createObjectURL(file), img = new Image();
+      img.onload = () => {
+        try {
+          const max = 120, sc = Math.min(1, max / Math.max(img.width || max, img.height || max));
+          const w = Math.max(1, Math.round((img.width || max) * sc)), h = Math.max(1, Math.round((img.height || max) * sc));
+          const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+          cv.getContext("2d").drawImage(img, 0, 0, w, h);
+          resolve(cv.toDataURL("image/jpeg", 0.7));
+        } catch (e) { resolve(""); } finally { URL.revokeObjectURL(url); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(""); };
+      img.src = url;
+    });
     const saveBlobAs = (blob, suggestedName) => {
       const job = async () => {
         const ext = (suggestedName.split(".").pop() || "").toLowerCase();
@@ -9745,13 +9770,17 @@ const frontendHTML = `<!DOCTYPE html>
                     <h3 className="text-sm font-semibold text-emerald-700 mb-2">Learned from {result.learnedFrom.length} reference drawing(s)</h3>
                     <div className="space-y-2">
                       {result.learnedFrom.map((lf, i) => (
-                        <div key={i} className="bg-white rounded-lg border border-emerald-100 p-2 text-[11px]">
-                          <div className="flex justify-between font-semibold text-slate-800 gap-2"><span>{lf.name}{lf.type ? " · " + lf.type : ""}</span><span className="text-emerald-600 whitespace-nowrap">{lf.similarityPct}% similar</span></div>
-                          {/* harvested UX (wardrobe mockup): visual match-% bar per reference used */}
-                          <div className="mt-1 mb-1 h-1 rounded-full bg-emerald-100 overflow-hidden"><div className="h-full rounded-full" style={{ width: Math.max(0, Math.min(100, +lf.similarityPct || 0)) + "%", background: "linear-gradient(90deg,#22c55e,#3b82f6)" }} /></div>
-                          <div className="text-slate-600 mt-0.5"><span className="text-emerald-700 font-medium">Copied:</span> {(lf.copied || []).join(", ")}</div>
-                          <div className="text-slate-600"><span className="text-amber-700 font-medium">Adapted:</span> {(lf.adapted || []).join(", ")}</div>
-                          <div className="text-slate-600"><span className="text-indigo-700 font-medium">Improved:</span> {(lf.improved || []).join(", ")}</div>
+                        <div key={i} className="bg-white rounded-lg border border-emerald-100 p-2 text-[11px] flex gap-2">
+                          {/* harvested UX (wardrobe mockup): reference thumbnail (browser-generated at upload; fallback box for older refs) */}
+                          <div className="shrink-0">{lf.thumb ? <img src={lf.thumb} alt="reference" className="w-12 h-12 rounded object-cover border border-emerald-100" /> : <div className="w-12 h-12 rounded bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-400 text-base">🗄</div>}</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex justify-between font-semibold text-slate-800 gap-2"><span className="truncate">{lf.name}{lf.type ? " · " + lf.type : ""}</span><span className="text-emerald-600 whitespace-nowrap">{lf.similarityPct}% similar</span></div>
+                            {/* harvested UX (wardrobe mockup): visual match-% bar per reference used */}
+                            <div className="mt-1 mb-1 h-1 rounded-full bg-emerald-100 overflow-hidden"><div className="h-full rounded-full" style={{ width: Math.max(0, Math.min(100, +lf.similarityPct || 0)) + "%", background: "linear-gradient(90deg,#22c55e,#3b82f6)" }} /></div>
+                            <div className="text-slate-600 mt-0.5"><span className="text-emerald-700 font-medium">Copied:</span> {(lf.copied || []).join(", ")}</div>
+                            <div className="text-slate-600"><span className="text-amber-700 font-medium">Adapted:</span> {(lf.adapted || []).join(", ")}</div>
+                            <div className="text-slate-600"><span className="text-indigo-700 font-medium">Improved:</span> {(lf.improved || []).join(", ")}</div>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -9920,8 +9949,9 @@ const frontendHTML = `<!DOCTYPE html>
           const CH = 12;
           for (let i = 0; i < all.length; i += CH) {
             const chunk = all.slice(i, i + CH);
+            const thumbs = await Promise.all(chunk.map(makeThumb));   // browser-side reference thumbnails
             const fd = new FormData();
-            chunk.forEach(f => fd.append("file", f));
+            chunk.forEach((f, k) => { fd.append("file", f); fd.append("thumb", thumbs[k] || ""); });
             fd.append("category", category); fd.append("approved", approved ? "true" : "false");
             setUploadMsg("Analyzing " + Math.min(i + CH, all.length) + "/" + all.length + "…");
             const res = await fetch("/api/references/upload", { method: "POST", body: fd });
