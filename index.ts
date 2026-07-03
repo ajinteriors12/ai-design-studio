@@ -10544,6 +10544,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [busy, setBusy] = useState(false);
       const [selIdx, setSelIdx] = useState(0);
       const [repTab, setRepTab] = useState("Reports");
+      const [view, setView] = useState("Front");
       const [tpl, setTpl] = useState("couple");
       const firstSig = React.useRef(true);
       const set = (k, v) => setInput((p) => { const n = Object.assign({}, p); n[k] = v; return n; });
@@ -10598,14 +10599,17 @@ const frontendHTML = `<!DOCTYPE html>
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">
-          <div className="flex items-center justify-between mb-2"><h3 className="text-sm font-semibold text-slate-700">Layout Options <span className="text-xs font-normal text-slate-400">· 3 AI variants · click to select</span></h3></div>
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-slate-700">Layout Options <span className="text-xs font-normal text-slate-400">· 3 AI variants · click to select</span></h3>
+            <div className="flex gap-1">{["Front", "Internal", "Top", "Side", "Loft"].map((v) => (<button key={v} onClick={() => setView(v)} className={"px-2 py-0.5 rounded text-[11px] border " + (view === v ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{v}</button>))}</div>
+          </div>
           <div className="grid md:grid-cols-3 gap-3">
             {opts.map((o, i) => (<div key={o.id} onClick={() => setSelIdx(i)} className={"rounded-lg border overflow-hidden cursor-pointer transition " + (i === selIdx ? "border-indigo-400 ring-1 ring-indigo-200" : "border-slate-200 hover:border-slate-300")}>
               <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200">
                 <span className="text-sm font-semibold text-slate-800">Option {i + 1} · {o.label}</span>
                 {i === best ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 font-semibold">⭐ Recommended</span> : <span className="text-[10px] text-slate-400">{o.scorecard.overallConfidence}%</span>}
               </div>
-              <div className="p-2 bg-white overflow-auto" dangerouslySetInnerHTML={{ __html: o.svg }} />
+              <div className="p-2 bg-white overflow-auto" dangerouslySetInnerHTML={{ __html: (o.views && o.views[view]) || o.svg }} />
               <div className="flex items-center justify-between px-3 py-1.5 border-t border-slate-200 text-[11px] text-slate-500">
                 <span>⬆ {o.scorecard.spaceUtil}% space</span><span>🪝 {o.stats.hanging} hang</span><span>📚 {o.stats.shelves} shelf</span><span>🗄 {o.stats.drawers} drw</span>
               </div>
@@ -11660,7 +11664,11 @@ function wardScorecard(opt: any): any {
   const overall = cl(storageEff * 0.3 + easeOfUse * 0.25 + spaceUtil * 0.2 + (100 - mfg) * 0.15 + ((hangingCap + shelfCap + drawerCap) / 3) * 0.1);
   return { storageEff, hangingCap, shelfCap, drawerCap, spaceUtil, easeOfUse, mfgComplexityPct: mfg, mfgComplexity: mfg < 40 ? "Low" : mfg < 60 ? "Medium" : "High", materialCostInr: (opt.reports || {}).estCostInr || 0, overallConfidence: overall };
 }
-function renderWardrobeOptionSvg(opt: any): string {
+const wardEsc = (t: string) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const wardHDim = (xA: number, xB: number, y: number, txt: string) => `<line x1="${xA.toFixed(1)}" y1="${y.toFixed(1)}" x2="${xB.toFixed(1)}" y2="${y.toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><line x1="${xA.toFixed(1)}" y1="${(y - 3).toFixed(1)}" x2="${xA.toFixed(1)}" y2="${(y + 3).toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><line x1="${xB.toFixed(1)}" y1="${(y - 3).toFixed(1)}" x2="${xB.toFixed(1)}" y2="${(y + 3).toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><text x="${((xA + xB) / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}" fill="#0e7490" font-size="7" text-anchor="middle">${wardEsc(txt)}</text>`;
+const wardVDim = (x: number, yA: number, yB: number, txt: string) => { const ym = (yA + yB) / 2; return `<line x1="${x.toFixed(1)}" y1="${yA.toFixed(1)}" x2="${x.toFixed(1)}" y2="${yB.toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><line x1="${(x - 3).toFixed(1)}" y1="${yA.toFixed(1)}" x2="${(x + 3).toFixed(1)}" y2="${yA.toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><line x1="${(x - 3).toFixed(1)}" y1="${yB.toFixed(1)}" x2="${(x + 3).toFixed(1)}" y2="${yB.toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><text x="${(x - 5).toFixed(1)}" y="${(ym + 2).toFixed(1)}" fill="#0e7490" font-size="7" text-anchor="middle" transform="rotate(-90 ${(x - 5).toFixed(1)} ${ym.toFixed(1)})">${wardEsc(txt)}</text>`; };
+function renderWardrobeElevationSvg(opt: any, mode: string): string {
+  const internal = mode === "internal"; let cellNo = 0;
   const S = WARDROBE_STD, padL = 70, padR = 26, padT = 60, padB = 46;
   const scale = Math.max(0.05, Math.min((560 - padL - padR) / opt.width, (440 - padT - padB) / opt.height));
   const wpx = opt.width * scale, hpx = opt.height * scale, W = Math.round(wpx + padL + padR), Hh = Math.round(hpx + padT + padB);
@@ -11681,9 +11689,14 @@ function renderWardrobeOptionSvg(opt: any): string {
   for (const sec of opt.sections) for (const col of sec.columns) {
     const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
     for (const cell of col.cells) {
-      const ch = cell.hMM * scale, yt = yb - ch;
-      p.push(`<rect x="${(cx + 1).toFixed(1)}" y="${yt.toFixed(1)}" width="${(cw - 2).toFixed(1)}" height="${(ch - 1).toFixed(1)}" fill="${cell.color}33" stroke="${cell.color}" stroke-width="0.7"/>`);
-      if (ch > 12) { p.push(`<text x="${(cx + cw / 2).toFixed(1)}" y="${(yt + ch / 2 + 2).toFixed(1)}" fill="#334155" font-size="7" text-anchor="middle">${esc(cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label)}</text>`); if (ch > 24) p.push(`<text x="${(cx + cw / 2).toFixed(1)}" y="${(yb - 3).toFixed(1)}" fill="#94a3b8" font-size="5.5" text-anchor="middle">${cell.hMM} mm</text>`); }
+      const ch = cell.hMM * scale, yt = yb - ch, cxm = cx + cw / 2;
+      const fill = internal ? "#f1f5f9" : cell.color + "33", stroke = internal ? "#64748b" : cell.color;
+      p.push(`<rect x="${(cx + 1).toFixed(1)}" y="${yt.toFixed(1)}" width="${(cw - 2).toFixed(1)}" height="${(ch - 1).toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${internal ? 0.9 : 0.7}"/>`);
+      if (ch > 12) {
+        if (internal) { cellNo++; p.push(`<circle cx="${(cx + 8).toFixed(1)}" cy="${(yt + 8).toFixed(1)}" r="5.5" fill="#1e293b"/><text x="${(cx + 8).toFixed(1)}" y="${(yt + 10).toFixed(1)}" fill="#ffffff" font-size="6" text-anchor="middle">${cellNo}</text>`); }
+        p.push(`<text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 + 2).toFixed(1)}" fill="#334155" font-size="7" text-anchor="middle">${esc(cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label)}</text>`);
+        if (ch > 22) p.push(`<text x="${cxm.toFixed(1)}" y="${(yb - 3).toFixed(1)}" fill="${internal ? "#475569" : "#94a3b8"}" font-size="5.5" text-anchor="middle">${cell.hMM} mm</text>`);
+      }
       yb = yt;
     }
     p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#94a3b8" stroke-width="0.7"/>`);
@@ -11703,12 +11716,85 @@ function renderWardrobeOptionSvg(opt: any): string {
   p.push(`</svg>`);
   return p.join("");
 }
+const renderWardrobeOptionSvg = (opt: any): string => renderWardrobeElevationSvg(opt, "front");
+// Top View (plan) — width × depth, section splits, per-column shutter door-swing arcs, dims.
+function renderWardrobeTopSvg(opt: any): string {
+  const padL = 56, padR = 26, padT = 44, padB = 20;
+  const scale = Math.max(0.05, Math.min((560 - padL - padR) / opt.width, 150 / opt.depth));
+  const wpx = opt.width * scale, dpx = opt.depth * scale, x0 = padL, y0 = padT;
+  const cols: any[] = []; for (const sec of opt.sections) for (const col of sec.columns) cols.push(col);
+  const rOf = (col: any) => Math.min(col.w * scale, dpx * 0.85);
+  const maxR = cols.reduce((m, c) => Math.max(m, rOf(c)), 0);
+  const W = Math.round(wpx + padL + padR), Hh = Math.round(y0 + dpx + maxR + 26 + padB);
+  const xOf = (mm: number) => x0 + mm * scale, backY = y0, frontY = y0 + dpx;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif"><rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
+  p.push(`<text x="${x0}" y="20" fill="#0f172a" font-size="12" font-weight="700">Top View (Plan)</text><text x="${W - padR}" y="20" fill="#64748b" font-size="9" text-anchor="end">depth ${opt.depth} mm</text>`);
+  for (const sec of opt.sections) { const sx = xOf(sec.x), sw = sec.width * scale, tint = sec.kind === "male" ? "#eff6ff" : sec.kind === "female" ? "#fdf2f8" : "#fefce8", hc = sec.kind === "male" ? "#2563eb" : sec.kind === "female" ? "#db2777" : "#ca8a04"; p.push(`<rect x="${sx.toFixed(1)}" y="${backY}" width="${sw.toFixed(1)}" height="${dpx.toFixed(1)}" fill="${tint}"/><text x="${(sx + sw / 2).toFixed(1)}" y="${(backY - 6)}" fill="${hc}" font-size="9" font-weight="700" text-anchor="middle">${wardEsc(sec.label)}</text>`); }
+  p.push(`<rect x="${x0.toFixed(1)}" y="${backY}" width="${wpx.toFixed(1)}" height="${dpx.toFixed(1)}" fill="none" stroke="#334155" stroke-width="1.4"/><line x1="${x0.toFixed(1)}" y1="${backY}" x2="${(x0 + wpx).toFixed(1)}" y2="${backY}" stroke="#475569" stroke-width="2.4"/>`);
+  for (const col of cols) { const cx = xOf(col.x), r = rOf(col); p.push(`<line x1="${cx.toFixed(1)}" y1="${backY}" x2="${cx.toFixed(1)}" y2="${frontY.toFixed(1)}" stroke="#94a3b8" stroke-width="0.7"/><path d="M ${(cx + r).toFixed(1)} ${frontY.toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 0 1 ${cx.toFixed(1)} ${(frontY + r).toFixed(1)}" fill="none" stroke="#0891b2" stroke-width="0.7" stroke-dasharray="3 3"/><line x1="${cx.toFixed(1)}" y1="${frontY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${(frontY + r).toFixed(1)}" stroke="#0891b2" stroke-width="1"/>`); }
+  for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${backY}" x2="${dx.toFixed(1)}" y2="${frontY.toFixed(1)}" stroke="#475569" stroke-width="1.6"/>`); }
+  for (const col of cols) p.push(wardHDim(xOf(col.x), xOf(col.x + col.w), backY - 22, Math.round(col.w) + ""));
+  p.push(wardVDim(x0 - 22, backY, frontY, opt.depth + ""));
+  p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(frontY + maxR + 16).toFixed(1)}" fill="#64748b" font-size="8" text-anchor="middle">DOOR / SHUTTER OPENINGS</text></svg>`);
+  return p.join("");
+}
+// Side View (section) — depth × height, loft, shelves/rods of a representative column, dims.
+function renderWardrobeSideSvg(opt: any): string {
+  const S = WARDROBE_STD, padL = 52, padR = 30, padT = 40, padB = 40;
+  const scale = Math.max(0.05, Math.min(170 / opt.depth, (440 - padT - padB) / opt.height));
+  const dpx = opt.depth * scale, hpx = opt.height * scale, W = Math.round(dpx + padL + padR), Hh = Math.round(hpx + padT + padB);
+  const x0 = padL, y0 = padT, frontX = x0, backX = x0 + dpx;
+  const loftPx = opt.hasLoft ? opt.loftH * scale : 0, plinthPx = S.plinth * scale, floorY = y0 + hpx - plinthPx, usableTopY = y0 + loftPx;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif"><rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
+  p.push(`<text x="${x0}" y="20" fill="#0f172a" font-size="12" font-weight="700">Side View (Section)</text><text x="${W - padR}" y="20" fill="#64748b" font-size="9" text-anchor="end">depth ${opt.depth} mm</text>`);
+  p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${dpx.toFixed(1)}" height="${hpx.toFixed(1)}" fill="#f8fafc" stroke="#334155" stroke-width="1.4"/>`);
+  if (opt.hasLoft) { const ld = opt.loftDepth * scale; p.push(`<rect x="${(backX - ld).toFixed(1)}" y="${y0.toFixed(1)}" width="${ld.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="${WARD_COLORS.loft}55" stroke="#a16207" stroke-width="0.8"/><text x="${(backX - ld / 2).toFixed(1)}" y="${(y0 + loftPx / 2 + 3).toFixed(1)}" fill="#a16207" font-size="8" text-anchor="middle">LOFT</text>`); }
+  const rep = (opt.sections[0] && opt.sections[0].columns[0] && opt.sections[0].columns[0].cells) || [];
+  let yb = floorY;
+  for (const cell of rep) {
+    const ch = cell.hMM * scale, yt = yb - ch, k = cell.kind;
+    if (k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga") { p.push(`<circle cx="${(backX - 14).toFixed(1)}" cy="${(yt + 6).toFixed(1)}" r="2.4" fill="none" stroke="${WARD_COLORS.longHang}" stroke-width="1"/><line x1="${(frontX + 6).toFixed(1)}" y1="${(yt + 6).toFixed(1)}" x2="${(backX - 6).toFixed(1)}" y2="${(yt + 6).toFixed(1)}" stroke="${WARD_COLORS.longHang}" stroke-width="1" stroke-dasharray="2 2"/>`); }
+    else if (k === "drawer" || k === "jewellery" || k === "cosmetics") p.push(`<rect x="${(frontX + 3).toFixed(1)}" y="${(yt + 2).toFixed(1)}" width="${(dpx - 6).toFixed(1)}" height="${Math.max(3, ch - 4).toFixed(1)}" fill="${WARD_COLORS.drawer}22" stroke="${WARD_COLORS.drawer}" stroke-width="0.8"/>`);
+    else if (k === "shoe" || k === "shelf" || k === "handbag" || k === "kidsShelf") p.push(`<line x1="${(frontX + 2).toFixed(1)}" y1="${yt.toFixed(1)}" x2="${(backX - 2).toFixed(1)}" y2="${yt.toFixed(1)}" stroke="${WARD_COLORS.shelf}" stroke-width="1.3"/>`);
+    else if (k === "safe" || k === "tieBelt") p.push(`<rect x="${(frontX + 3).toFixed(1)}" y="${(yt + 2).toFixed(1)}" width="${(dpx - 6).toFixed(1)}" height="${Math.max(3, ch - 4).toFixed(1)}" fill="${(WARD_COLORS[k] || "#94a3b8")}22" stroke="${WARD_COLORS[k] || "#94a3b8"}" stroke-width="0.8"/>`);
+    yb = yt;
+  }
+  p.push(`<rect x="${x0.toFixed(1)}" y="${floorY.toFixed(1)}" width="${dpx.toFixed(1)}" height="${plinthPx.toFixed(1)}" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>`);
+  p.push(`<line x1="${frontX.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${frontX.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#0891b2" stroke-width="2"/><text x="${(frontX - 3).toFixed(1)}" y="${(y0 + hpx / 2).toFixed(1)}" fill="#0e7490" font-size="7" text-anchor="middle" transform="rotate(-90 ${(frontX - 3).toFixed(1)} ${(y0 + hpx / 2).toFixed(1)})">shutter</text>`);
+  if (opt.hasLoft) p.push(wardVDim(x0 - 20, y0, usableTopY, opt.loftH + ""));
+  p.push(wardVDim(x0 - 20, usableTopY, floorY, opt.usableH + ""));
+  p.push(wardHDim(frontX, backX, floorY + 20, opt.depth + ""));
+  p.push(`</svg>`);
+  return p.join("");
+}
+// Loft Layout — plan of the loft band (width × loft depth) with column divisions + dims.
+function renderWardrobeLoftSvg(opt: any): string {
+  if (!opt.hasLoft) return `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="120" viewBox="0 0 360 120" font-family="Inter,Arial,sans-serif"><rect width="360" height="120" fill="#ffffff"/><text x="180" y="58" fill="#64748b" font-size="12" text-anchor="middle">No loft — height below 2400 mm</text><text x="180" y="76" fill="#94a3b8" font-size="9" text-anchor="middle">raise height to 2400+ to add a loft</text></svg>`;
+  const padL = 56, padR = 26, padT = 42, padB = 40;
+  const scale = Math.max(0.05, Math.min((560 - padL - padR) / opt.width, 110 / opt.loftDepth));
+  const wpx = opt.width * scale, dpx = opt.loftDepth * scale, W = Math.round(wpx + padL + padR), Hh = Math.round(dpx + padT + padB);
+  const x0 = padL, y0 = padT, xOf = (mm: number) => x0 + mm * scale;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif"><rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
+  p.push(`<text x="${x0}" y="20" fill="#0f172a" font-size="12" font-weight="700">Loft Layout</text><text x="${W - padR}" y="20" fill="#64748b" font-size="9" text-anchor="end">H ${opt.loftH} · D ${opt.loftDepth} mm</text>`);
+  p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${dpx.toFixed(1)}" fill="${WARD_COLORS.loft}44" stroke="#a16207" stroke-width="1.4"/>`);
+  for (const sec of opt.sections) for (const col of sec.columns) { if (col.x === 0) continue; p.push(`<line x1="${xOf(col.x).toFixed(1)}" y1="${y0.toFixed(1)}" x2="${xOf(col.x).toFixed(1)}" y2="${(y0 + dpx).toFixed(1)}" stroke="#ca8a04" stroke-width="0.7"/>`); }
+  for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${dx.toFixed(1)}" y2="${(y0 + dpx).toFixed(1)}" stroke="#92400e" stroke-width="1.4"/>`); }
+  p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(y0 + dpx / 2 + 3).toFixed(1)}" fill="#a16207" font-size="9" font-weight="600" text-anchor="middle">LOFT — seasonal / bulky storage</text>`);
+  for (const sec of opt.sections) for (const col of sec.columns) p.push(wardHDim(xOf(col.x), xOf(col.x + col.w), y0 - 20, Math.round(col.w) + ""));
+  p.push(wardVDim(x0 - 22, y0, y0 + dpx, opt.loftDepth + ""));
+  p.push(`</svg>`);
+  return p.join("");
+}
 function wardrobeOptions(input: any): any {
   const options = ["maxHanging", "balanced", "maxFolding"].map((st) => {
     const o = buildWardrobeOption(st, input);
     o.reports = wardReports(o);
     o.scorecard = wardScorecard(o);
-    o.svg = renderWardrobeOptionSvg(o);
+    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.svg = o.views.Front;
     return o;
   });
   const ranked = options.map((o) => ({ id: o.id, label: o.label, score: o.scorecard.overallConfidence })).sort((a, b) => b.score - a.score);
