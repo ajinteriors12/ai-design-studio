@@ -3095,6 +3095,42 @@ function sinkEllipse(cx: number, cy: number, size = 26): string {
   return svgIcon("sink", cx, cy, size);
 }
 
+// §7 AutoCAD presentation: draw doors (swing arc + leaf), windows (double line),
+// columns and ventilators on a HORIZONTAL wall at y=top. `into` = +1 → the room is
+// below the wall (cabinets hang down), so a door swings into +y. Reads GEN_WINDOWS +
+// GEN_STRUCTURES so the §3 opening-awareness is actually VISIBLE on the drawing.
+function planOpeningsH(xOf: (mm: number) => number, top: number, La: number, into = 1): string[] {
+  const S = PLAN_S, els: string[] = [], at = (mm: number) => xOf(mm);
+  for (const w of GEN_WINDOWS) {
+    const a = w.along, b = a + w.width; if (a == null || a > La) continue;
+    els.push(`<rect x="${at(a)}" y="${top - 2}" width="${(b - a) * S}" height="4" fill="#f4f7fb"/>`);
+    els.push(`<line x1="${at(a)}" y1="${top - 1.6}" x2="${at(b)}" y2="${top - 1.6}" stroke="#0891b2" stroke-width="0.9"/>`);
+    els.push(`<line x1="${at(a)}" y1="${top + 1.6}" x2="${at(b)}" y2="${top + 1.6}" stroke="#0891b2" stroke-width="0.9"/>`);
+    els.push(`<text x="${at((a + b) / 2)}" y="${top - 4}" fill="#0891b2" font-size="6" text-anchor="middle">window</text>`);
+  }
+  for (const s of GEN_STRUCTURES) {
+    const w = s.width && s.width > 0 ? s.width : (s.kind === "column" ? 300 : 800);
+    const a = s.pos; if (a == null || a > La) continue; const b = a + w;
+    if (s.kind === "door") {
+      const wp = (b - a) * S, hinge = at(a), yLeaf = top + into * wp;
+      els.push(`<rect x="${hinge}" y="${top - 2}" width="${wp}" height="4" fill="#f4f7fb"/>`);
+      els.push(`<line x1="${hinge}" y1="${top}" x2="${hinge}" y2="${yLeaf}" stroke="#8b5a2b" stroke-width="1.4"/>`);
+      els.push(`<path d="M${at(b)} ${top} A${wp} ${wp} 0 0 ${into > 0 ? 1 : 0} ${hinge} ${yLeaf}" fill="none" stroke="#8b5a2b" stroke-width="0.8" stroke-dasharray="3 2"/>`);
+      els.push(`<text x="${at((a + b) / 2)}" y="${top - 4}" fill="#8b5a2b" font-size="6" text-anchor="middle">door</text>`);
+    } else if (s.kind === "column") {
+      els.push(`<rect x="${at(a)}" y="${top - 4}" width="${w * S}" height="8" fill="#94a3b8" stroke="#475569" stroke-width="0.6"/>`);
+      els.push(`<text x="${at(a + w / 2)}" y="${top - 6}" fill="#475569" font-size="6" text-anchor="middle">col</text>`);
+    } else if (s.kind === "ventilator" || s.kind === "balcony" || s.kind === "stair") {
+      els.push(`<rect x="${at(a)}" y="${top - 2}" width="${w * S}" height="4" fill="#f4f7fb" stroke="#0891b2" stroke-width="0.7" stroke-dasharray="2 2"/>`);
+      els.push(`<text x="${at(a + w / 2)}" y="${top - 4}" fill="#0891b2" font-size="5.5" text-anchor="middle">${s.kind}</text>`);
+    }
+  }
+  return els;
+}
+// §7: small numbered badge at a cabinet's corner (cabinet schedule cross-reference).
+function cabNumberBadge(cx: number, cy: number, n: number): string {
+  return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="5.5" fill="#1e3a5f"/><text x="${cx.toFixed(1)}" y="${(cy + 2.5).toFixed(1)}" fill="#fff" font-size="7" text-anchor="middle">${n}</text>`;
+}
 function renderPlanStraight(type: string, run: RunLayout): string {
   const S = PLAN_S, d = STD.baseDepth, pad = 26, header = 20;
   const La = run.length, W = La * S + pad * 2, H = d * S + pad * 2 + header, top = pad + header;
@@ -3102,13 +3138,16 @@ function renderPlanStraight(type: string, run: RunLayout): string {
   const p = [svgHead(W, H)];
   p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">${type} — Plan (${Math.round(La)} mm)</text>`);
   p.push(`<line x1="${pad}" y1="${top}" x2="${xOf(La)}" y2="${top}" stroke="#64748b" stroke-width="3"/>`);
+  let cabNo = 0;
   for (const c of run.base) {
     p.push(`<rect x="${xOf(c.x)}" y="${top}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
     if (c.kind === "sink") p.push(sinkEllipse(xOf(c.x) + c.w * S / 2, top + d * S / 2));
     if (c.kind === "hob" || c.kind === "drawer3") p.push(svgIcon("hob", xOf(c.x) + c.w * S / 2, top + d * S / 2, Math.min(c.w * S, d * S) * 0.62));
+    if (c.kind !== "filler" && c.w * S > 14) p.push(cabNumberBadge(xOf(c.x) + 8, top + d * S - 8, ++cabNo));
   }
   p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${top - 5}" width="${GEN.chimneyWidth * S}" height="3.5" fill="#c7d2fe"/>`);
   p.push(svgIcon("chimney", xOf(La / 2), top - 11, 20));
+  p.push(...planOpeningsH(xOf, top, La, 1));   // §7/§3: doors/windows/columns drawn on the wall
   p.push(`</svg>`);
   return p.join("");
 }
