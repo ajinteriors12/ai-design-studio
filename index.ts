@@ -5962,7 +5962,7 @@ const frontendHTML = `<!DOCTYPE html>
     };
 
     function Tabs({ tab, setTab }) {
-      const items = ["Generator", "🏭 Fabrik", "Library", "What AI Learned", "Command Center", "Admin Dashboard"];
+      const items = ["Generator", "🚪 Wardrobe AI", "🏭 Fabrik", "Library", "What AI Learned", "Command Center", "Admin Dashboard"];
       return (
         <div className="flex flex-wrap gap-2 mb-6">
           {items.map(t => (
@@ -10536,6 +10536,115 @@ const frontendHTML = `<!DOCTYPE html>
       );
     }
 
+    // ── Wardrobe AI Designer — lifestyle-driven 3-option wardrobe generator (§2-§12) ──
+    function WardrobeAI() {
+      const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300 });
+      const [data, setData] = useState(null);
+      const [meta, setMeta] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [selIdx, setSelIdx] = useState(0);
+      const [repTab, setRepTab] = useState("Reports");
+      const [tpl, setTpl] = useState("couple");
+      const firstSig = React.useRef(true);
+      const set = (k, v) => setInput((p) => { const n = Object.assign({}, p); n[k] = v; return n; });
+      React.useEffect(() => { fetch("/api/wardrobe/meta").then((r) => r.json()).then((j) => setMeta(j.data)).catch(() => {}); }, []);
+      const generate = (ov) => {
+        setBusy(true);
+        const body = Object.assign({}, input, ov || {});
+        fetch("/api/wardrobe/options", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+          .then((r) => r.json()).then((j) => { setData(j.data); setSelIdx((j.data && j.data.recommendation && j.data.recommendation.bestIndex) || 0); setBusy(false); })
+          .catch(() => setBusy(false));
+      };
+      React.useEffect(() => { generate(); }, []);
+      const sig = JSON.stringify(input);
+      React.useEffect(() => { if (firstSig.current) { firstSig.current = false; return; } const id = setTimeout(() => generate(), 400); return () => clearTimeout(id); }, [sig]);
+      const applyTemplate = (t) => {
+        setTpl(t.key);
+        const ov = { maleUsers: t.maleUsers, femaleUsers: t.femaleUsers, children: t.children, professionals: t.professionals, width: t.width, height: t.height, depth: t.depth };
+        if (t.luxury) ov.luxury = t.luxury;
+        setInput((p) => Object.assign({}, p, ov));
+      };
+      const opts = (data && data.options) || [];
+      const sel = opts[selIdx];
+      const best = data && data.recommendation ? data.recommendation.bestIndex : 0;
+      const LEVELS = [["low", "Low"], ["medium", "Medium"], ["high", "High"]];
+      const levelSel = (k, label) => (<label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">{label}</span><select value={input[k]} onChange={(e) => set(k, e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs bg-white">{LEVELS.map(([v, t]) => <option key={v} value={v}>{t}</option>)}</select></label>);
+      const countSel = (k, label, max) => (<label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">{label}</span><select value={input[k]} onChange={(e) => set(k, +e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs bg-white">{Array.from({ length: max + 1 }, (_, i) => <option key={i} value={i}>{i}</option>)}</select></label>);
+      const numIn = (k, label, mn, mx, st) => (<label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">{label}</span><input type="number" value={input[k]} min={mn} max={mx} step={st} onChange={(e) => set(k, +e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs" /></label>);
+      const slider = (k, label, mn, mx, st, suffix) => (<div className="flex items-center gap-2 text-[11px]"><span className="text-slate-500" style={{ width: 92 }}>{label}</span><input type="range" min={mn} max={mx} step={st} value={input[k]} onChange={(e) => set(k, +e.target.value)} className="flex-1" /><span className="font-semibold text-slate-700" style={{ width: 44, textAlign: "right" }}>{input[k]}{suffix || ""}</span></div>);
+      const bar = (label, pct, text) => { const v = Math.max(0, Math.min(100, pct || 0)); return (<div className="flex items-center gap-2 text-[11px]"><span className="text-slate-500" style={{ width: 132 }}>{label}</span><div className="flex-1 h-1.5 rounded-full bg-slate-200 overflow-hidden"><div className="h-full rounded-full" style={{ width: v + "%", background: "linear-gradient(90deg,#22c55e,#3b82f6)" }} /></div><span className="text-slate-700 font-semibold" style={{ width: 58, textAlign: "right" }}>{text}</span></div>); };
+      return (<div className="space-y-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <h2 className="text-base font-semibold text-slate-800">🚪 Wardrobe AI Designer <span className="text-xs font-normal text-slate-400">· lifestyle → 3 optimised options · Indian standards</span></h2>
+            <button onClick={() => generate()} disabled={busy} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">{busy ? "Generating…" : "✨ Generate Options"}</button>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+            {countSel("maleUsers", "👨 Male", 3)}{countSel("femaleUsers", "👩 Female", 3)}{countSel("children", "🧒 Children", 3)}{countSel("professionals", "👔 Professionals", 2)}
+            {levelSel("traditional", "🥻 Traditional")}{levelSel("western", "👗 Western")}{levelSel("winter", "🧣 Winter")}{levelSel("luxury", "💎 Luxury")}
+            {numIn("width", "📐 Width (mm)", 1200, 4800, 100)}{numIn("height", "📐 Height (mm)", 1800, 3000, 100)}{numIn("depth", "📐 Depth (mm)", 450, 900, 50)}
+          </div>
+          <div className="mt-3">
+            <div className="text-[11px] text-slate-500 mb-1">Templates</div>
+            <div className="flex flex-wrap gap-1.5">
+              {((meta && meta.templates) || []).map((t) => (<button key={t.key} onClick={() => applyTemplate(t)} className={"px-3 py-1 rounded-full text-xs border " + (tpl === t.key ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{t.label}</button>))}
+            </div>
+          </div>
+          <div className="mt-3 grid sm:grid-cols-2 gap-x-6 gap-y-1.5 rounded-lg bg-slate-50 border border-slate-200 p-3">
+            <div className="sm:col-span-2 text-[11px] font-semibold text-slate-500">🎚 Interactive editor (live)</div>
+            {slider("maleRatio", "Male section", 25, 75, 1, "%")}{slider("loftH", "Loft height", 300, 750, 10, "")}
+            {slider("drawerH", "Drawer height", 100, 300, 10, "")}{slider("shoeH", "Shoe shelf", 200, 400, 10, "")}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between mb-2"><h3 className="text-sm font-semibold text-slate-700">Layout Options <span className="text-xs font-normal text-slate-400">· 3 AI variants · click to select</span></h3></div>
+          <div className="grid md:grid-cols-3 gap-3">
+            {opts.map((o, i) => (<div key={o.id} onClick={() => setSelIdx(i)} className={"rounded-lg border overflow-hidden cursor-pointer transition " + (i === selIdx ? "border-indigo-400 ring-1 ring-indigo-200" : "border-slate-200 hover:border-slate-300")}>
+              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200">
+                <span className="text-sm font-semibold text-slate-800">Option {i + 1} · {o.label}</span>
+                {i === best ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 font-semibold">⭐ Recommended</span> : <span className="text-[10px] text-slate-400">{o.scorecard.overallConfidence}%</span>}
+              </div>
+              <div className="p-2 bg-white overflow-auto" dangerouslySetInnerHTML={{ __html: o.svg }} />
+              <div className="flex items-center justify-between px-3 py-1.5 border-t border-slate-200 text-[11px] text-slate-500">
+                <span>⬆ {o.scorecard.spaceUtil}% space</span><span>🪝 {o.stats.hanging} hang</span><span>📚 {o.stats.shelves} shelf</span><span>🗄 {o.stats.drawers} drw</span>
+              </div>
+            </div>))}
+          </div>
+          {sel && (<div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
+            <div className="text-sm font-semibold text-emerald-700 mb-1">⭐ {opts[best] ? opts[best].label : ""} is the best value — {opts[best] ? opts[best].scorecard.overallConfidence : 0}% overall</div>
+            <div className="text-[11px] text-slate-500 mb-2">Ranked by storage efficiency, ease of daily use, space utilisation and manufacturing simplicity.</div>
+            <div className="grid sm:grid-cols-2 gap-x-6 gap-y-1">
+              {bar("Storage efficiency", sel.scorecard.storageEff, sel.scorecard.storageEff + "%")}
+              {bar("Hanging capacity", sel.scorecard.hangingCap, sel.scorecard.hangingCap + "%")}
+              {bar("Shelf capacity", sel.scorecard.shelfCap, sel.scorecard.shelfCap + "%")}
+              {bar("Drawer capacity", sel.scorecard.drawerCap, sel.scorecard.drawerCap + "%")}
+              {bar("Ease of daily use", sel.scorecard.easeOfUse, sel.scorecard.easeOfUse + "%")}
+              {bar("Space utilisation", sel.scorecard.spaceUtil, sel.scorecard.spaceUtil + "%")}
+              {bar("Manufacturing (simpler = better)", 100 - sel.scorecard.mfgComplexityPct, sel.scorecard.mfgComplexity)}
+              {bar("Material cost", Math.min(100, sel.scorecard.materialCostInr / 1500), "₹" + (sel.scorecard.materialCostInr || 0).toLocaleString("en-IN"))}
+            </div>
+          </div>)}
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
+            {["Legend", "Reports", "Cutting List", "Hardware"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700")}>{t}</button>))}
+            <span className="ml-auto text-[11px] text-slate-400">{sel ? "Option " + (selIdx + 1) + " · " + sel.label : ""}</span>
+          </div>
+          {repTab === "Legend" && (<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1.5">
+            {((data && data.legend) || []).map((l) => (<div key={l.kind} className="flex items-center gap-2 text-[11px] text-slate-600"><span style={{ width: 16, height: 16, borderRadius: 4, background: l.color, border: "1px solid #cbd5e1", flexShrink: 0 }} />{l.label}</div>))}
+          </div>)}
+          {repTab === "Reports" && sel && (<div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+            {[["📐 Overall", sel.width + "×" + sel.height + "×" + sel.depth + " mm"], ["🪝 Hanging", sel.stats.hanging + " sections"], ["📚 Shelves", sel.reports.shelfCount + " nos"], ["🗄 Drawers", sel.reports.drawerFronts + " nos"], ["🚪 Shutters", sel.reports.shutters + " nos"], ["🧵 Board", sel.reports.boardSqft + " sq.ft (" + sel.reports.material.carcass + ")"], ["🔩 Back", sel.reports.backSqft + " sq.ft (" + sel.reports.material.back + ")"], ["✨ Loft", sel.hasLoft ? sel.loftH + " mm (" + sel.loftDepth + " deep)" : "none"], ["💰 Est. cost", "₹" + (sel.reports.estCostInr || 0).toLocaleString("en-IN")]].map((kv, i) => (<div key={i} className="bg-slate-50 rounded border border-slate-200 px-2 py-1.5"><div className="text-slate-400 text-[10px] uppercase tracking-wide">{kv[0]}</div><div className="text-slate-800 font-medium">{kv[1]}</div></div>))}
+          </div>)}
+          {repTab === "Cutting List" && sel && (<div className="overflow-x-auto"><table className="w-full text-[11px]"><thead><tr className="text-slate-400 text-left"><th className="py-1 pr-3">Panel</th><th className="py-1 pr-3">Size</th><th className="py-1">Qty</th></tr></thead><tbody>{sel.reports.cut.map((r, i) => (<tr key={i} className="border-t border-slate-100"><td className="py-1 pr-3 text-slate-700">{r.part}</td><td className="py-1 pr-3 text-slate-600">{r.size}</td><td className="py-1 text-slate-800 font-medium">{r.qty}</td></tr>))}<tr className="border-t border-slate-200"><td className="py-1 pr-3 text-slate-500" colSpan={3}>Edge banding: {sel.reports.material.edgeBand} · all exposed edges</td></tr></tbody></table></div>)}
+          {repTab === "Hardware" && sel && (<div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">{sel.reports.hardware.map((h, i) => (<div key={i} className="bg-slate-50 rounded border border-slate-200 px-2 py-1.5 flex justify-between"><span className="text-slate-600">{h.item}</span><span className="text-slate-800 font-semibold">{h.qty}</span></div>))}<div className="sm:col-span-3 text-slate-400 text-[10px]">Hinges: {sel.reports.material.hinge} · Drawers: {sel.reports.material.drawer} · Handles: {sel.reports.material.handle}</div></div>)}
+        </div>
+        <div className="text-[11px] text-slate-400 px-1">Learns from your uploaded references in the <span className="font-medium text-slate-500">Library</span> tab (vision-read wardrobes drive the Generator). This module applies Indian standard arrangements to your lifestyle inputs.</div>
+      </div>);
+    }
+
     function Fabrik() {
       const blankCab = () => ({ code: "", name: "New Cabinet", w: 600, h: 720, d: 560, material: "18mm BWR Plywood", finish: "Laminate", shutters: "", drawerCount: 0, shutterless: false });
       const [proj, setProj] = useState({ name: "Kitchen Project", client: "", unitType: "kitchen", material: "18mm BWR Plywood", sheet: "8x4", finish: "Laminate" });
@@ -10947,6 +11056,7 @@ const frontendHTML = `<!DOCTYPE html>
           </header>
           <Tabs tab={tab} setTab={setTab} />
           {tab === "Generator" && <Generator />}
+          {tab === "🚪 Wardrobe AI" && <WardrobeAI />}
           {tab === "🏭 Fabrik" && <Fabrik />}
           {tab === "Library" && <Library />}
           {tab === "What AI Learned" && <WhatAILearned />}
@@ -11359,6 +11469,267 @@ app.get("/api/fabrik/stats", (c) => {
     try { const s = JSON.parse(r.spec || "{}"); for (const cb of (s.cabinets || [])) { const m = cb.material || "18mm BWR Plywood"; byMaterial[m] = (byMaterial[m] || 0) + 1; const f = cb.shutterFinish || "Laminate"; byFinish[f] = (byFinish[f] || 0) + 1; } } catch {}
   }
   return c.json({ data: { projects: rows.length, cabinets, panels, sheets, byType, byMaterial, byFinish } });
+});
+
+// =============================================================================
+// WARDROBE OPTIONS ENGINE — lifestyle-driven 3-option wardrobe designer.
+// Encodes the Indian standard arrangements from the reference chart
+// (male/female standard sections; 3 layouts Max Hanging / Balanced / Max Folding;
+// loft; AutoCAD-style dimensioned elevations; scorecard + manufacturing reports).
+// Deterministic (no external AI).
+// =============================================================================
+const WARDROBE_STD = {
+  depth: 600, loftDepth: 550, plinth: 100,
+  hangLong: 1050, hangShort: 900, pantRack: 900,
+  drawerH: 200, drawerMinH: 150, shelfGap: 350, shelfMinH: 200,
+  loftBand: 600, shoeH: 300, safeH: 300, accH: 150, handbagH: 400, kidsHang: 800,
+  colTarget: 500, colMin: 350, colMax: 650,
+  carcass: "18mm BWP / MR-grade plywood", back: "6mm BWP plywood",
+  edgeBand: "1-2mm PVC", hinge: "Soft-close hinge (110°)", drawerBox: "Tandem box, soft-close",
+  handle: "Profile / knob / long handle",
+  finishes: ["Laminate", "Acrylic", "PU", "Veneer", "Rattan", "Glass"],
+};
+const WARD_COLORS: Record<string, string> = {
+  longHang: "#3b82f6", shortHang: "#8b5cf6", pantRack: "#7c3aed", suit: "#2563eb",
+  shelf: "#22c55e", drawer: "#ec4899", shoe: "#d4a574", safe: "#ef4444",
+  tieBelt: "#f59e0b", laptop: "#dc2626", loft: "#fcd34d",
+  saree: "#ec4899", sareeShelf: "#f472b6", dress: "#f472b6", lehenga: "#db2777",
+  salwar: "#f9a8d4", jewellery: "#fcd34d", cosmetics: "#fca5a5", handbag: "#a78bfa",
+  dupatta: "#f472b6", seasonal: "#78716c", winter: "#78716c",
+  kidsHang: "#60a5fa", kidsShelf: "#34d399", mirror: "#94a3b8", filler: "#e2e8f0",
+};
+const WARD_LEGEND: [string, string][] = [
+  ["longHang", "Long Hanging — shirts/coat/blazer"], ["shortHang", "Short Hanging — shirts/tees"],
+  ["pantRack", "Pant Rack — trousers"], ["shelf", "Shelf — sweaters/folded"], ["drawer", "Drawer — innerwear/socks"],
+  ["shoe", "Shoe Rack"], ["safe", "Safe Locker — valuables"], ["tieBelt", "Tie & Belt Rack"],
+  ["saree", "Saree Hanging"], ["sareeShelf", "Saree (folded)"], ["dress", "Dress Hanging"], ["lehenga", "Lehenga"],
+  ["jewellery", "Jewellery Drawer"], ["cosmetics", "Cosmetics Drawer"], ["handbag", "Handbag Shelf"],
+  ["dupatta", "Dupatta"], ["loft", "Loft Area"], ["mirror", "Mirror"],
+];
+const WARD_TEMPLATES: Record<string, any> = {
+  couple: { maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, width: 2400, height: 2400, depth: 600, label: "Husband & Wife" },
+  bachelor: { maleUsers: 1, femaleUsers: 0, children: 0, professionals: 1, width: 1800, height: 2100, depth: 600, label: "Bachelor" },
+  luxury: { maleUsers: 1, femaleUsers: 1, children: 0, professionals: 2, luxury: "high", width: 3000, height: 2700, depth: 600, label: "Luxury" },
+  premium: { maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, luxury: "medium", width: 2700, height: 2400, depth: 600, label: "Premium" },
+  budget: { maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, width: 2000, height: 2100, depth: 600, label: "Budget" },
+  kids: { maleUsers: 0, femaleUsers: 0, children: 2, professionals: 0, width: 1800, height: 2100, depth: 600, label: "Kids" },
+  walkin: { maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, width: 3600, height: 2700, depth: 600, label: "Walk-in" },
+  family: { maleUsers: 1, femaleUsers: 1, children: 2, professionals: 1, width: 3200, height: 2400, depth: 600, label: "Family" },
+};
+const wardClamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+type WCell = { kind: string; label: string; hMM: number };
+// A column recipe → cells bottom→top, normalized to sum to usableH.
+function wardColumn(recipe: string, usableH: number): WCell[] {
+  const S = WARDROBE_STD, cells: WCell[] = [];
+  const push = (kind: string, label: string, hMM: number) => cells.push({ kind, label, hMM: Math.round(Math.max(60, hMM)) });
+  const shelves = (h: number, label: string) => { const n = Math.max(2, Math.round(h / S.shelfGap)); for (let i = 0; i < n; i++) push("shelf", label, h / n); };
+  switch (recipe) {
+    case "hang-long": push("drawer", "Innerwear", S.drawerH); push("drawer", "Socks", S.drawerH); push("longHang", "Long Hanging", usableH - 2 * S.drawerH); break;
+    case "hang-short-double":
+      if (usableH >= 1950) { push("shortHang", "Short Hanging", S.hangShort); push("shortHang", "Short Hanging", usableH - S.hangShort); }
+      else { push("drawer", "Socks", S.drawerH); push("shortHang", "Short Hanging", usableH - S.drawerH); }
+      break;
+    case "pant+shelves": push("pantRack", "Pant Rack", S.pantRack); shelves(usableH - S.pantRack, "Sweaters"); break;
+    case "shelves": shelves(usableH, "Folded"); break;
+    case "shoe+drawers": push("shoe", "Shoe Rack", S.shoeH); push("drawer", "Drawer", S.drawerH); push("drawer", "Drawer", S.drawerH); shelves(usableH - S.shoeH - 2 * S.drawerH, "Folded"); break;
+    case "accessories": push("safe", "Safe Locker", S.safeH); push("drawer", "Watches", S.accH); push("tieBelt", "Tie & Belt", S.accH); shelves(usableH - S.safeH - 2 * S.accH, "Shelf"); break;
+    case "saree": push("drawer", "Petticoat", S.drawerH); push("saree", "Saree Hanging", usableH - S.drawerH); break;
+    case "saree-shelves": push("drawer", "Blouse", S.drawerH); shelves(usableH - S.drawerH, "Saree (folded)"); break;
+    case "dress": push("drawer", "Innerwear", S.drawerH); push("dress", "Dress Hanging", usableH - S.drawerH); break;
+    case "lehenga": push("drawer", "Petticoat", S.drawerH); push("lehenga", "Lehenga", usableH - S.drawerH); break;
+    case "female-acc": push("jewellery", "Jewellery", S.accH); push("cosmetics", "Cosmetics", S.accH); push("drawer", "Dupatta", S.drawerH); push("handbag", "Handbags", S.handbagH); shelves(usableH - 2 * S.accH - S.drawerH - S.handbagH, "Shelf"); break;
+    case "kids-hang": push("drawer", "Kids", S.drawerH); push("kidsHang", "Kids Hanging", S.kidsHang); shelves(usableH - S.drawerH - S.kidsHang, "Kids Folded"); break;
+    default: push("longHang", "Hanging", usableH);
+  }
+  const sum = cells.reduce((a, c) => a + c.hMM, 0) || 1;
+  if (Math.abs(sum - usableH) > 1) { const f = usableH / sum; cells.forEach(c => c.hMM = Math.round(c.hMM * f)); }
+  return cells;
+}
+// ordered column recipes for a section given strategy + lifestyle
+function wardSectionRecipes(sec: string, n: number, strategy: string, L: any): string[] {
+  const out: string[] = [], prof = +L.professionals > 0;
+  let pool: string[] = [];
+  if (sec === "male") {
+    // maxHanging = every column hangs · maxFolding = every column folds/drawers · balanced = alternate
+    if (strategy === "maxHanging") { pool = ["hang-long", "hang-short-double", "hang-long", "pant+shelves", "accessories"]; if (prof) pool.unshift("hang-long"); }
+    else if (strategy === "maxFolding") pool = ["shelves", "shoe+drawers", "pant+shelves", "accessories", "hang-long"];
+    else pool = ["hang-long", "shoe+drawers", "pant+shelves", "accessories", "hang-short-double"];
+  } else if (sec === "female") {
+    const hangItems: string[] = [], foldItems: string[] = [];
+    if (L.traditional !== "low") { hangItems.push("saree"); foldItems.push("saree-shelves"); }
+    if (L.western !== "low") hangItems.push("dress");
+    if (L.traditional === "high") hangItems.push("lehenga");
+    if (!hangItems.length) hangItems.push("dress");
+    if (strategy === "maxHanging") pool = [...hangItems, ...hangItems, "female-acc"];
+    else if (strategy === "maxFolding") pool = [...foldItems, "shelves", "female-acc", "shoe+drawers", ...(foldItems.length ? [] : ["shelves"])];
+    else pool = [hangItems[0], "female-acc", ...(hangItems[1] ? [hangItems[1]] : []), ...foldItems, "shoe+drawers"];
+    if (!pool.length) pool = ["shelves"];
+  } else {
+    for (let i = 0; i < n; i++) out.push(i === n - 1 ? "shelves" : "kids-hang");
+    return out;
+  }
+  for (let i = 0; i < n; i++) out.push(pool[i % pool.length]);
+  return out;
+}
+function buildWardrobeOption(strategy: string, input: any): any {
+  const S = WARDROBE_STD;
+  const width = wardClamp(Math.round(+input.width || 2400), 1200, 4800);
+  const height = wardClamp(Math.round(+input.height || 2400), 1800, 3000);
+  const depth = wardClamp(Math.round(+input.depth || 600), 450, 900);
+  const male = wardClamp(+input.maleUsers || 0, 0, 3), female = wardClamp(+input.femaleUsers || 0, 0, 3), kids = wardClamp(+input.children || 0, 0, 3);
+  const maleRatio = wardClamp(+input.maleRatio || 50, 25, 75) / 100;
+  const hasLoft = height >= 2400;
+  const loftH = hasLoft ? wardClamp(Math.round(+input.loftH || S.loftBand), 300, 750) : 0;
+  const usableH = height - S.plinth - loftH;
+  const L = { traditional: input.traditional || "medium", western: input.western || "medium", winter: input.winter || "low", luxury: input.luxury || "low", professionals: +input.professionals || 0 };
+  const secs: { kind: string; label: string; frac: number }[] = [];
+  if (male > 0 && female > 0) { secs.push({ kind: "male", label: "Male", frac: maleRatio }); secs.push({ kind: "female", label: "Female", frac: 1 - maleRatio }); }
+  else if (female > 0) secs.push({ kind: "female", label: "Female", frac: 1 });
+  else if (male > 0) secs.push({ kind: "male", label: "Male", frac: 1 });
+  else secs.push({ kind: "male", label: "Wardrobe", frac: 1 });
+  if (kids > 0) { const kf = Math.min(0.32, 0.16 * kids); secs.forEach(s => s.frac *= (1 - kf)); secs.push({ kind: "kids", label: "Kids", frac: kf }); }
+  let x = 0; const sections: any[] = [];
+  for (const sec of secs) {
+    const secW = Math.round(width * sec.frac);
+    const n = wardClamp(Math.round(secW / S.colTarget), 1, 4);
+    const colW = secW / n;
+    const recipes = wardSectionRecipes(sec.kind, n, strategy, L);
+    const columns = recipes.map((r, i) => ({ x: Math.round(x + i * colW), w: Math.round(colW), recipe: r, cells: wardColumn(r, usableH).map(c => ({ ...c, color: WARD_COLORS[c.kind] || "#cbd5e1" })) }));
+    sections.push({ kind: sec.kind, label: sec.label, x: Math.round(x), width: secW, columns });
+    x += secW;
+  }
+  const allCells = sections.flatMap((s: any) => s.columns.flatMap((c: any) => c.cells));
+  const cnt = (pred: (k: string) => boolean) => allCells.filter((c: any) => pred(c.kind)).length;
+  const stats = {
+    hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"),
+    shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"),
+    drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"),
+    shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"),
+    columns: sections.reduce((a: number, s: any) => a + s.columns.length, 0), totalItems: allCells.length,
+  };
+  const label = strategy === "maxHanging" ? "Max Hanging" : strategy === "maxFolding" ? "Max Folding" : "Balanced";
+  return { id: strategy, label, strategy, width, height, depth, plinth: S.plinth, hasLoft, loftH, loftDepth: S.loftDepth, usableH, sections, stats };
+}
+function wardReports(opt: any): any {
+  const S = WARDROBE_STD, sqft = (mm2: number) => mm2 / 92903;
+  const H = opt.height, D = opt.depth, W = opt.width;
+  const cut: { part: string; size: string; qty: number }[] = [];
+  let boardMm2 = 0;
+  const add = (part: string, w: number, h: number, qty: number) => { if (qty <= 0) return; cut.push({ part, size: Math.round(w) + " × " + Math.round(h) + " mm", qty }); boardMm2 += w * h * qty; };
+  const totalCols = opt.sections.reduce((a: number, s: any) => a + s.columns.length, 0) || 1;
+  let shutters = 0, drawerFronts = 0, shelfCount = 0, partitions = 0, hangRods = 0;
+  for (const sec of opt.sections) {
+    partitions += Math.max(0, sec.columns.length - 1);
+    for (const col of sec.columns) {
+      shutters++;
+      for (const cell of col.cells) {
+        if (cell.kind === "shelf" || cell.kind === "handbag" || cell.kind === "shoe" || cell.kind === "kidsShelf") shelfCount++;
+        else if (cell.kind === "drawer" || cell.kind === "jewellery" || cell.kind === "cosmetics") drawerFronts++;
+        else if (cell.kind.toLowerCase().indexOf("hang") >= 0 || cell.kind === "saree" || cell.kind === "dress" || cell.kind === "lehenga") hangRods++;
+      }
+    }
+  }
+  add("Side panel", D, H, 2);
+  add("Top / bottom", W, D, 2);
+  add("Vertical partition", D, opt.usableH, partitions);
+  add("Shelf", W / totalCols, D - 20, shelfCount);
+  add("Drawer front", W / totalCols, S.drawerH, drawerFronts);
+  if (opt.hasLoft) add("Loft shelf", W, opt.loftDepth, 1);
+  add("Shutter", W / shutters, H, shutters);
+  const backSqft = sqft(W * H), boardSqft = sqft(boardMm2);
+  const hardware = [
+    { item: "Soft-close hinges (110°)", qty: shutters * 3 },
+    { item: "Tandem drawer channels (pairs)", qty: drawerFronts },
+    { item: "Handles (profile / long)", qty: shutters + drawerFronts },
+    { item: "Hanging rods", qty: hangRods },
+    { item: "Safe locker with key", qty: opt.stats.accessories > 0 ? 1 : 0 },
+    { item: "LED sensor strip (m)", qty: 2 },
+    { item: "Mirror (full-height)", qty: 1 },
+  ].filter(h => h.qty > 0);
+  const material = { carcass: S.carcass, back: S.back, shutter: "18mm ply / MDF / laminate", edgeBand: S.edgeBand, drawer: S.drawerBox, hinge: S.hinge, handle: S.handle };
+  const cost = Math.round((boardSqft * 190 + backSqft * 70 + drawerFronts * 850 + shutters * 3 * 55 + hangRods * 160) / 500) * 500;
+  return { cut, hardware, material, boardSqft: Math.round(boardSqft), backSqft: Math.round(backSqft), shutters, drawerFronts, shelfCount, hangRods, partitions, estCostInr: cost };
+}
+function wardScorecard(opt: any): any {
+  const s = opt.stats, tot = Math.max(1, s.totalItems), cl = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
+  const hangingCap = cl(45 + (s.hanging / tot) * 130), shelfCap = cl(45 + (s.shelves / tot) * 150), drawerCap = cl(45 + (s.drawers / tot) * 150);
+  const storageEff = cl(78 + (opt.hasLoft ? 8 : 0) + (tot > 10 ? 6 : 0));
+  const spaceUtil = cl(82 + (opt.hasLoft ? 8 : 0) + (opt.strategy === "maxFolding" ? 4 : 0));
+  const easeOfUse = cl(opt.strategy === "balanced" ? 94 : opt.strategy === "maxHanging" ? 88 : 82);
+  const mfg = cl(opt.strategy === "maxFolding" ? 62 : opt.strategy === "balanced" ? 45 : 34);
+  const overall = cl(storageEff * 0.3 + easeOfUse * 0.25 + spaceUtil * 0.2 + (100 - mfg) * 0.15 + ((hangingCap + shelfCap + drawerCap) / 3) * 0.1);
+  return { storageEff, hangingCap, shelfCap, drawerCap, spaceUtil, easeOfUse, mfgComplexityPct: mfg, mfgComplexity: mfg < 40 ? "Low" : mfg < 60 ? "Medium" : "High", materialCostInr: (opt.reports || {}).estCostInr || 0, overallConfidence: overall };
+}
+function renderWardrobeOptionSvg(opt: any): string {
+  const S = WARDROBE_STD, padL = 70, padR = 26, padT = 60, padB = 46;
+  const scale = Math.max(0.05, Math.min((560 - padL - padR) / opt.width, (440 - padT - padB) / opt.height));
+  const wpx = opt.width * scale, hpx = opt.height * scale, W = Math.round(wpx + padL + padR), Hh = Math.round(hpx + padT + padB);
+  const x0 = padL, y0 = padT, xOf = (mm: number) => x0 + mm * scale;
+  const esc = (t: string) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif">`);
+  p.push(`<rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
+  p.push(`<text x="${x0}" y="20" fill="#0f172a" font-size="13" font-weight="700">${esc(opt.label)}</text>`);
+  p.push(`<text x="${W - padR}" y="20" fill="#64748b" font-size="10" text-anchor="end">${opt.width}×${opt.height}×${opt.depth} mm</text>`);
+  const loftPx = opt.hasLoft ? opt.loftH * scale : 0, plinthPx = S.plinth * scale, floorY = y0 + hpx - plinthPx, usableTopY = y0 + loftPx;
+  for (const sec of opt.sections) {
+    const sx = xOf(sec.x), sw = sec.width * scale, tint = sec.kind === "male" ? "#eff6ff" : sec.kind === "female" ? "#fdf2f8" : "#fefce8";
+    p.push(`<rect x="${sx.toFixed(1)}" y="${y0}" width="${sw.toFixed(1)}" height="${hpx.toFixed(1)}" fill="${tint}"/>`);
+    const hc = sec.kind === "male" ? "#2563eb" : sec.kind === "female" ? "#db2777" : "#ca8a04";
+    p.push(`<text x="${(sx + sw / 2).toFixed(1)}" y="${y0 - 8}" fill="${hc}" font-size="11" font-weight="700" text-anchor="middle">${esc(sec.label)}</text>`);
+  }
+  for (const sec of opt.sections) for (const col of sec.columns) {
+    const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
+    for (const cell of col.cells) {
+      const ch = cell.hMM * scale, yt = yb - ch;
+      p.push(`<rect x="${(cx + 1).toFixed(1)}" y="${yt.toFixed(1)}" width="${(cw - 2).toFixed(1)}" height="${(ch - 1).toFixed(1)}" fill="${cell.color}33" stroke="${cell.color}" stroke-width="0.7"/>`);
+      if (ch > 12) { p.push(`<text x="${(cx + cw / 2).toFixed(1)}" y="${(yt + ch / 2 + 2).toFixed(1)}" fill="#334155" font-size="7" text-anchor="middle">${esc(cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label)}</text>`); if (ch > 24) p.push(`<text x="${(cx + cw / 2).toFixed(1)}" y="${(yb - 3).toFixed(1)}" fill="#94a3b8" font-size="5.5" text-anchor="middle">${cell.hMM} mm</text>`); }
+      yb = yt;
+    }
+    p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#94a3b8" stroke-width="0.7"/>`);
+  }
+  if (opt.hasLoft) { p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="${WARD_COLORS.loft}55" stroke="#a16207" stroke-width="0.8"/>`); p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(y0 + loftPx / 2 + 3).toFixed(1)}" fill="#a16207" font-size="9" font-weight="600" text-anchor="middle">LOFT ${opt.loftH} mm</text>`); }
+  p.push(`<rect x="${x0.toFixed(1)}" y="${floorY.toFixed(1)}" width="${wpx.toFixed(1)}" height="${plinthPx.toFixed(1)}" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>`);
+  p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${hpx.toFixed(1)}" fill="none" stroke="#334155" stroke-width="1.4"/>`);
+  for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${dx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#475569" stroke-width="1.6"/>`); }
+  const dimX = x0 - 34;
+  const vseg = (yA: number, yB: number, txt: string) => { const ym = (yA + yB) / 2; p.push(`<line x1="${dimX}" y1="${yA.toFixed(1)}" x2="${dimX}" y2="${yB.toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><line x1="${dimX - 3}" y1="${yA.toFixed(1)}" x2="${dimX + 3}" y2="${yA.toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><line x1="${dimX - 3}" y1="${yB.toFixed(1)}" x2="${dimX + 3}" y2="${yB.toFixed(1)}" stroke="#0891b2" stroke-width="0.8"/><text x="${dimX - 5}" y="${(ym + 2).toFixed(1)}" fill="#0e7490" font-size="7" text-anchor="middle" transform="rotate(-90 ${(dimX - 5).toFixed(1)} ${ym.toFixed(1)})">${esc(txt)}</text>`); };
+  if (opt.hasLoft) vseg(y0, usableTopY, opt.loftH + "");
+  vseg(usableTopY, floorY, opt.usableH + "");
+  vseg(floorY, y0 + hpx, S.plinth + "");
+  const dimY = y0 - 26;
+  const hseg = (xA: number, xB: number, txt: string) => p.push(`<line x1="${xA.toFixed(1)}" y1="${dimY}" x2="${xB.toFixed(1)}" y2="${dimY}" stroke="#0891b2" stroke-width="0.8"/><line x1="${xA.toFixed(1)}" y1="${dimY - 3}" x2="${xA.toFixed(1)}" y2="${dimY + 3}" stroke="#0891b2" stroke-width="0.8"/><line x1="${xB.toFixed(1)}" y1="${dimY - 3}" x2="${xB.toFixed(1)}" y2="${dimY + 3}" stroke="#0891b2" stroke-width="0.8"/><text x="${((xA + xB) / 2).toFixed(1)}" y="${dimY - 3}" fill="#0e7490" font-size="6.5" text-anchor="middle">${esc(txt)}</text>`);
+  for (const sec of opt.sections) for (const col of sec.columns) hseg(xOf(col.x), xOf(col.x + col.w), Math.round(col.w) + "");
+  p.push(`</svg>`);
+  return p.join("");
+}
+function wardrobeOptions(input: any): any {
+  const options = ["maxHanging", "balanced", "maxFolding"].map((st) => {
+    const o = buildWardrobeOption(st, input);
+    o.reports = wardReports(o);
+    o.scorecard = wardScorecard(o);
+    o.svg = renderWardrobeOptionSvg(o);
+    return o;
+  });
+  const ranked = options.map((o) => ({ id: o.id, label: o.label, score: o.scorecard.overallConfidence })).sort((a, b) => b.score - a.score);
+  const bestIndex = options.findIndex((o) => o.id === ranked[0].id);
+  return {
+    options,
+    legend: WARD_LEGEND.map(([k, l]) => ({ kind: k, color: WARD_COLORS[k], label: l })),
+    recommendation: { bestId: ranked[0].id, bestLabel: ranked[0].label, bestIndex, ranked },
+    meta: { finishes: WARDROBE_STD.finishes, std: WARDROBE_STD },
+  };
+}
+app.get("/api/wardrobe/meta", (c) => c.json({
+  data: {
+    templates: Object.entries(WARD_TEMPLATES).map(([k, v]) => ({ key: k, ...v })),
+    legend: WARD_LEGEND.map(([k, l]) => ({ kind: k, color: WARD_COLORS[k], label: l })),
+    finishes: WARDROBE_STD.finishes, std: WARDROBE_STD,
+  },
+}));
+app.post("/api/wardrobe/options", async (c) => {
+  try { const body = await c.req.json().catch(() => ({})); return c.json({ data: wardrobeOptions(body || {}) }); }
+  catch (err) { console.error(err); return c.json({ error: "Wardrobe options generation failed" }, 500); }
 });
 
 app.get("/mkw-logo.jpg", (c) => { try { const buf = fsRead("mkw-logo.jpg"); c.header("Content-Type", "image/jpeg"); c.header("Cache-Control", "public, max-age=86400"); return c.body(buf); } catch { return c.json({ error: "logo not found" }, 404); } });
