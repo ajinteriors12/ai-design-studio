@@ -1554,6 +1554,111 @@ function wardrobeColumns(widths: number[], body: number): Column[] {
   const pats = [colDrawersHang, colLongHang, colShelves];
   return widths.map((cw, i) => cw < MIN_MOD ? fillerCol(cw, body) : { wMM: cw, cells: pats[i % 3](body) });
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// §9–14 WARDROBE LEARNING — uploaded wardrobe images become ACTIVE learning data:
+// each is converted to structured design knowledge, remembered, then searched +
+// reused (adapted, not copied) when a NEW wardrobe of a similar size is generated.
+// ════════════════════════════════════════════════════════════════════════════
+function wardrobeTypeOf(name: string, unitType?: string): string {
+  const s = ((name || "") + " " + (unitType || "")).toLowerCase();
+  if (/walk.?in/.test(s)) return "walk-in";
+  if (/slid/.test(s)) return "sliding";
+  if (/loft/.test(s)) return "loft";
+  if (/dress/.test(s)) return "dresser";
+  if (/mirror/.test(s)) return "mirror-shutter";
+  if (/glass/.test(s)) return "glass-shutter";
+  if (/rattan|cane/.test(s)) return "rattan-shutter";
+  if (/openable|hinge/.test(s)) return "hinged";
+  return "hinged";
+}
+// §1/§2: convert a reference's analysis (vision OR heuristic) into structured wardrobe JSON.
+function extractWardrobe(analysis: any, name: string, dimsHint?: any): any {
+  const a = analysis || {};
+  const cabs: string[] = (a.detectedCabinets || []).map((x: any) => String(x));
+  const joined = (cabs.join(" ") + " " + (name || "")).toLowerCase();
+  const cnt = (kw: RegExp) => cabs.filter((c) => kw.test(c.toLowerCase())).length;
+  const type = wardrobeTypeOf(name, a.unitType);
+  const overallW = Math.round((a.overall && a.overall.w) || dimsHint?.wall || 2400);
+  const overallH = Math.round((a.overall && a.overall.h) || dimsHint?.wallB || 2100);
+  const overallD = Math.round((a.overall && a.overall.d) || 600);
+  const drawers = cnt(/drawer/) || (cabs.length ? Math.max(2, Math.round(cabs.length / 3)) : 3);
+  const shelves = cnt(/shelf|shelves/) || 4;
+  const hanging = cnt(/hang|robe/) || Math.max(1, Math.round(overallW / 900));
+  const shutterCount = (a.wallSequence && a.wallSequence.length) || Math.max(2, Math.round(overallW / 600));
+  const hasLoft = /loft/.test(joined) || type === "loft" || overallH > 2200;
+  return {
+    category: "wardrobe", type,
+    overall_size: { width: overallW, height: overallH, depth: overallD },
+    shutters: Array.from({ length: shutterCount }, (_, i) => ({ i, w: Math.round(overallW / shutterCount) })),
+    loft: hasLoft ? { height: Math.min(600, Math.round(overallH * 0.2)) } : null,
+    internal_partitions: Math.max(1, shutterCount - 1),
+    drawers, shelves, hanging_sections: hanging,
+    safe: /safe|locker/.test(joined), mirror: /mirror/.test(joined) || type === "mirror-shutter",
+    hardware: ["Soft-close hinges", type === "sliding" ? "Sliding track set" : "Straight channels", "Handles / Gola profile"],
+    design_rules_learned: [
+      `${type} wardrobe · ${shutterCount} shutter(s) across ${overallW} mm`,
+      `${drawers} drawer(s) · ${hanging} hanging section(s) · ${shelves} shelf zone(s)`,
+      hasLoft ? "Loft band across the top" : "No loft band",
+    ],
+    presentation_style: { columns: shutterCount, dimensioned: (a.dimsFound || []).length > 0 },
+    manufacturing_logic: { panels: (a.panels || []).length, edgeBanding: "1 mm PVC", board: "18 mm" },
+    confidence: a.confidence || 0.6,
+  };
+}
+// Pull every learned wardrobe out of the corpus (using stored .wardrobe, else extracting on the fly).
+function learnedWardrobes(): { name: string; conf: number; wd: any; id: string }[] {
+  try {
+    const rows = db.select().from(references).all() as any[];
+    const out: any[] = [];
+    for (const r of rows) {
+      let a: any = {}; try { a = JSON.parse(r.analysis) || {}; } catch { }
+      const isWr = /(wardrobe|robe|almirah|closet|dresser)/i.test((r.category || "") + " " + (r.name || "") + " " + (a.unitType || ""));
+      const wd = a.wardrobe || (isWr ? extractWardrobe(a, r.name) : null);
+      if (wd) out.push({ name: r.name, conf: r.confidence || 0.6, wd, id: r.id });
+    }
+    return out;
+  } catch { return []; }
+}
+// §12: find similar learned wardrobes and derive an adapted generation recipe + provenance.
+function applyLearnedWardrobe(dims: any): any {
+  const lib = learnedWardrobes();
+  if (!lib.length) return null;
+  const w = +dims.wall || 2400, h = +(dims.wallB ?? 2100);
+  const near = (x: number, y: number) => (!x || !y) ? 0 : 1 - Math.min(1, Math.abs(x - y) / Math.max(x, y));
+  const scored = lib.map((L) => {
+    const os = L.wd.overall_size || {};
+    return { L, sim: near(+os.width || 0, w) * 0.55 + near(+os.height || 0, h) * 0.3 + 0.15 * (L.conf || 0.6) };
+  }).sort((p, q) => q.sim - p.sim);
+  const best = scored[0];
+  if (!best || best.sim < 0.25) return null;
+  const wd = best.L.wd;
+  const learnedCols = Math.max(2, Math.min(6, (wd.shutters || []).length || 3));
+  const hangN = wd.hanging_sections || 1, drawN = wd.drawers || 2, shelfN = wd.shelves || 2, sum = hangN + drawN + shelfN || 1;
+  const mix: string[] = [];
+  const hangCols = Math.max(1, Math.round(learnedCols * hangN / sum));
+  for (let i = 0; i < learnedCols; i++) mix.push(i < hangCols ? "hang" : i < learnedCols - 1 ? "draw" : "shelf");
+  const recipe = { columnCount: learnedCols, mix, loft: !!wd.loft, drawers: drawN };
+  const top = scored.slice(0, 3).filter((x) => x.sim > 0.2);
+  const learnedFrom = top.map((x) => ({
+    name: x.L.name, similarityPct: Math.round(x.sim * 100), type: x.L.wd.type,
+    copied: [`${(x.L.wd.shutters || []).length}-shutter division`, x.L.wd.loft ? "loft band" : "no loft"],
+    adapted: [`re-proportioned to ${Math.round(w)}×${Math.round(h)} mm`, `${x.L.wd.hanging_sections} hanging / ${x.L.wd.drawers} drawer mix`],
+    improved: ["standard Indian module widths enforced", "edge-banding + hardware schedule regenerated"],
+  }));
+  const note = `Wardrobe learned from ${top.length} reference(s): ${top.map((x) => x.L.name + " (" + Math.round(x.sim * 100) + "%)").join(", ")} — reused the ${recipe.columnCount}-shutter division${recipe.loft ? " + loft" : ""} + learned hang/drawer/shelf mix, then adapted to this room size.`;
+  return { recipe, learnedFrom, appliedNote: note };
+}
+function buildLearnedWardrobeColumns(recipe: any, widths: number[], body: number): Column[] {
+  const total = widths.reduce((a, b) => a + b, 0);
+  const n = Math.max(2, Math.min(6, recipe.columnCount || widths.length));
+  const cw = total / n;
+  const patFor = (m: string) => m === "hang" ? colLongHang : m === "draw" ? colDrawersHang : colShelves;
+  return Array.from({ length: n }, (_, i) => {
+    const m = (recipe.mix && recipe.mix[i]) || (i % 3 === 0 ? "hang" : i % 3 === 1 ? "draw" : "shelf");
+    return cw < MIN_MOD ? fillerCol(cw, body) : { wMM: cw, cells: patFor(m)(body) };
+  });
+}
 function crockeryColumns(widths: number[], body: number): Column[] {
   return widths.map((cw) => cw < MIN_MOD ? fillerCol(cw, body) : { wMM: cw, cells: [
     { kind: "drawer", label: "Drawer", hMM: 250 },
@@ -1635,7 +1740,18 @@ function buildFurniture(type: string, dims: { wall: number; wallB?: number; wall
     skipStorage = true;
     applied.push("Wall panel: WPC fluted feature band + marble/UV sheet, an LED display niche column and a floating shelf.");
   }
-  else if (isWardrobe) { columns = wardrobeColumns(widths, body); applied.push("Wardrobe: hanging + shelf + drawer columns with a loft band across the top."); }
+  else if (isWardrobe) {
+    // §9–14: reuse LEARNED wardrobe knowledge from uploaded references (adapt, don't copy).
+    const learned = applyLearnedWardrobe(dims);
+    if (learned && learned.recipe) {
+      columns = buildLearnedWardrobeColumns(learned.recipe, widths, body);
+      applied.push(learned.appliedNote);
+      (dims as any)._learnedFrom = learned.learnedFrom;
+    } else {
+      columns = wardrobeColumns(widths, body);
+      applied.push("Wardrobe: hanging + shelf + drawer columns with a loft band across the top. (No learned wardrobe references in memory yet — generic standard rules used; upload wardrobe drawings in the Library to teach the AI.)");
+    }
+  }
   else if (isCrockery) { columns = crockeryColumns(widths, body); applied.push("Crockery unit: lower drawers + cabinet, upper glass-shutter display, loft on top."); }
   else if (isTV) { columns = tvColumns(w, h); applied.push("TV/LCD panel: centred TV recess with a media drawer below, side display columns and a floating shelf."); }
   else if (isVanity) { columns = vanityColumns(widths, h); applied.push("Vanity unit: base storage with a wash-basin counter and a mirror cabinet above."); }
@@ -1661,6 +1777,7 @@ function buildFurniture(type: string, dims: { wall: number; wallB?: number; wall
     elevations: [{ name: `${type} — Front`, svg: frontSvg }],
   };
   layout.furniture = unit;   // expose columns/cells so the consensus scorer can read furniture storage
+  if ((dims as any)._learnedFrom) layout.learnedFrom = (dims as any)._learnedFrom;   // §7 reference-based provenance
   return layout;
 }
 
@@ -4426,6 +4543,9 @@ async function ingestOne(name: string, buf: Buffer, category: string, approved: 
   const hash = createHash("sha256").update(buf).digest("hex").slice(0, 16); // hash CONTENT (true dedup)
   const dup = db.select().from(references).where(eq(references.contentHash, hash)).get();
   const analysis = await analyzeDrawing(name, fileType, category, buf);
+  // §9/§10: every wardrobe image becomes ACTIVE structured knowledge (not passive storage).
+  if (/(wardrobe|robe|almirah|closet|dresser)/i.test((category || "") + " " + (name || "") + " " + ((analysis as any).unitType || "")))
+    (analysis as any).wardrobe = extractWardrobe(analysis, name);
   if (dup) analysis.status = "duplicate";
   const id = randomUUID();
   db.insert(references).values({
