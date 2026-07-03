@@ -5510,6 +5510,97 @@ const frontendHTML = `<!DOCTYPE html>
     const STD_C = ${JSON.stringify(STD)};
     const FAB_MATERIALS_C = ${JSON.stringify(["18mm BWR Plywood", "18mm MR Plywood", "18mm HDHMR", "18mm MDF", "18mm Particle Board", "16mm BWR Plywood", "12mm Plywood", "6mm Back Panel", "4mm Back Laminate"])};
 
+    // ── Large-room 3D performance layer (WebGPU capability probe + adaptive quality) ──
+    // THREE r128 has no WebGPURenderer, so this keeps the WebGLRenderer but: (a) probes the
+    // real GPU via navigator.gpu, (b) picks an initial quality tier from scene complexity +
+    // GPU tier, and (c) adapts pixelRatio / shadow map / SSAO live from measured FPS so big
+    // U-kitchens and multi-run rooms stay interactive. A later THREE upgrade can slot a real
+    // WebGPURenderer in behind the same probe (Stage 2) without touching call sites.
+    const ADS_PERF = (function () {
+      const st = { probed: false, webgpu: false, tier: "unknown", name: "WebGL" };
+      const lc = (s) => (s || "").toString().toLowerCase();
+      async function probe() {
+        if (st.probed) return st;
+        st.probed = true;
+        try {
+          if (navigator.gpu && navigator.gpu.requestAdapter) {
+            const ad = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+            if (ad) {
+              st.webgpu = true;
+              let info = {}; try { info = ad.info || (ad.requestAdapterInfo ? await ad.requestAdapterInfo() : {}); } catch (e) {}
+              const desc = lc((info.description || "") + " " + (info.vendor || "") + " " + (info.architecture || ""));
+              if (/(software|swiftshader|lavapipe|llvmpipe|microsoft basic|warp)/.test(desc)) st.tier = "low";
+              else if (/(nvidia|geforce|radeon|rx |arc |apple|adreno 7|adreno 6|mali-g7)/.test(desc)) st.tier = "high";
+              else st.tier = "mid";
+              st.name = "WebGPU" + (info.vendor ? " · " + info.vendor : "");
+            }
+          }
+        } catch (e) {}
+        if (!st.webgpu) {
+          try {
+            const cv = document.createElement("canvas"); const gl = cv.getContext("webgl2") || cv.getContext("webgl");
+            if (gl) {
+              const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+              const r = (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : "") + ""; const rl = lc(r);
+              st.name = "WebGL" + (r ? " · " + r.split("(")[0].trim().slice(0, 22) : "");
+              if (/(swiftshader|software|llvmpipe|basic render|angle.*vulkan.*llvm)/.test(rl)) st.tier = "low";
+              else if (/(nvidia|geforce|radeon|rx |arc |apple m|adreno 7|adreno 6|mali-g7)/.test(rl)) st.tier = "high";
+              else st.tier = "mid";
+            } else st.tier = "low";
+          } catch (e) { st.tier = "mid"; }
+        }
+        try { window.__adsGPU = st; } catch (e) {}
+        return st;
+      }
+      // initial quality from scene complexity (cabinet count + room span) and GPU tier
+      function quality(cabCount, spanMm, tier) {
+        const heavy = (cabCount || 0) + Math.max(0, (spanMm || 0) - 2400) / 800;   // >~14 = large room
+        const t = tier || st.tier || "mid";
+        const prCap = t === "low" ? 1 : t === "high" ? 2 : 1.5;
+        let pr = prCap, shadow = 4096, ssao = true;
+        if (heavy >= 22 || t === "low") { pr = Math.min(prCap, 1); shadow = 1024; ssao = false; }
+        else if (heavy >= 14) { pr = Math.min(prCap, 1.25); shadow = 2048; ssao = t !== "low"; }
+        else if (heavy >= 8) { pr = Math.min(prCap, 1.5); shadow = 2048; ssao = true; }
+        return { pixelRatio: pr, shadowMap: shadow, ssao: ssao, prCap: prCap, heavy: Math.round(heavy) };
+      }
+      // live FPS controller: call tick(now) each frame; onDown/onUp fire when quality steps.
+      function controller(onDown, onUp) {
+        let frames = 0, acc = 0, last = 0, level = 0, cool = 0;
+        return function tick(now) {
+          if (!last) { last = now; return; }
+          acc += now - last; last = now; frames++;
+          if (cool > 0) cool--;
+          if (frames >= 30) {
+            const fps = acc > 0 ? 1000 * frames / acc : 60; frames = 0; acc = 0;
+            try { window.__adsFPS = Math.round(fps); } catch (e) {}
+            if (fps < 38 && level < 3 && cool === 0) { level++; cool = 60; if (onDown) onDown(level, fps); }
+            else if (fps > 57 && level > 0 && cool === 0) { level--; cool = 90; if (onUp) onUp(level, fps); }
+          }
+        };
+      }
+      return { probe: probe, quality: quality, controller: controller, state: st };
+    })();
+    try { ADS_PERF.probe(); } catch (e) {}
+
+    // §Perf badge — live GPU capability + fps + current adaptive quality level (self-contained: polls
+    // window globals set by ADS_PERF / the Room3D loop, so it adds no state to the 3D component).
+    function PerfBadge() {
+      const [s, setS] = useState({ fps: 0, gpu: null, level: 0 });
+      useEffect(() => {
+        const id = setInterval(() => setS({ fps: window.__adsFPS || 0, gpu: window.__adsGPU || null, level: window.__adsPerfLevel || 0 }), 1000);
+        return () => clearInterval(id);
+      }, []);
+      const g = s.gpu || {};
+      const col = g.webgpu ? "#a78bfa" : "#67e8f9";
+      const q = ["Full", "No SSAO", "Balanced", "Fast"][s.level] || "Full";
+      return (
+        <div style={{ position: "absolute", top: 8, right: 8, background: "rgba(15,23,42,0.72)", color: "#fff", borderRadius: 6, padding: "3px 8px", fontSize: 10, lineHeight: 1.5, fontFamily: "ui-monospace,monospace", pointerEvents: "none", zIndex: 5 }} title="Adaptive 3D performance (WebGPU probe · live FPS · quality tier)">
+          <div><span style={{ color: col, fontWeight: 700 }}>{g.webgpu ? "WebGPU" : "WebGL"}</span>{g.tier && g.tier !== "unknown" ? " · " + g.tier + " tier" : ""}</div>
+          <div>{s.fps ? s.fps + " fps" : "measuring…"} · {q}</div>
+        </div>
+      );
+    }
+
     // Rasterize an SVG string to a PNG data URL (white background, 2x for crisp print).
     const svgToPng = (svg, scale) => new Promise((resolve, reject) => {
       const wm = svg.match(/width="(\\d+)"/), hm = svg.match(/height="(\\d+)"/);
@@ -6703,7 +6794,11 @@ const frontendHTML = `<!DOCTYPE html>
         const scene = new THREE.Scene(); scene.background = new THREE.Color(0xeef3fa);
         const camera = new THREE.PerspectiveCamera(50, W / H, 50, 80000);   // tight near/far → depth-buffer precision (no z-fighting "shiver")
         const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-        renderer.setSize(W, H); renderer.setPixelRatio(window.devicePixelRatio || 1);
+        // §Perf: cap pixelRatio by GPU tier + render ON DEMAND (empty room has no animation) — dirty flips
+        // on orbit/drag; a short warm-up burst covers async sprite/texture loads. Big idle-CPU saving.
+        const QShell = ADS_PERF.quality(0, Math.max(+room.width || 0, +room.depth || 0), (window.__adsGPU && window.__adsGPU.tier));
+        renderer.setSize(W, H); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, QShell.pixelRatio));
+        let dirty = true, warm = 45;   // §Perf on-demand render state (see loop below)
         renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         host.innerHTML = ""; host.appendChild(renderer.domElement);
         scene.add(new THREE.HemisphereLight(0xffffff, 0x90a0b5, 1.0));
@@ -6760,7 +6855,7 @@ const frontendHTML = `<!DOCTYPE html>
         controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };   // 6.12 CAD navigation
         if (camRef && camRef.current) { camera.position.fromArray(camRef.current.pos); controls.target.fromArray(camRef.current.tgt); } else { controls.target.set(cx, Ht * 0.4, cz); }
         controls.update();
-        controls.addEventListener("change", () => { if (camRef) camRef.current = { pos: camera.position.toArray(), tgt: controls.target.toArray() }; });   // 6.11 persist viewport
+        controls.addEventListener("change", () => { dirty = true; if (camRef) camRef.current = { pos: camera.position.toArray(), tgt: controls.target.toArray() }; });   // 6.11 persist viewport (+ §Perf: request a redraw)
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
         const setMouse = (ev) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((ev.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((ev.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, camera); };
         const pickHit = (ev) => { setMouse(ev); return ray.intersectObjects([...wallMeshes, floor])[0] || null; };
@@ -6783,7 +6878,7 @@ const frontendHTML = `<!DOCTYPE html>
           setMouse(ev); const wm = wallMeshes.find((w) => w.userData.wall === dragSt.wall); const hit = wm && ray.intersectObject(wm)[0]; if (!hit) return;
           const along = (hit.point.x - dragSt.cx) * dragSt.ax + (hit.point.z - dragSt.cz) * dragSt.az;
           let pos = Math.round((along + dragSt.len / 2 - dragSt.sw / 2) / 10) * 10; pos = Math.max(0, Math.min(pos, Math.round(dragSt.len - dragSt.sw)));
-          const a2 = -dragSt.len / 2 + pos + dragSt.sw / 2; dragSt.mesh.position.set(dragSt.cx + dragSt.ax * a2, dragSt.yc, dragSt.cz + dragSt.az * a2); dragSt.pos = pos;
+          const a2 = -dragSt.len / 2 + pos + dragSt.sw / 2; dragSt.mesh.position.set(dragSt.cx + dragSt.ax * a2, dragSt.yc, dragSt.cz + dragSt.az * a2); dragSt.pos = pos; dirty = true;
         };
         const onPointerUp = () => { if (!dragSt) return; controls.enabled = true; const d = dragSt; dragSt = null; if (d.moved && d.pos != null && onMoveStruct) onMoveStruct(d.id, d.pos); if (onSelectStruct) onSelectStruct(d.id); };
         const onClick = (ev) => {
@@ -6801,8 +6896,10 @@ const frontendHTML = `<!DOCTYPE html>
         const el = renderer.domElement;
         el.addEventListener("pointerdown", onPointerDown); el.addEventListener("pointermove", onPointerMove); window.addEventListener("pointerup", onPointerUp);
         el.addEventListener("click", onClick); el.addEventListener("dblclick", onDbl); el.addEventListener("contextmenu", onCtx);
-        let raf; const loop = () => { raf = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); }; loop();
-        const onResize = () => { const w2 = host.clientWidth || W; camera.aspect = w2 / H; camera.updateProjectionMatrix(); renderer.setSize(w2, H); };
+        // §Perf: on-demand render — only draw when the scene is dirty (orbit / drag / a short warm-up
+        // burst for async sprite + icon-texture loads). Idle = zero GPU instead of 60 redraws/sec.
+        let raf; const loop = () => { raf = requestAnimationFrame(loop); if (dirty || warm > 0) { if (warm > 0) warm--; controls.update(); renderer.render(scene, camera); dirty = false; } }; loop();
+        const onResize = () => { const w2 = host.clientWidth || W; camera.aspect = w2 / H; camera.updateProjectionMatrix(); renderer.setSize(w2, H); dirty = true; };
         window.addEventListener("resize", onResize);
         return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); window.removeEventListener("pointerup", onPointerUp); el.removeEventListener("pointerdown", onPointerDown); el.removeEventListener("pointermove", onPointerMove); el.removeEventListener("click", onClick); el.removeEventListener("dblclick", onDbl); el.removeEventListener("contextmenu", onCtx); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
       }, [room, selectedWall, structures, points, markType, selectedObj]);
@@ -7234,8 +7331,13 @@ const frontendHTML = `<!DOCTYPE html>
         if (prInvalidateRef.current) prInvalidateRef.current();
         const scene = new THREE.Scene(); scene.background = new THREE.Color(L.bg);
         const camera = new THREE.PerspectiveCamera(48, W / H, 50, 80000);   // tight near/far → depth-buffer precision (no z-fighting "shiver")
+        // §Perf: pick an initial quality tier from scene complexity (cabinet count + room span) and the
+        // probed GPU tier — large rooms cap pixelRatio + shrink the shadow map so they stay interactive.
+        const cabCount = (runs || []).reduce((n, r) => n + ((r.base || []).length) + ((r.wallCabs || []).length), 0);
+        const roomSpan = Math.max(+dims.wall || 0, +(dims.wallB || 0), +(dims.wallC || 0));
+        const Q = ADS_PERF.quality(cabCount, roomSpan, (window.__adsGPU && window.__adsGPU.tier));
         const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });   // preserve buffer → canvas.toDataURL render export
-        renderer.setSize(W, H); renderer.setPixelRatio(window.devicePixelRatio || 1);
+        renderer.setSize(W, H); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Q.pixelRatio));
         renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;            // §4.17 soft shadows
         renderer.outputEncoding = THREE.sRGBEncoding;                 // gamma-correct colour
         renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.9;   // filmic, slightly under so whites don't blow (room walls/ceiling bounce a lot of light)
@@ -7243,7 +7345,7 @@ const frontendHTML = `<!DOCTYPE html>
         // Realistic-but-crisp lighting: LOW ambient (the white room already bounces plenty) + a STRONG warm key
         // light with soft shadows = depth + contrast (too much ambient = the washed look).
         scene.add(new THREE.HemisphereLight(L.sky, L.ground, L.hemi * 0.22));   // low fill → the key light makes real lit/shadow gradients (contrast, not flat)
-        const dl = new THREE.DirectionalLight(L.dir, 1.55); dl.castShadow = true; dl.shadow.mapSize.set(4096, 4096); dl.shadow.bias = -0.0006; dl.shadow.radius = 3; scene.add(dl);
+        const dl = new THREE.DirectionalLight(L.dir, 1.55); dl.castShadow = true; dl.shadow.mapSize.set(Q.shadowMap, Q.shadowMap); dl.shadow.bias = -0.0006; dl.shadow.radius = 3; scene.add(dl);   // §Perf: shadow map scales with room size (4096→1024)
         // SUBTLE muted-gray environment: gives steel/glass/gloss realistic reflections (sparkle), but matte
         // cabinets get low envMapIntensity (below) so it does NOT wash them like the bright env did before.
         let envRT = null;
@@ -7848,7 +7950,7 @@ const frontendHTML = `<!DOCTYPE html>
         // r128 global scripts, no build. composer.render() replaces renderer.render() in the loop below.
         let composer = null;
         try {
-          if (THREE.EffectComposer && THREE.SSAOPass && THREE.RenderPass) {
+          if (Q.ssao && THREE.EffectComposer && THREE.SSAOPass && THREE.RenderPass) {   // §Perf: skip SSAO on large/low-tier scenes
             // MSAA render target → restore anti-aliasing through the composer (it was lost vs renderer.render)
             let crt = null;
             try { const dbs = renderer.getDrawingBufferSize(new THREE.Vector2()); if (THREE.WebGLMultisampleRenderTarget) { crt = new THREE.WebGLMultisampleRenderTarget(dbs.x, dbs.y); crt.samples = 8; } } catch (e2) { crt = null; }
@@ -7994,9 +8096,22 @@ const frontendHTML = `<!DOCTYPE html>
         renderer.domElement.addEventListener("pointerdown", onDown);
         renderer.domElement.addEventListener("pointermove", onMove);
         renderer.domElement.addEventListener("pointerup", onUp);
+        // §Perf: live FPS-adaptive quality. level 0=full · 1=no SSAO · 2=+lower pixelRatio · 3=lowest.
+        // Idempotent applyLevel recomputes state from the level so up/down can't drift.
+        let useComposer = !!composer;
+        const applyLevel = (level) => {
+          useComposer = (level === 0) && !!composer;
+          const steps = Math.max(0, level - 1);
+          const pr = Math.min(window.devicePixelRatio || 1, Math.max(0.75, Q.pixelRatio - 0.25 * steps));
+          renderer.setPixelRatio(pr); renderer.setSize(host.clientWidth || W, H);
+          if (composer) composer.setSize(host.clientWidth || W, H);
+          try { window.__adsPerfLevel = level; } catch (e) {}
+        };
+        const perfTick = ADS_PERF.controller(applyLevel, applyLevel);
         let raf, demoLastT = 0; const loop = () => {
           raf = requestAnimationFrame(loop);
           if (!visRef.current) return;   // hidden tab → keep the scene alive but spend zero GPU
+          perfTick(window.performance.now());
           if (tourRef.current) {   // §4.19 walkthrough: auto fly-around the room (orbit + gentle dolly/height bob)
             const e = (window.performance.now() - tourT0Ref.current) / 1000;
             const ang = e * 0.45, rad = span * (1.05 + 0.28 * Math.sin(e * 0.22)), hy = 1500 + 650 * Math.sin(e * 0.32);
@@ -8042,7 +8157,7 @@ const frontendHTML = `<!DOCTYPE html>
               else if (m.t === "spin" && m.p > 0.4) m.g.rotation.y += dtS * 1.8;
             }
           }
-          if (composer) composer.render(); else renderer.render(scene, camera);
+          if (composer && useComposer) composer.render(); else renderer.render(scene, camera);
         }; loop();
         // HD render: supersample the current view (bigger drawing buffer) → a crisp PNG, then restore.
         renderHDRef.current = (scale) => {
@@ -8231,6 +8346,7 @@ const frontendHTML = `<!DOCTYPE html>
         </div>
         <div style={{ position: "relative" }}>
           <div ref={ref} style={{ width: "100%", height: 460, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0" }} />
+          <PerfBadge />
           {/* ✨ 18.pdf §1/§8 + user feedback: the photoreal result is applied to the 3D LAYOUT VIEW
               itself — a full-viewport rendered view that stays interactive. The image lets every drag
               pass through to the live scene below; the moment you orbit (or open a door) the render is
