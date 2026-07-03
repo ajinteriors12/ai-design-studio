@@ -9479,6 +9479,31 @@ const frontendHTML = `<!DOCTYPE html>
                     <div className="mt-1 text-[11px] text-slate-400">Note: external-AI review (Phase 4) and AI image concepts (Phase 6) are optional future hooks — not enabled in this build (no API keys). Scores are computed by deterministic internal strategies.</div>
                   </div>
                 </React.Fragment>}
+                {result.scorecard && (
+                  <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-3">
+                    <h3 className="text-sm font-semibold text-indigo-700 mb-2">Confidence Scorecard — {result.scorecard.overallConfidence}% overall confidence</h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-[11px]">
+                      {[["Similarity to priors", result.scorecard.similarityPct + "%"], ["Storage efficiency", result.scorecard.storageEfficiencyPct + "%"], ["Dead space", result.scorecard.deadSpacePct + "%"], ["Accessibility", result.scorecard.accessibilityPct + "%"], ["Work triangle", result.scorecard.workTriangleScore + "/10"], ["Ventilation", result.scorecard.ventilationScore + "/10"], ["Natural light", result.scorecard.naturalLightScore + "/10"], ["Manufacturing", result.scorecard.manufacturingScorePct + "%"], ["Material use", result.scorecard.materialUtilizationPct + "%"], ["Est. cost", "₹" + (result.scorecard.estimatedCostInr || 0).toLocaleString("en-IN")], ["Difficulty", result.scorecard.difficultyLevel], ["Install time", result.scorecard.installationTimeHrs + " h"]].map((kv, i) => (
+                        <div key={i} className="bg-white rounded px-2 py-1 border border-indigo-100 flex justify-between gap-1"><span className="text-slate-500">{kv[0]}</span><span className="font-semibold text-slate-800">{kv[1]}</span></div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.learnedFrom && result.learnedFrom.length > 0 && (
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
+                    <h3 className="text-sm font-semibold text-emerald-700 mb-2">Learned from {result.learnedFrom.length} reference drawing(s)</h3>
+                    <div className="space-y-2">
+                      {result.learnedFrom.map((lf, i) => (
+                        <div key={i} className="bg-white rounded-lg border border-emerald-100 p-2 text-[11px]">
+                          <div className="flex justify-between font-semibold text-slate-800 gap-2"><span>{lf.name}{lf.type ? " · " + lf.type : ""}</span><span className="text-emerald-600 whitespace-nowrap">{lf.similarityPct}% similar</span></div>
+                          <div className="text-slate-600 mt-0.5"><span className="text-emerald-700 font-medium">Copied:</span> {(lf.copied || []).join(", ")}</div>
+                          <div className="text-slate-600"><span className="text-amber-700 font-medium">Adapted:</span> {(lf.adapted || []).join(", ")}</div>
+                          <div className="text-slate-600"><span className="text-indigo-700 font-medium">Improved:</span> {(lf.improved || []).join(", ")}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div>
                   <h3 className="text-sm font-semibold text-cyan-600 mb-1">Applied Learned Rules</h3>
                   <ul className="text-xs text-slate-700 space-y-1 list-disc pl-5">
@@ -9741,6 +9766,17 @@ const frontendHTML = `<!DOCTYPE html>
                   {a.warnings && a.warnings.length > 0 && (
                     <div className={"text-xs rounded-lg p-2 border " + (a.extractionMethod === "heuristic" ? "bg-amber-50 border-amber-300 text-amber-800" : "bg-slate-50 border-slate-200 text-slate-600")}>
                       {a.warnings.map((w, i) => <div key={i}>{a.extractionMethod === "heuristic" ? "⚠ " : "ℹ "}{w}</div>)}
+                    </div>
+                  )}
+                  {a.wardrobe && (
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3 text-xs">
+                      <div className="font-semibold text-emerald-700 mb-1.5">✓ Wardrobe image learned &amp; saved to AI memory</div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                        {[["Type", a.wardrobe.type], ["Shutters", (a.wardrobe.shutters || []).length], ["Partitions", a.wardrobe.internal_partitions], ["Drawers", a.wardrobe.drawers], ["Shelves", a.wardrobe.shelves], ["Hanging", a.wardrobe.hanging_sections], ["Loft", a.wardrobe.loft ? "Yes" : "No"], ["Mirror", a.wardrobe.mirror ? "Yes" : "No"], ["Safe", a.wardrobe.safe ? "Yes" : "No"]].map((kv, i) => (
+                          <div key={i} className="bg-white rounded px-2 py-1 border border-emerald-100 flex justify-between gap-1"><span className="text-slate-500">{kv[0]}</span><span className="font-semibold text-slate-800 capitalize">{String(kv[1])}</span></div>
+                        ))}
+                      </div>
+                      {a.wardrobe.design_rules_learned && <div className="mt-2 text-[11px] text-slate-600"><span className="font-medium text-emerald-700">Rules learned:</span> {a.wardrobe.design_rules_learned.join(" · ")}</div>}
                     </div>
                   )}
                   {(Object.keys(a.entityCounts || {}).length > 0 || (a.layers && a.layers.length > 0)) && (
