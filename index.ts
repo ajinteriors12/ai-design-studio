@@ -6193,6 +6193,13 @@ const frontendHTML = `<!DOCTYPE html>
       const seg = (name) => name.indexOf("back") >= 0 ? { x: pad, y: pad, dx: 1, dy: 0 } : name.indexOf("right") >= 0 ? { x: pad + w, y: pad, dx: 0, dy: 1 } : name.indexOf("front") >= 0 ? { x: pad, y: pad + h, dx: 1, dy: 0 } : { x: pad, y: pad, dx: 0, dy: 1 };
       const horiz = (name) => name.indexOf("back") >= 0 || name.indexOf("front") >= 0;
       const wallLen = (name) => horiz(name) ? Wd : Dp;
+      // §2: which of the 4 walls is the cursor nearest to → enables dragging an
+      // object (fridge/sink/door/…) from one wall to ANOTHER, snapping to it.
+      const wallAt = (cx, cy) => {
+        const dA = Math.abs(cy - pad), dC = Math.abs(cy - (pad + h)), dD = Math.abs(cx - pad), dB = Math.abs(cx - (pad + w));
+        const m = Math.min(dA, dB, dC, dD);
+        return m === dA ? "Wall A (back)" : m === dC ? "Wall C (front)" : m === dB ? "Wall B (right)" : "Wall D (left)";
+      };
       const svgRef = React.useRef(null);
       const [drag, setDrag] = React.useState(null);   // {kind:'struct'|'point', id, wall, width}
       const onMove = (ev) => {
@@ -6208,9 +6215,12 @@ const frontendHTML = `<!DOCTYPE html>
           const right = drag.pos0 + drag.width0;
           const pos = Math.max(0, Math.min(mm, right - MINW));
           onResizeStruct && onResizeStruct(drag.id, { pos, width: right - pos });
-        } else {                                                                  // move along the wall
-          const along = Math.max(0, Math.min(mm, WL - (drag.width || 0)));
-          if (drag.kind === "struct") onMoveStruct && onMoveStruct(drag.id, along); else onMovePoint && onMovePoint(drag.id, along);
+        } else {                                                                  // move — §2 cross-wall drag: snap to the NEAREST wall
+          const cx = ev.clientX - r.left, cy = ev.clientY - r.top;
+          const wall2 = wallAt(cx, cy), WL2 = wallLen(wall2);
+          const alongPx2 = horiz(wall2) ? (cx - pad) : (cy - pad);
+          const along = Math.max(0, Math.min(Math.round(alongPx2 / S / 10) * 10, WL2 - (drag.width || 0)));
+          if (drag.kind === "struct") onMoveStruct && onMoveStruct(drag.id, along, wall2); else onMovePoint && onMovePoint(drag.id, along, wall2);
         }
       };
       const onUp = () => setDrag(null);
@@ -6270,7 +6280,7 @@ const frontendHTML = `<!DOCTYPE html>
         );
       });
       els.push(<text key="lab" x={pad + w / 2} y={pad + h + 14} fill="#94a3b8" fontSize="9" textAnchor="middle">Top View — {Wd}×{Dp} mm · drag objects · right-click to delete</text>);
-      return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Top View (editable) — click &amp; drag doors/windows/beams/points along their wall · right-click to delete</div><svg ref={svgRef} width={w + pad * 2} height={h + pad * 2 + 18} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
+      return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Top View (editable) — drag any object across walls (snaps to nearest wall) · resize handles on selection · right-click to delete</div><svg ref={svgRef} width={w + pad * 2} height={h + pad * 2 + 18} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
     }
 
     // ---- 15.txt 5.14: interactive EMPTY 3D room (3D-first workflow) ----------
@@ -8766,9 +8776,9 @@ const frontendHTML = `<!DOCTYPE html>
                 )}
                 <RoomPlan2D room={room} structures={structures} points={points} selected={selectedObj}
                   onSelect={(o) => setSelectedObj(o)}
-                  onMoveStruct={(id, pos) => updStruct(id, { pos })}
+                  onMoveStruct={(id, pos, wall) => updStruct(id, wall ? { pos, wall } : { pos })}
                   onResizeStruct={(id, patch) => updStruct(id, patch)}
-                  onMovePoint={(id, along) => updPoint(id, { along })}
+                  onMovePoint={(id, along, wall) => updPoint(id, wall ? { along, wall } : { along })}
                   onDeleteObj={(kind, id) => { if (kind === "struct") delStruct(id); else delPoint(id); setSelectedObj(null); }} />
                 {/* 5.15 Wall Properties modal */}
                 {wallPropEdit && (() => { const wp = getWallProps(wallPropEdit); const set = (f) => setWallProps((p) => ({ ...p, [wallPropEdit]: { ...wp, ...f } })); return (
