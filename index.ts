@@ -1778,6 +1778,9 @@ function buildFurniture(type: string, dims: { wall: number; wallB?: number; wall
     elevations: [{ name: `${type} — Front`, svg: frontSvg }],
   };
   layout.furniture = unit;   // expose columns/cells so the consensus scorer can read furniture storage
+  // Expose the wardrobe Inside/Section (and mandir/panel side) views in the main viewer's project tree,
+  // not just the spec sheet — so a wardrobe shows Front + Internal + Section, not only the front.
+  try { const extra = ssExtraViews(type, layout); if (extra.length) layout.sections = extra.map((v: any) => ({ name: v.title, svg: v.svg })); } catch (e) { /* extra views are optional */ }
   if ((dims as any)._learnedFrom) layout.learnedFrom = (dims as any)._learnedFrom;   // §7 reference-based provenance
   return layout;
 }
@@ -9233,13 +9236,16 @@ const frontendHTML = `<!DOCTYPE html>
                 <span className="text-xs text-slate-500 mr-1">📁 {type}</span>
                 <button onClick={() => setActiveView("plan")} className={"px-2.5 py-1 text-xs rounded-lg border " + (activeView === "plan" ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>📐 Plan <span className="text-slate-400">({result.runs.length} {result.runs.length > 1 ? "runs" : "run"})</span></button>
                 {result.elevations.map((e, i) => (
-                  <React.Fragment key={i}>
-                    <button onClick={() => setActiveView(i)} className={"px-2.5 py-1 text-xs rounded-lg border " + (activeView === i ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>📋 Wall {String.fromCharCode(65 + i)} <span className="text-slate-400">· {e.name} ({(result.runs[i] && result.runs[i].base ? result.runs[i].base.length : 0)})</span></button>
-                    {result.sections && result.sections[i] && (
-                      <button onClick={() => setActiveView("sec" + i)} className={"px-2 py-1 text-[11px] rounded-lg border " + (activeView === "sec" + i ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-500 hover:border-slate-300")}>📏 Section {i + 1}</button>
-                    )}
-                  </React.Fragment>
+                  <button key={i} onClick={() => setActiveView(i)} className={"px-2.5 py-1 text-xs rounded-lg border " + (activeView === i ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>📋 Wall {String.fromCharCode(65 + i)} <span className="text-slate-400">· {e.name} ({(result.runs[i] && result.runs[i].base ? result.runs[i].base.length : 0)})</span></button>
                 ))}
+                {/* Section/extra views as their own nav buttons — named ("Inside View", "Section" for a wardrobe;
+                    generic "Section N" for kitchen per-run sections) so every generated view is reachable. */}
+                {(result.sections || []).map((s, i) => {
+                  const secLabel = (result.elevations || []).some((e) => e.name === s.name) ? ("Section " + (i + 1)) : (s.name || ("Section " + (i + 1)));
+                  return (
+                    <button key={"secbtn" + i} onClick={() => setActiveView("sec" + i)} className={"px-2 py-1 text-[11px] rounded-lg border " + (activeView === "sec" + i ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-500 hover:border-slate-300")}>📏 {secLabel}</button>
+                  );
+                })}
                 {type.indexOf("Kitchen") >= 0 && (
                   <button onClick={() => setActiveView("3d")} className={"px-2.5 py-1 text-xs rounded-lg border " + (activeView === "3d" ? "bg-cyan-50 border-cyan-300 text-cyan-700" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>🧊 3D View</button>
                 )}
@@ -9601,11 +9607,17 @@ const frontendHTML = `<!DOCTYPE html>
                             </div>}
                       </div>
                     ))}
-                    {(result.sections || []).map((s, i) => (
-                      <div key={"sec" + i} className={activeView === "sec" + i ? "" : "hidden"} style={{ transform: "scale(" + canvasZoom + ")", transformOrigin: "top left" }}>
-                        <div className="inline-block rounded-lg border border-slate-200 bg-white p-2 shadow-sm" dangerouslySetInnerHTML={{ __html: sectionSvg((liveRuns || result.runs)[i], tile) }} />
-                      </div>
-                    ))}
+                    {(result.sections || []).map((s, i) => {
+                      // kitchen sections re-derive live from the run; furniture (wardrobe Inside/Section, etc.)
+                      // have no editable run at this index → use the stored pre-rendered svg (mirrors elevations).
+                      const secRun = (liveRuns || result.runs)[i];
+                      const html = (secRun && secRun.base && secRun.base.length > 0) ? sectionSvg(secRun, tile) : s.svg;
+                      return (
+                        <div key={"sec" + i} className={activeView === "sec" + i ? "" : "hidden"} style={{ transform: "scale(" + canvasZoom + ")", transformOrigin: "top left" }}>
+                          <div className="inline-block rounded-lg border border-slate-200 bg-white p-2 shadow-sm" dangerouslySetInnerHTML={{ __html: html }} />
+                        </div>
+                      );
+                    })}
                     {/* 19.txt §4: the 3D scene is ALWAYS mounted (built in the background right after generation)
                         and merely toggled visible — one-click instant switching, camera preserved, no rebuild. */}
                     <div style={{ display: activeView === "3d" ? "block" : "none" }}>
@@ -9701,11 +9713,23 @@ const frontendHTML = `<!DOCTYPE html>
                 </React.Fragment>}
                 {result.scorecard && (
                   <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-3">
-                    <h3 className="text-sm font-semibold text-indigo-700 mb-2">Confidence Scorecard — {result.scorecard.overallConfidence}% overall confidence</h3>
+                    <h3 className="text-sm font-semibold text-indigo-700 mb-1">Confidence Scorecard — {result.scorecard.overallConfidence}% overall confidence</h3>
+                    {/* harvested UX (wardrobe mockup): a visual confidence bar for overall + each %/score metric */}
+                    <div className="mb-2 h-1.5 rounded-full bg-indigo-100 overflow-hidden"><div className="h-full rounded-full" style={{ width: Math.max(0, Math.min(100, +result.scorecard.overallConfidence || 0)) + "%", background: "linear-gradient(90deg,#22c55e,#3b82f6)" }} /></div>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-[11px]">
-                      {[["Similarity to priors", result.scorecard.similarityPct + "%"], ["Storage efficiency", result.scorecard.storageEfficiencyPct + "%"], ["Dead space", result.scorecard.deadSpacePct + "%"], ["Accessibility", result.scorecard.accessibilityPct + "%"], ["Work triangle", result.scorecard.workTriangleScore + "/10"], ["Ventilation", result.scorecard.ventilationScore + "/10"], ["Natural light", result.scorecard.naturalLightScore + "/10"], ["Manufacturing", result.scorecard.manufacturingScorePct + "%"], ["Material use", result.scorecard.materialUtilizationPct + "%"], ["Est. cost", "₹" + (result.scorecard.estimatedCostInr || 0).toLocaleString("en-IN")], ["Difficulty", result.scorecard.difficultyLevel], ["Install time", result.scorecard.installationTimeHrs + " h"]].map((kv, i) => (
-                        <div key={i} className="bg-white rounded px-2 py-1 border border-indigo-100 flex justify-between gap-1"><span className="text-slate-500">{kv[0]}</span><span className="font-semibold text-slate-800">{kv[1]}</span></div>
-                      ))}
+                      {[["Similarity to priors", result.scorecard.similarityPct + "%"], ["Storage efficiency", result.scorecard.storageEfficiencyPct + "%"], ["Dead space", result.scorecard.deadSpacePct + "%"], ["Accessibility", result.scorecard.accessibilityPct + "%"], ["Work triangle", result.scorecard.workTriangleScore + "/10"], ["Ventilation", result.scorecard.ventilationScore + "/10"], ["Natural light", result.scorecard.naturalLightScore + "/10"], ["Manufacturing", result.scorecard.manufacturingScorePct + "%"], ["Material use", result.scorecard.materialUtilizationPct + "%"], ["Est. cost", "₹" + (result.scorecard.estimatedCostInr || 0).toLocaleString("en-IN")], ["Difficulty", result.scorecard.difficultyLevel], ["Install time", result.scorecard.installationTimeHrs + " h"]].map((kv, i) => {
+                        const val = String(kv[1]);
+                        let pct = null;
+                        if (val.indexOf("%") >= 0) pct = parseFloat(val);
+                        else if (val.indexOf("/10") >= 0) pct = parseFloat(val) * 10;
+                        if (pct != null) pct = Math.max(0, Math.min(100, pct || 0));
+                        return (
+                          <div key={i} className="bg-white rounded px-2 py-1 border border-indigo-100">
+                            <div className="flex justify-between gap-1"><span className="text-slate-500">{kv[0]}</span><span className="font-semibold text-slate-800">{kv[1]}</span></div>
+                            {pct != null && <div className="mt-1 h-1 rounded-full bg-indigo-100 overflow-hidden"><div className="h-full rounded-full" style={{ width: pct + "%", background: "linear-gradient(90deg,#22c55e,#3b82f6)" }} /></div>}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -9723,6 +9747,8 @@ const frontendHTML = `<!DOCTYPE html>
                       {result.learnedFrom.map((lf, i) => (
                         <div key={i} className="bg-white rounded-lg border border-emerald-100 p-2 text-[11px]">
                           <div className="flex justify-between font-semibold text-slate-800 gap-2"><span>{lf.name}{lf.type ? " · " + lf.type : ""}</span><span className="text-emerald-600 whitespace-nowrap">{lf.similarityPct}% similar</span></div>
+                          {/* harvested UX (wardrobe mockup): visual match-% bar per reference used */}
+                          <div className="mt-1 mb-1 h-1 rounded-full bg-emerald-100 overflow-hidden"><div className="h-full rounded-full" style={{ width: Math.max(0, Math.min(100, +lf.similarityPct || 0)) + "%", background: "linear-gradient(90deg,#22c55e,#3b82f6)" }} /></div>
                           <div className="text-slate-600 mt-0.5"><span className="text-emerald-700 font-medium">Copied:</span> {(lf.copied || []).join(", ")}</div>
                           <div className="text-slate-600"><span className="text-amber-700 font-medium">Adapted:</span> {(lf.adapted || []).join(", ")}</div>
                           <div className="text-slate-600"><span className="text-indigo-700 font-medium">Improved:</span> {(lf.improved || []).join(", ")}</div>
@@ -11395,7 +11421,7 @@ function rederiveLayout(layout: any) {
   // Rebuild the PLAN + sections from the edited runs too — previously only elevations
   // were re-rendered, so after a canvas edit / propagate / beam-trim the plan drawing
   // (the primary view, also the DXF/spec-sheet source) silently showed pre-edit widths.
-  try { if (Array.isArray(layout.runs) && layout.type && layout.dims) { layout.planSvg = renderPlan(layout.type, layout.runs, layout.dims); layout.sections = layout.runs.map((r: any) => ({ name: r.name, svg: renderRunSection(r) })); } } catch { }
+  try { if (Array.isArray(layout.runs) && layout.type && layout.dims && !layout.furniture) { layout.planSvg = renderPlan(layout.type, layout.runs, layout.dims); layout.sections = layout.runs.map((r: any) => ({ name: r.name, svg: renderRunSection(r) })); } } catch { }
   layout.cutList = cutList(layout);
   layout.hardware = hardwareSchedule(layout);
   layout.boq = boq(layout);
