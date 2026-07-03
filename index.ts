@@ -10536,6 +10536,60 @@ const frontendHTML = `<!DOCTYPE html>
       );
     }
 
+    // 3D preview — reconstruct a wardrobe option as real panel meshes (carcass, partitions,
+    // shelves, drawers, hanging rods, loft, plinth, optional shutters) in Three.js r128.
+    function Wardrobe3D({ opt }) {
+      const ref = React.useRef(null);
+      const [shutters, setShutters] = useState(false);
+      React.useEffect(() => {
+        const THREE = window.THREE; if (!THREE || !ref.current || !opt) return;
+        const host = ref.current, Wv = host.clientWidth || 640, Hv = 440;
+        let renderer;
+        try { renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true }); }
+        catch (e) { host.innerHTML = "<div style='padding:24px;color:#64748b;font-size:13px'>3D preview needs WebGL (unavailable in this browser).</div>"; return; }
+        renderer.setSize(Wv, Hv); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+        host.innerHTML = ""; host.appendChild(renderer.domElement);
+        const scene = new THREE.Scene(); scene.background = new THREE.Color(0xf1f5f9);
+        const cam = new THREE.PerspectiveCamera(45, Wv / Hv, 10, 60000);
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.05));
+        const dl = new THREE.DirectionalLight(0xffffff, 0.7); dl.position.set(1, 2, 1.5); scene.add(dl);
+        const g = new THREE.Group();
+        const Wd = opt.width, H = opt.height, D = opt.depth, plinth = opt.plinth || 100, loftH = opt.hasLoft ? opt.loftH : 0, loftD = opt.loftDepth || 550, usableH = opt.usableH, T = 18;
+        const box = (w, h, d, x, y, z, col, opac) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac })); m.position.set(x, y, z); g.add(m); const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: 0x94a3b8 })); e.position.copy(m.position); g.add(e); return m; };
+        const WOOD = 0xd8c4a4, SHELF = 0xc9b391;
+        box(Wd, T, D, Wd / 2, plinth + T / 2, 0, WOOD);
+        box(Wd, T, D, Wd / 2, H - T / 2, 0, WOOD);
+        box(T, H, D, T / 2, H / 2, 0, WOOD);
+        box(T, H, D, Wd - T / 2, H / 2, 0, WOOD);
+        box(Wd, H, 6, Wd / 2, H / 2, -D / 2 + 3, 0xb7a488);
+        box(Wd, plinth, D - 40, Wd / 2, plinth / 2, 0, 0x8a7b63);
+        if (loftH > 0) box(Wd, T, loftD, Wd / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
+        for (const sec of opt.sections) for (const col of sec.columns) {
+          const cw = col.w, cxMid = col.x + cw / 2;
+          if (col.x > 0) box(T, usableH, D, col.x, plinth + usableH / 2, 0, WOOD);
+          let yb = plinth;
+          for (const cell of col.cells) {
+            const ch = cell.hMM, yt = yb + ch, k = cell.kind, colColor = parseInt((cell.color || "#cbd5e1").slice(1), 16) || 0xcbd5e1;
+            if (k === "shelf" || k === "handbag" || k === "shoe" || k === "kidsShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, SHELF);
+            else if (k === "drawer" || k === "jewellery" || k === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, colColor); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
+            else if (k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: 0x9aa3af, metalness: 0.6, roughness: 0.4 })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); g.add(rod); }
+            else if (k === "safe" || k === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, colColor, 0.85);
+            yb = yt;
+          }
+        }
+        if (shutters) for (const sec of opt.sections) for (const col of sec.columns) box(col.w - 4, H - 20, T, col.x + col.w / 2, H / 2, D / 2 - T / 2, 0xbcd0e6, 0.28);
+        g.position.set(-Wd / 2, -H / 2, 0); scene.add(g);
+        const span = Math.max(Wd, H, D);
+        cam.position.set(span * 0.9, span * 0.32, span * 1.28);
+        const controls = new THREE.OrbitControls(cam, renderer.domElement); controls.target.set(0, 0, 0); controls.update();
+        let raf; const loop = () => { raf = requestAnimationFrame(loop); controls.update(); renderer.render(scene, cam); }; loop();
+        const onResize = () => { const w2 = host.clientWidth || Wv; cam.aspect = w2 / Hv; cam.updateProjectionMatrix(); renderer.setSize(w2, Hv); };
+        window.addEventListener("resize", onResize);
+        return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
+      }, [opt, shutters]);
+      return (<div><div className="flex items-center gap-2 mb-2"><button onClick={() => setShutters((s) => !s)} className="text-xs px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button><span className="text-[11px] text-slate-400">drag to orbit · scroll to zoom</span></div><div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} /></div>);
+    }
+
     // Interactive drag-editor for a wardrobe option's front elevation: drag the horizontal
     // divider between two stacked cells to transfer height between them (resize a band).
     function WardrobeDrawEditor({ opt, onCommit }) {
@@ -10697,7 +10751,7 @@ const frontendHTML = `<!DOCTYPE html>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
-            {["Legend", "Reports", "Cutting List", "Hardware"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700")}>{t}</button>))}
+            {["Legend", "Reports", "Cutting List", "Hardware", "BOQ", "CNC", "3D"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700")}>{t}</button>))}
             <span className="ml-auto text-[11px] text-slate-400">{sel ? "Option " + (selIdx + 1) + " · " + sel.label : ""}</span>
           </div>
           {repTab === "Legend" && (<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1.5">
@@ -10708,6 +10762,23 @@ const frontendHTML = `<!DOCTYPE html>
           </div>)}
           {repTab === "Cutting List" && sel && (<div className="overflow-x-auto"><table className="w-full text-[11px]"><thead><tr className="text-slate-400 text-left"><th className="py-1 pr-3">Panel</th><th className="py-1 pr-3">Size</th><th className="py-1">Qty</th></tr></thead><tbody>{sel.reports.cut.map((r, i) => (<tr key={i} className="border-t border-slate-100"><td className="py-1 pr-3 text-slate-700">{r.part}</td><td className="py-1 pr-3 text-slate-600">{r.size}</td><td className="py-1 text-slate-800 font-medium">{r.qty}</td></tr>))}<tr className="border-t border-slate-200"><td className="py-1 pr-3 text-slate-500" colSpan={3}>Edge banding: {sel.reports.material.edgeBand} · all exposed edges</td></tr></tbody></table></div>)}
           {repTab === "Hardware" && sel && (<div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">{sel.reports.hardware.map((h, i) => (<div key={i} className="bg-slate-50 rounded border border-slate-200 px-2 py-1.5 flex justify-between"><span className="text-slate-600">{h.item}</span><span className="text-slate-800 font-semibold">{h.qty}</span></div>))}<div className="sm:col-span-3 text-slate-400 text-[10px]">Hinges: {sel.reports.material.hinge} · Drawers: {sel.reports.material.drawer} · Handles: {sel.reports.material.handle}</div></div>)}
+          {repTab === "BOQ" && sel && sel.boq && (<div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] mb-2">
+              {[["🪵 18mm sheets", sel.boq.sheets18 + " (" + sel.boq.utilPct + "% util)"], ["🔩 Back sheets", sel.boq.backSheets], ["📏 Edge banding", sel.boq.edgeBandM + " m"], ["🧾 Grand total", "₹" + sel.boq.grandTotal.toLocaleString("en-IN")]].map((kv, i) => (<div key={i} className="bg-indigo-50 rounded border border-indigo-100 px-2 py-1.5"><div className="text-slate-400 text-[10px] uppercase">{kv[0]}</div><div className="text-slate-800 font-semibold">{kv[1]}</div></div>))}
+            </div>
+            <div className="overflow-x-auto"><table className="w-full text-[11px]"><thead><tr className="text-slate-400 text-left"><th className="py-1 pr-3">Item</th><th className="py-1 pr-3">Qty</th><th className="py-1 pr-3">Unit</th><th className="py-1 pr-3">Rate ₹</th><th className="py-1 text-right">Amount ₹</th></tr></thead><tbody>
+              {sel.boq.lines.map((r, i) => (<tr key={i} className="border-t border-slate-100"><td className="py-1 pr-3 text-slate-700">{r.item}</td><td className="py-1 pr-3 text-slate-600">{r.qty}</td><td className="py-1 pr-3 text-slate-500">{r.unit}</td><td className="py-1 pr-3 text-slate-500">{r.rate.toLocaleString("en-IN")}</td><td className="py-1 text-right text-slate-800 font-medium">{r.amount.toLocaleString("en-IN")}</td></tr>))}
+              {[["Subtotal", sel.boq.subtotal], ["Labour (22%)", sel.boq.labour], ["Taxable", sel.boq.taxable], ["GST (18%)", sel.boq.gst], ["Grand Total", sel.boq.grandTotal]].map((kv, i) => (<tr key={"t" + i} className={"border-t " + (kv[0] === "Grand Total" ? "border-slate-300 font-bold text-indigo-700" : "border-slate-100 text-slate-600")}><td className="py-1 pr-3" colSpan={4}>{kv[0]}</td><td className="py-1 text-right">₹{kv[1].toLocaleString("en-IN")}</td></tr>))}
+            </tbody></table></div>
+          </div>)}
+          {repTab === "CNC" && sel && sel.cnc && (<div>
+            <div className="flex flex-wrap gap-3 text-[11px] mb-2 text-slate-600"><span>System: <b>{sel.cnc.system}</b></span><span>Total holes: <b>{sel.cnc.totalHoles}</b></span><span>Tooling: {sel.cnc.tooling}</span></div>
+            <div className="overflow-x-auto"><table className="w-full text-[11px]"><thead><tr className="text-slate-400 text-left"><th className="py-1 pr-3">Panel</th><th className="py-1 pr-3">Operation</th><th className="py-1 pr-3">Holes</th><th className="py-1">Note</th></tr></thead><tbody>
+              {sel.cnc.ops.map((r, i) => (<tr key={i} className="border-t border-slate-100"><td className="py-1 pr-3 text-slate-700">{r.panel}</td><td className="py-1 pr-3 text-slate-600">{r.op}</td><td className="py-1 pr-3 text-slate-800 font-medium">{r.count}</td><td className="py-1 text-slate-500">{r.note}</td></tr>))}
+            </tbody></table></div>
+            <div className="text-[10px] text-slate-400 mt-1">Drilling schedule for LINE-32 boring — export to the CNC as a drill map per panel.</div>
+          </div>)}
+          {repTab === "3D" && sel && <Wardrobe3D opt={sel} />}
         </div>
         <div className="text-[11px] text-slate-400 px-1">Learns from your uploaded references in the <span className="font-medium text-slate-500">Library</span> tab (vision-read wardrobes drive the Generator). This module applies Indian standard arrangements to your lifestyle inputs.</div>
       </div>);
@@ -11718,6 +11789,85 @@ function wardReports(opt: any): any {
   const cost = Math.round((boardSqft * 190 + backSqft * 70 + drawerFronts * 850 + shutters * 3 * 55 + hangRods * 160) / 500) * 500;
   return { cut, hardware, material, boardSqft: Math.round(boardSqft), backSqft: Math.round(backSqft), shutters, drawerFronts, shelfCount, hangRods, partitions, estCostInr: cost };
 }
+// Structured panels (part/w/h/thk/qty/mat) for BOQ nesting + CNC drilling.
+function wardPanels(opt: any): { panels: any[]; counts: any } {
+  const S = WARDROBE_STD, D = opt.depth, H = opt.height, W = opt.width;
+  const totalCols = opt.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0) || 1;
+  const colW = W / totalCols;
+  const panels: any[] = [];
+  const add = (part: string, w: number, h: number, qty: number, thk?: number, mat?: string) => { if (qty > 0) panels.push({ part, w: Math.round(w), h: Math.round(h), qty, thk: thk || 18, mat: mat || "18mm BWP ply" }); };
+  let partitions = 0, shelves = 0, drawerFronts = 0, shutters = 0, hangRods = 0;
+  for (const sec of opt.sections) {
+    partitions += Math.max(0, (sec.columns || []).length - 1);
+    for (const col of (sec.columns || [])) { shutters++; for (const cell of col.cells) { const k = cell.kind; if (k === "shelf" || k === "handbag" || k === "shoe" || k === "kidsShelf") shelves++; else if (k === "drawer" || k === "jewellery" || k === "cosmetics") drawerFronts++; else if (k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga") hangRods++; } }
+  }
+  add("Side panel", D, H, 2);
+  add("Top / bottom", W, D, 2);
+  add("Vertical partition", D, opt.usableH, partitions);
+  add("Shelf", colW - 36, D - 20, shelves);
+  add("Drawer front", colW - 6, opt.drawerH || S.drawerH, drawerFronts, 18, "18mm shutter");
+  if (opt.hasLoft) add("Loft shelf", W, opt.loftDepth, 1);
+  add("Shutter", colW - 4, H - 20, shutters, 18, "18mm shutter / laminate");
+  add("Back panel", W, H, 1, 6, "6mm BWP ply");
+  return { panels, counts: { partitions, shelves, drawerFronts, shutters, hangRods } };
+}
+// Rough guillotine strip-pack → sheet count + utilisation (2440×1220 boards).
+function wardNest(rects: any[], SW: number, SH: number): { sheets: number; utilPct: number } {
+  if (!rects.length) return { sheets: 0, utilPct: 0 };
+  const items = rects.map((r) => ({ w: Math.min(r.w, SW), h: Math.min(r.h, SH) })).sort((a, b) => b.h - a.h);
+  let sheets = 1, x = 0, y = 0, rowH = 0, used = 0;
+  for (const it of items) {
+    if (x + it.w > SW) { x = 0; y += rowH; rowH = 0; }
+    if (y + it.h > SH) { sheets++; x = 0; y = 0; rowH = 0; }
+    x += it.w + 4; rowH = Math.max(rowH, it.h); used += it.w * it.h;
+  }
+  return { sheets, utilPct: Math.round(used / (sheets * SW * SH) * 100) };
+}
+// Bill of Quantities: sheet nesting + edge banding + hardware, costed with labour + GST.
+function wardBOQ(opt: any): any {
+  const { panels, counts } = wardPanels(opt), SW = 2440, SH = 1220;
+  const p18 = panels.filter((p) => p.thk === 18).flatMap((p) => Array.from({ length: p.qty }, () => ({ w: p.w, h: p.h })));
+  const nest = wardNest(p18, SW, SH);
+  const back = panels.filter((p) => p.thk === 6);
+  const backSheets = back.length ? Math.max(1, Math.ceil(back.reduce((a, p) => a + p.w * p.h * p.qty, 0) / (SW * SH))) : 0;
+  let ebMm = 0;
+  for (const p of panels) { if (p.part === "Shelf") ebMm += p.w * p.qty; else if (p.part.indexOf("Shutter") >= 0 || p.part.indexOf("Drawer") >= 0) ebMm += 2 * (p.w + p.h) * p.qty; else if (p.part === "Vertical partition" || p.part === "Side panel") ebMm += p.h * p.qty; }
+  const ebM = ebMm / 1000;
+  const finishArea = panels.filter((p) => p.part.indexOf("Shutter") >= 0 || p.part.indexOf("Drawer") >= 0).reduce((a, p) => a + p.w * p.h * p.qty, 0) / 92903;
+  const R = { sheet18: 2600, sheet6: 900, edgeBandM: 18, hinge: 55, slide: 420, handle: 90, rod: 160, lock: 650, led: 350, mirror: 1200, laminate: 95, labourPct: 0.22, gstPct: 0.18 };
+  const lines: any[] = [];
+  const line = (item: string, qty: number, unit: string, rate: number) => { const amount = Math.round(qty * rate); lines.push({ item, qty: Math.round(qty * 10) / 10, unit, rate, amount }); return amount; };
+  let mat = 0;
+  mat += line("18mm BWP ply (2440×1220)", nest.sheets, "sheet", R.sheet18);
+  if (backSheets) mat += line("6mm back panel", backSheets, "sheet", R.sheet6);
+  mat += line("Edge banding (1-2mm PVC)", ebM, "m", R.edgeBandM);
+  mat += line("Laminate / finish", finishArea, "sq.ft", R.laminate);
+  let hw = 0;
+  hw += line("Soft-close hinges (110°)", counts.shutters * 3, "no", R.hinge);
+  if (counts.drawerFronts) hw += line("Tandem drawer channels", counts.drawerFronts, "pair", R.slide);
+  hw += line("Handles", counts.shutters + counts.drawerFronts, "no", R.handle);
+  if (counts.hangRods) hw += line("Hanging rods", counts.hangRods, "no", R.rod);
+  if (opt.stats.accessories > 0) hw += line("Safe locker + key", 1, "no", R.lock);
+  hw += line("LED sensor strip", 2, "m", R.led);
+  hw += line("Mirror (full-height)", 1, "no", R.mirror);
+  const subtotal = mat + hw, labour = Math.round(subtotal * R.labourPct), taxable = subtotal + labour, gst = Math.round(taxable * R.gstPct);
+  return { lines, sheets18: nest.sheets, utilPct: nest.utilPct, backSheets, edgeBandM: Math.round(ebM * 10) / 10, material: mat, hardware: hw, subtotal, labour, taxable, gst, grandTotal: taxable + gst };
+}
+// CNC drilling schedule (32mm LINE-32 system): shelf-pin lines, hinge bores, dowel/minifix.
+function wardCNC(opt: any): any {
+  const { counts } = wardPanels(opt);
+  const ops: any[] = []; let holes = 0;
+  const rowHoles = (h: number) => Math.max(0, Math.floor((h - 100) / 32));
+  const push = (panel: string, op: string, count: number, note: string) => { if (count > 0) { ops.push({ panel, op, count, note }); holes += count; } };
+  push("Side panels ×2", "Shelf-pin line Ø5", 2 * 2 * rowHoles(opt.height), "2 rows · 37 mm setback · 32 mm pitch");
+  push("Vertical partitions ×" + counts.partitions, "Shelf-pin line Ø5", counts.partitions * 2 * 2 * rowHoles(opt.usableH), "both faces");
+  push("Shutters ×" + counts.shutters, "Hinge cup bore Ø35", counts.shutters * 3, "3 hinges each");
+  push("Sides / partitions", "Hinge plate Ø5", counts.shutters * 3 * 2, "2 fixings per plate");
+  push("Drawer fronts ×" + counts.drawerFronts, "Handle bore Ø5", counts.drawerFronts * 2, "");
+  push("Carcass joinery", "Dowel Ø8 / Minifix Ø15", (counts.partitions + 4) * 8, "cam + dowel");
+  if (opt.hasLoft) push("Loft shelf", "Support pin Ø5", 4, "corner supports");
+  return { ops, totalHoles: holes, system: "32 mm (LINE-32)", tooling: "Ø5 · Ø8 · Ø15 · Ø35 boring bits" };
+}
 function wardScorecard(opt: any): any {
   const s = opt.stats, tot = Math.max(1, s.totalItems), cl = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
   const hangingCap = cl(45 + (s.hanging / tot) * 130), shelfCap = cl(45 + (s.shelves / tot) * 150), drawerCap = cl(45 + (s.drawers / tot) * 150);
@@ -11858,6 +12008,7 @@ function wardrobeOptions(input: any): any {
     o.reports = wardReports(o);
     o.scorecard = wardScorecard(o);
     o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
     return o;
   });
@@ -11908,6 +12059,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
     o.stats = { hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"), shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"), drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"), shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"), columns: o.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0), totalItems: allCells.length };
     o.reports = wardReports(o); o.scorecard = wardScorecard(o);
     o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
     return c.json({ data: o });
   } catch (err) { console.error(err); return c.json({ error: "Wardrobe rerender failed" }, 500); }
