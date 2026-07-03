@@ -16,6 +16,7 @@
     "@hono/zod-validator": "^0.8.0",
     "better-sqlite3": "^12.10.0",
     "drizzle-orm": "^0.45.2",
+    "esbuild": "^0.28.0",
     "hono": "^4.12.23",
     "zod": "^4.4.3"
   },

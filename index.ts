@@ -23,6 +23,7 @@ import { eq, desc } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 import { readFileSync as fsRead, writeFileSync as fsWrite, existsSync as fsExists } from "fs";
 import { inflateSync, inflateRawSync } from "zlib";   // PNG IDAT decode (GIF encoder #6) + ZIP member inflate (§8 multi-upload)
+import { transformSync as esbuildTransform } from "esbuild";   // precompile the client JSX at boot (no slow in-browser Babel)
 
 // =============================================================================
 // 1. DATABASE LAYER — Drizzle ORM + SQLite (the "centralized AI knowledge DB")
@@ -3099,9 +3100,13 @@ function sinkEllipse(cx: number, cy: number, size = 26): string {
 // columns and ventilators on a HORIZONTAL wall at y=top. `into` = +1 → the room is
 // below the wall (cabinets hang down), so a door swings into +y. Reads GEN_WINDOWS +
 // GEN_STRUCTURES so the §3 opening-awareness is actually VISIBLE on the drawing.
-function planOpeningsH(xOf: (mm: number) => number, top: number, La: number, into = 1): string[] {
+function planOpeningsH(xOf: (mm: number) => number, top: number, La: number, into = 1, wallKey?: string): string[] {
   const S = PLAN_S, els: string[] = [], at = (mm: number) => xOf(mm);
+  // wallKey (e.g. "back"/"left") restricts to openings on that wall; items with no
+  // wall set are treated as being on the primary wall (drawn only when wallKey is unset or "back").
+  const onWall = (wl?: string) => !wallKey ? true : (wl ? wl.toLowerCase().includes(wallKey) : wallKey === "back");
   for (const w of GEN_WINDOWS) {
+    if (!onWall(w.wall)) continue;
     const a = w.along, b = a + w.width; if (a == null || a > La) continue;
     els.push(`<rect x="${at(a)}" y="${top - 2}" width="${(b - a) * S}" height="4" fill="#f4f7fb"/>`);
     els.push(`<line x1="${at(a)}" y1="${top - 1.6}" x2="${at(b)}" y2="${top - 1.6}" stroke="#0891b2" stroke-width="0.9"/>`);
@@ -3109,6 +3114,7 @@ function planOpeningsH(xOf: (mm: number) => number, top: number, La: number, int
     els.push(`<text x="${at((a + b) / 2)}" y="${top - 4}" fill="#0891b2" font-size="6" text-anchor="middle">window</text>`);
   }
   for (const s of GEN_STRUCTURES) {
+    if (!onWall(s.wall)) continue;
     const w = s.width && s.width > 0 ? s.width : (s.kind === "column" ? 300 : 800);
     const a = s.pos; if (a == null || a > La) continue; const b = a + w;
     if (s.kind === "door") {
@@ -3165,11 +3171,14 @@ function renderPlanL(runA: RunLayout, runB: RunLayout, La: number, Lb: number, o
   if (!opts.openLeg) p.push(`<line x1="${ox}" y1="${oy}" x2="${ox}" y2="${yOf(Lb)}" stroke="#64748b" stroke-width="3"/>`);
   else p.push(`<text x="${ox + d * S / 2}" y="${yOf(Lb) + 8}" fill="#94a3b8" font-size="6" text-anchor="middle">seating</text>`);
   // Run A — back wall (cabinets hang down)
+  let cabNo = 0;
   for (const c of runA.base) {
     p.push(`<rect x="${xOf(c.x)}" y="${oy}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
     if (c.kind === "sink") p.push(sinkEllipse(xOf(c.x) + c.w * S / 2, oy + d * S / 2));
     if (c.kind === "hob" || c.kind === "drawer3") p.push(svgIcon("hob", xOf(c.x) + c.w * S / 2, oy + d * S / 2, Math.min(c.w * S, d * S) * 0.62));
+    if (c.kind !== "filler" && c.w * S > 14) p.push(cabNumberBadge(xOf(c.x) + 8, oy + d * S - 8, ++cabNo));
   }
+  p.push(...planOpeningsH(xOf, oy, La, 1, "back"));   // §7: doors/windows/columns on the back wall
   // Run B — left wall (cabinets extend right), drawn vertically
   for (const c of runB.base) {
     p.push(`<rect x="${ox}" y="${yOf(c.x)}" width="${d * S}" height="${c.w * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
@@ -8630,6 +8639,7 @@ const frontendHTML = `<!DOCTYPE html>
         </svg>
       );
       React.useEffect(() => { if (!matFacets) fetch("/api/materials/facets").then((r) => r.json()).then((j) => setMatFacets(j.data)).catch(() => {}); }, [matFacets]);
+      const [matReload, setMatReload] = useState(0);   // declared before the effect that lists it in deps (TDZ-safe once JSX is precompiled by esbuild)
       React.useEffect(() => {
         if (!matOpen) return;
         const id = setTimeout(() => {
@@ -8676,7 +8686,6 @@ const frontendHTML = `<!DOCTYPE html>
       };
       // §9 Admin library — add / import / rate / out-of-stock
       const [matAdmin, setMatAdmin] = useState(false);
-      const [matReload, setMatReload] = useState(0);
       const [addForm, setAddForm] = useState({ brand: "", colorName: "", code: "", colorCode: "#cccccc", customerRate: "" });
       const [csvText, setCsvText] = useState("");
       const reloadCatalog = () => { setMatReload((x) => x + 1); setMatFacets(null); };
@@ -11181,7 +11190,29 @@ app.get("/api/fabrik/stats", (c) => {
 });
 
 app.get("/mkw-logo.jpg", (c) => { try { const buf = fsRead("mkw-logo.jpg"); c.header("Content-Type", "image/jpeg"); c.header("Cache-Control", "public, max-age=86400"); return c.body(buf); } catch { return c.json({ error: "logo not found" }, 404); } });
-app.get("/", (c) => c.html(frontendHTML));
+// ── PERF FIX: precompile the client JSX ONCE at boot with esbuild and serve plain
+// JS, instead of shipping a 500 KB+ inline script for @babel/standalone to transform
+// in the browser on every load (which took ~30 s and looked like "not loading").
+// Falls back to the original Babel path if the transform ever fails, so it can't break.
+const COMPILED_HTML: string = (() => {
+  try {
+    const startTag = '<script type="text/babel">';
+    const i = frontendHTML.indexOf(startTag);
+    if (i < 0) return frontendHTML;
+    const j = frontendHTML.indexOf("</script>", i);
+    if (j < 0) return frontendHTML;
+    const jsx = frontendHTML.slice(i + startTag.length, j);
+    const { code } = esbuildTransform(jsx, { loader: "jsx", jsx: "transform", jsxFactory: "React.createElement", jsxFragment: "React.Fragment", target: "es2019", legalComments: "none" });
+    const head = frontendHTML.slice(0, i).replace(/\s*<script src="https:\/\/unpkg\.com\/@babel\/standalone[^"]*"><\/script>/, "");
+    const tail = frontendHTML.slice(j + "</script>".length);
+    console.log(`[boot] client precompiled with esbuild (${(jsx.length / 1024).toFixed(0)} KB JSX → ${(code.length / 1024).toFixed(0)} KB JS) — no in-browser Babel.`);
+    return head + "<script>\n" + code + "\n</script>" + tail;
+  } catch (e) {
+    console.error("[boot] client precompile failed — serving the Babel fallback:", e);
+    return frontendHTML;
+  }
+})();
+app.get("/", (c) => c.html(COMPILED_HTML));
 app.get("/favicon.ico", (c) => c.body(null, 204)); // silence the browser's default favicon request
 
 // =============================================================================
