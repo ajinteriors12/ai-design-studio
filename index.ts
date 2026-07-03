@@ -10536,6 +10536,51 @@ const frontendHTML = `<!DOCTYPE html>
       );
     }
 
+    // Interactive drag-editor for a wardrobe option's front elevation: drag the horizontal
+    // divider between two stacked cells to transfer height between them (resize a band).
+    function WardrobeDrawEditor({ opt, onCommit }) {
+      const [secs, setSecs] = useState(() => JSON.parse(JSON.stringify(opt.sections || [])));
+      React.useEffect(() => { setSecs(JSON.parse(JSON.stringify(opt.sections || []))); }, [opt]);
+      const dragRef = React.useRef(null);
+      const padL = 26, padR = 18, padT = 40, padB = 28;
+      const scale = Math.max(0.08, Math.min((700 - padL - padR) / opt.width, (440 - padT - padB) / opt.height));
+      const wpx = opt.width * scale, hpx = opt.height * scale, W = Math.round(wpx + padL + padR), H = Math.round(hpx + padT + padB);
+      const x0 = padL, y0 = padT, xOf = (mm) => x0 + mm * scale;
+      const loftPx = opt.hasLoft ? opt.loftH * scale : 0, plinthPx = (opt.plinth || 100) * scale, floorY = y0 + hpx - plinthPx, usableTopY = y0 + loftPx;
+      const onMove = (e) => {
+        const d = dragRef.current; if (!d) return;
+        const delta = Math.round((e.clientY - d.y) / scale / 5) * 5; if (!delta) return;
+        setSecs((prev) => {
+          const n = JSON.parse(JSON.stringify(prev)); const cells = n[d.si].columns[d.ci].cells;
+          const below = cells[d.k], above = cells[d.k + 1]; if (!below || !above) return prev;
+          if (below.hMM - delta < 60 || above.hMM + delta < 60) return prev;
+          below.hMM -= delta; above.hMM += delta; return n;
+        });
+        d.y = e.clientY;
+      };
+      const endDrag = () => { const d = dragRef.current; dragRef.current = null; if (d) onCommit(secs); };
+      const startCell = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { si, ci, k, y: e.clientY }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
+      const els = [];
+      secs.forEach((sec, si) => { const sx = xOf(sec.x), sw = sec.width * scale; const tint = sec.kind === "male" ? "#eff6ff" : sec.kind === "female" ? "#fdf2f8" : "#fefce8"; const hc = sec.kind === "male" ? "#2563eb" : sec.kind === "female" ? "#db2777" : "#ca8a04"; els.push(<rect key={"st" + si} x={sx} y={y0} width={sw} height={hpx} fill={tint} />); els.push(<text key={"sh" + si} x={sx + sw / 2} y={y0 - 8} fill={hc} fontSize="11" fontWeight="700" textAnchor="middle">{sec.label}</text>); });
+      if (opt.hasLoft) { els.push(<rect key="loft" x={x0} y={y0} width={wpx} height={loftPx} fill="#fcd34d55" stroke="#a16207" strokeWidth="0.8" />); els.push(<text key="loftt" x={x0 + wpx / 2} y={y0 + loftPx / 2 + 3} fill="#a16207" fontSize="9" fontWeight="600" textAnchor="middle">{"LOFT " + opt.loftH + " mm"}</text>); }
+      secs.forEach((sec, si) => sec.columns.forEach((col, ci) => {
+        const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
+        col.cells.forEach((cell, k) => {
+          const ch = cell.hMM * scale, yt = yb - ch;
+          els.push(<rect key={"c" + si + "-" + ci + "-" + k} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={(cell.color || "#cbd5e1") + "33"} stroke={cell.color || "#cbd5e1"} strokeWidth="0.7" />);
+          if (ch > 12) els.push(<text key={"cl" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle">{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
+          if (ch > 22) els.push(<text key={"cd" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle">{cell.hMM + " mm"}</text>);
+          if (k < col.cells.length - 1) { els.push(<line key={"hl" + si + "-" + ci + "-" + k} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" />); els.push(<rect key={"hh" + si + "-" + ci + "-" + k} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
+          yb = yt;
+        });
+        els.push(<line key={"cp" + si + "-" + ci} x1={cx} y1={usableTopY} x2={cx} y2={floorY} stroke="#94a3b8" strokeWidth="0.7" />);
+      }));
+      els.push(<rect key="pl" x={x0} y={floorY} width={wpx} height={plinthPx} fill="#e2e8f0" stroke="#94a3b8" strokeWidth="0.6" />);
+      els.push(<rect key="fr" x={x0} y={y0} width={wpx} height={hpx} fill="none" stroke="#334155" strokeWidth="1.4" />);
+      for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" />); }
+      return (<svg width={W} height={H} viewBox={"0 0 " + W + " " + H} style={{ maxWidth: "100%", touchAction: "none", userSelect: "none" }} onPointerMove={onMove} onPointerUp={endDrag} onPointerLeave={endDrag}>{els}</svg>);
+    }
+
     // ── Wardrobe AI Designer — lifestyle-driven 3-option wardrobe generator (§2-§12) ──
     function WardrobeAI() {
       const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300 });
@@ -10546,15 +10591,25 @@ const frontendHTML = `<!DOCTYPE html>
       const [repTab, setRepTab] = useState("Reports");
       const [view, setView] = useState("Front");
       const [tpl, setTpl] = useState("couple");
+      const [edited, setEdited] = useState(null);   // drag-edited version of the selected option
+      const reTimer = React.useRef(null);
       const firstSig = React.useRef(true);
       const set = (k, v) => setInput((p) => { const n = Object.assign({}, p); n[k] = v; return n; });
       React.useEffect(() => { fetch("/api/wardrobe/meta").then((r) => r.json()).then((j) => setMeta(j.data)).catch(() => {}); }, []);
       const generate = (ov) => {
-        setBusy(true);
+        setBusy(true); setEdited(null);
         const body = Object.assign({}, input, ov || {});
         fetch("/api/wardrobe/options", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
           .then((r) => r.json()).then((j) => { setData(j.data); setSelIdx((j.data && j.data.recommendation && j.data.recommendation.bestIndex) || 0); setBusy(false); })
           .catch(() => setBusy(false));
+      };
+      React.useEffect(() => { setEdited(null); }, [selIdx]);
+      const commitEdit = (secsEdited) => {
+        const base = edited || (data && data.options && data.options[selIdx]); if (!base) return;
+        const o = Object.assign({}, base, { sections: secsEdited });
+        setEdited(o);
+        clearTimeout(reTimer.current);
+        reTimer.current = setTimeout(() => { fetch("/api/wardrobe/rerender", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option: o }) }).then((r) => r.json()).then((j) => { if (j.data) setEdited(j.data); }).catch(() => {}); }, 250);
       };
       React.useEffect(() => { generate(); }, []);
       const sig = JSON.stringify(input);
@@ -10566,7 +10621,7 @@ const frontendHTML = `<!DOCTYPE html>
         setInput((p) => Object.assign({}, p, ov));
       };
       const opts = (data && data.options) || [];
-      const sel = opts[selIdx];
+      const sel = edited || opts[selIdx];   // reports + editor reflect drag-edits; the grid keeps the 3 AI proposals
       const best = data && data.recommendation ? data.recommendation.bestIndex : 0;
       const LEVELS = [["low", "Low"], ["medium", "Medium"], ["high", "High"]];
       const levelSel = (k, label) => (<label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">{label}</span><select value={input[k]} onChange={(e) => set(k, e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs bg-white">{LEVELS.map(([v, t]) => <option key={v} value={v}>{t}</option>)}</select></label>);
@@ -10630,6 +10685,15 @@ const frontendHTML = `<!DOCTYPE html>
             </div>
           </div>)}
         </div>
+
+        {sel && (<div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-slate-700">✏️ Edit — <span className="text-indigo-600">Option {selIdx + 1} · {sel.label}</span> <span className="text-xs font-normal text-slate-400">· drag a horizontal divider to resize the band above/below</span></h3>
+            {edited && <button onClick={() => setEdited(null)} className="text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Reset edits</button>}
+          </div>
+          <div className="overflow-auto"><WardrobeDrawEditor opt={sel} onCommit={commitEdit} /></div>
+          <div className="text-[11px] mt-1">{edited ? <span className="text-emerald-600">Edited · cutting list &amp; cost below reflect your changes.</span> : <span className="text-slate-400">Tip: use the Male section % slider above to change the split; drag dividers here to resize bands.</span>}</div>
+        </div>)}
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
@@ -11816,6 +11880,37 @@ app.get("/api/wardrobe/meta", (c) => c.json({
 app.post("/api/wardrobe/options", async (c) => {
   try { const body = await c.req.json().catch(() => ({})); return c.json({ data: wardrobeOptions(body || {}) }); }
   catch (err) { console.error(err); return c.json({ error: "Wardrobe options generation failed" }, 500); }
+});
+// Re-derive a single, drag-edited option: sanitize + renormalize the posted geometry, then
+// recompute stats/reports/scorecard/views from it (keeps the server as the source of truth).
+app.post("/api/wardrobe/rerender", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as any));
+    const o = (body && body.option) || body;
+    if (!o || !Array.isArray(o.sections)) return c.json({ error: "bad option" }, 400);
+    o.id = String(o.id || "custom"); o.label = String(o.label || "Custom");
+    o.width = wardClamp(Math.round(+o.width || 2400), 1200, 4800);
+    o.height = wardClamp(Math.round(+o.height || 2400), 1800, 3000);
+    o.depth = wardClamp(Math.round(+o.depth || 600), 450, 900);
+    o.plinth = WARDROBE_STD.plinth; o.loftDepth = WARDROBE_STD.loftDepth;
+    o.hasLoft = !!o.hasLoft && o.height >= 2400;
+    o.loftH = o.hasLoft ? wardClamp(Math.round(+o.loftH || 600), 300, 750) : 0;
+    o.usableH = o.height - o.plinth - o.loftH;
+    for (const sec of o.sections) for (const col of (sec.columns || [])) {
+      let cells = (col.cells || []).filter((cc: any) => cc && +cc.hMM > 0).map((cc: any) => ({ kind: String(cc.kind || "shelf"), label: String(cc.label || ""), hMM: Math.max(40, Math.round(+cc.hMM)), color: WARD_COLORS[String(cc.kind)] || "#cbd5e1" }));
+      if (!cells.length) cells = [{ kind: "shelf", label: "Shelf", hMM: o.usableH, color: WARD_COLORS.shelf }];
+      const sum = cells.reduce((a: number, cc: any) => a + cc.hMM, 0) || 1, f = o.usableH / sum;
+      cells.forEach((cc: any) => cc.hMM = Math.round(cc.hMM * f));
+      col.cells = cells;
+    }
+    const allCells = o.sections.flatMap((s: any) => (s.columns || []).flatMap((cc: any) => cc.cells));
+    const cnt = (pred: (k: string) => boolean) => allCells.filter((cc: any) => pred(cc.kind)).length;
+    o.stats = { hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"), shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"), drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"), shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"), columns: o.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0), totalItems: allCells.length };
+    o.reports = wardReports(o); o.scorecard = wardScorecard(o);
+    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.svg = o.views.Front;
+    return c.json({ data: o });
+  } catch (err) { console.error(err); return c.json({ error: "Wardrobe rerender failed" }, 500); }
 });
 
 app.get("/mkw-logo.jpg", (c) => { try { const buf = fsRead("mkw-logo.jpg"); c.header("Content-Type", "image/jpeg"); c.header("Cache-Control", "public, max-age=86400"); return c.body(buf); } catch { return c.json({ error: "logo not found" }, 404); } });
