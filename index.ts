@@ -669,6 +669,9 @@ let GEN_POINTS: { type: string; wall?: string; along?: number; height?: number }
 const pointAlong = (type: string): number | null => { const p = GEN_POINTS.find((q) => q.type === type && q.along != null); return p ? Math.round(p.along as number) : null; };
 // 16/17 6.2: windows the AI must respect (no wall cabinets over them, no tall units in front).
 let GEN_WINDOWS: { wall?: string; along: number; width: number; sill?: number; height?: number }[] = [];
+// §3: doors / columns / ventilators / balcony / stair openings / panels the AI must respect
+// (never place a cabinet over them). {kind, wall?, pos(along mm), width, height?, drop?}.
+let GEN_STRUCTURES: { kind: string; wall?: string; pos?: number; width?: number; height?: number; drop?: number }[] = [];
 // Handle systems (12.pdf §5.7.12). Handle-less profiles → no external handle glyph,
 // a continuous gola/J groove instead; "Knob" → a small round knob.
 const HANDLE_TYPES = ["D Handle", "C Handle", "Knob", "Edge Profile", "J Profile", "G Profile / Gola", "Aluminium Gola", "Hidden Profile", "Push-To-Open", "Tip-On", "Finger Pull", "Integrated"];
@@ -1194,6 +1197,43 @@ function applyWindows(run: RunLayout): RunLayout {
   return run;
 }
 
+// §3: keep DOORS / COLUMNS / VENTILATORS / balcony / stair openings / panels clear of cabinets.
+// Wall cabinets whose centre falls in an opening span are removed (exactly like windows). A
+// floor-blocking opening (door/balcony/stair/column) that also lands on a BASE cabinet is logged
+// as a conflict for §15 to surface (the editable Top-View planner then relocates it) — we never
+// silently destroy a base/appliance unit. Best-effort run↔wall (mirrors applyWindows).
+function openingSpans(L: number): { a: number; b: number; kind: string }[] {
+  const out: { a: number; b: number; kind: string }[] = [];
+  for (const s of GEN_STRUCTURES) {
+    if (s.kind === "beam") continue;   // a beam is a vertical soffit (applyObstruction), not a plan keep-out
+    const w = s.width && s.width > 0 ? s.width : (s.kind === "column" ? 300 : 800);
+    const a = s.pos == null ? null : s.pos;
+    if (a == null || !(a + w > a) || a > L) continue;
+    out.push({ a, b: a + w, kind: s.kind });
+  }
+  return out;
+}
+function applyOpenings(run: RunLayout): RunLayout {
+  if (!GEN_STRUCTURES.length) return run;
+  const L = run.length, spans = openingSpans(L);
+  if (!spans.length) return run;
+  const KEEP_WALL = new Set(["chimney", "sidepanel", "gtpt"]);
+  const FLOORBLOCK = new Set(["door", "balcony", "stair", "column"]);
+  if (Array.isArray(run.wallCabs) && run.wallCabs.length) {
+    let x = 0; for (const c of run.wallCabs) { c.x = x; x += c.w; }   // reflow → accurate centres
+    for (const sp of spans) run.wallCabs = run.wallCabs.filter((c) => {
+      const cc = c.x + c.w / 2, over = cc > sp.a && cc < sp.b && !KEEP_WALL.has(c.kind);
+      if (over) GEN_LOG.adjustments.push(`Opening-aware (§3): cleared ${c.label || c.kind} above a ${sp.kind} (${Math.round(sp.a)}–${Math.round(sp.b)} mm) — opening kept clear.`);
+      return !over;
+    });
+  }
+  for (const sp of spans) {
+    if (!FLOORBLOCK.has(sp.kind)) continue;
+    for (const c of (run.base || [])) { const cc = c.x + c.w / 2; if (cc > sp.a && cc < sp.b && c.kind !== "filler") GEN_LOG.conflicts.push(`Opening-aware (§3): ${c.label || c.kind} overlaps a ${sp.kind} (${Math.round(sp.a)}–${Math.round(sp.b)} mm) — relocate it (drag in the Top View) or move the ${sp.kind}.`); }
+  }
+  return run;
+}
+
 // User rule: a cabinet that meets a side WALL must have a ~50 mm scribe filler closing the wall gap
 // (standard Indian modular practice — leaves room to scribe to an out-of-plumb wall). Carve 50 mm from
 // the nearest flexible cabinet at that end and drop a 50 mm filler against the wall. The corner-join end
@@ -1431,6 +1471,7 @@ function buildKitchenLayout(type: string, dims: { wall: number; wallB?: number; 
   runs = runs.map(alignWallToBase);  // user rule (~90%): align upper cabinets to the lower cabinet below
   runs = runs.map(tidyWall);         // merge sub-120 mm mid-run wall slivers (keep 50 mm end fillers)
   runs = runs.map(applyWindows);     // 16/17 6.2: keep window openings clear of wall cabinets
+  runs = runs.map(applyOpenings);    // §3: keep doors/columns/ventilators/balcony/stair openings clear
   runs = runs.map(capWallFillers);   // user rule: a filler adjacent to a wall must not exceed 75 mm
   const checks = validateMandatory(runs);   // Part 6: validate against mandatory rules
   applied.push(`Mandatory-rule validator: ${checks} cooking run(s) checked — ${GEN_LOG.conflicts.length ? GEN_LOG.conflicts.length + " conflict(s) logged for admin review" : "all passed"}.`);
@@ -2100,8 +2141,20 @@ function scoreLayout(layout: any, dims: any): any {
     }
   }
   const windowFit = !GEN_WINDOWS.length ? 8 : winConflicts > 0 ? 3 : winCovers > 0 ? 6 : 10;
-  // No door geometry is modelled → neutral-good unless a window conflict implies clash.
-  const doorFit = 8;
+  // §3: real door/column fit — count base OR wall cabinets overlapping a floor-blocking opening.
+  const DOOR_KINDS = new Set(["door", "balcony", "stair", "column"]);
+  const doorList = ((layout as any).structures || GEN_STRUCTURES || []).filter((s: any) => DOOR_KINDS.has(s.kind));
+  let doorClashes = 0;
+  for (const s of doorList) {
+    const w = s.width && s.width > 0 ? s.width : (s.kind === "column" ? 300 : 800);
+    const a = s.pos == null ? null : s.pos, b = a == null ? null : a + w;
+    if (a == null) continue;
+    for (const r of runs) {
+      for (const bc of (r.base || [])) { const cc = (bc.x || 0) + (bc.w || 0) / 2; if (bc.kind !== "filler" && cc > a && cc < (b as number)) doorClashes++; }
+      for (const wc of (r.wallCabs || [])) { const cc = (wc.x || 0) + (wc.w || 0) / 2; if (cc > a && cc < (b as number)) doorClashes++; }
+    }
+  }
+  const doorFit = !doorList.length ? 8 : doorClashes === 0 ? 10 : Math.max(1, 8 - doorClashes * 2);
   // Beam fit: treat any window-front tall-unit conflict as the only modelled vertical clash.
   const beamFit = winConflicts > 0 ? 3 : 9;
   // Storage: reward storage-DENSE units (tall towers, pull-outs, drawers) + a modest board-area term,
@@ -2296,11 +2349,12 @@ function buildConsensus(type: string, dims: any, extra: any[] = []): { candidate
 }
 
 // ── Dispatcher: kitchens go to the run engine, everything else to furniture. ──
-function buildLayout(type: string, dims: { wall: number; wallB?: number; wallC?: number; chimneyWidth?: number; hob?: string; dishwasher?: string; hiunit?: string; utility?: string; handle?: string; applianceBrand?: string; points?: any[]; windows?: any[] }): Layout {
+function buildLayout(type: string, dims: { wall: number; wallB?: number; wallC?: number; chimneyWidth?: number; hob?: string; dishwasher?: string; hiunit?: string; utility?: string; handle?: string; applianceBrand?: string; points?: any[]; windows?: any[]; structures?: any[] }): Layout {
   refreshLearnedStandards();   // pull the latest active learned standards from the KB first
   GEN = { chimneyWidth: dims.chimneyWidth || STD.chimneyWidth, hob: dims.hob || "optional", dishwasher: dims.dishwasher || "optional", hiunit: dims.hiunit || "no", utility: dims.utility || "no", handle: dims.handle || "D Handle", applianceBrand: dims.applianceBrand || "Custom" };
   GEN_POINTS = Array.isArray(dims.points) ? dims.points : [];   // 15.txt 5.18: marked points drive placement
   GEN_WINDOWS = Array.isArray(dims.windows) ? dims.windows : [];   // 16/17 6.2: windows to respect
+  GEN_STRUCTURES = Array.isArray(dims.structures) ? dims.structures : [];   // §3: doors/columns/openings to respect
   GEN_LOG = { conflicts: [], adjustments: [] };   // reset the per-generation mandatory-rule audit
   FUNC_ROT = 0;                                    // deterministic functional-unit plan per generate
   const layout = type.toLowerCase().includes("kitchen") ? buildKitchenLayout(type, dims) : buildFurniture(type, dims);
@@ -2337,6 +2391,7 @@ function buildLayout(type: string, dims: { wall: number; wallB?: number; wallC?:
     (layout as any).cutList = cutList(layout);   // 12.pdf production panel cut list (also shown on-screen / in PDF)
     (layout as any).hardware = hardwareSchedule(layout);   // 12.pdf hardware schedule
     (layout as any).boq = boq(layout);                     // 12.pdf BOQ summary
+    (layout as any).structures = GEN_STRUCTURES;   // §3: attach BEFORE validation so the opening-clearance check sees them
     // Manufacturing practicality validation (11/12.pdf) — run before approval.
     const mfg = validateManufacturing(layout);
     (layout as any).mfgChecks = mfg;
@@ -2346,6 +2401,7 @@ function buildLayout(type: string, dims: { wall: number; wallB?: number; wallC?:
     layout.appliedRules.push("Wall-gap rule: a thin scribe filler closes the cabinet-to-wall gap; a filler adjacent to a wall is capped at 75 mm (excess folded into the neighbour), and fillers never sit mid-run. Exception: when the refrigerator is placed along the wall it stands flush — no scribe filler beside it.");
     layout.appliedRules.push("Upper↔lower alignment (~90%): wall cabinets are aligned to the base cabinet directly below (soft rule, relaxed at the chimney/GTPT zone).");
     if (GEN_POINTS.length) layout.appliedRules.push(`3D-first workflow (15.txt): ${GEN_POINTS.length} marked point(s) — ${[...new Set(GEN_POINTS.map((p) => p.type))].join(", ")}${pointAlong("chimney") != null ? "; chimney/3-drawer anchored to the marked chimney point" : ""}.`);
+    if (GEN_STRUCTURES.length) layout.appliedRules.push(`Opening-aware (§3): ${GEN_STRUCTURES.length} structure(s) respected — ${[...new Set(GEN_STRUCTURES.map((s) => s.kind))].join(", ")}; wall cabinets kept clear of every opening, base overlaps flagged for relocation.`);
     if (GEN_LOG.conflicts.length) layout.appliedRules.push("⚠ Conflicts (mandatory enforced): " + GEN_LOG.conflicts.join(" "));
     if (GEN_LOG.adjustments.length) layout.appliedRules.push("Non-standard adjustments: " + GEN_LOG.adjustments.join(" "));
   }
@@ -3959,6 +4015,30 @@ function validateManufacturing(layout: any): { name: string; ok: boolean; note: 
       : issues.slice(0, 4).join("; ") + "." });
     if (!ok) GEN_LOG.conflicts.push("Appliance swing: " + issues[0]);
   }
+  // §3/§15: no cabinet may overlap a door / column / ventilator / balcony / stair opening.
+  // Wall cabinets are auto-cleared by applyOpenings; this catches any BASE unit still standing
+  // over a floor-blocking opening (the designer relocates it via the Top-View planner).
+  {
+    const structs = (layout.structures || []) as any[];
+    const FLOORBLOCK = new Set(["door", "balcony", "stair", "column"]);
+    const clashes: string[] = [];
+    for (const s of structs) {
+      if (!FLOORBLOCK.has(s.kind)) continue;
+      const w = s.width && s.width > 0 ? s.width : (s.kind === "column" ? 300 : 800);
+      const a = s.pos == null ? null : s.pos, b = a == null ? null : a + w;
+      if (a == null) continue;
+      for (const r of runs) for (const c of ((r.base || []) as any[])) {
+        const cc = c.x + c.w / 2;
+        if (cc > a && cc < (b as number) && c.kind !== "filler")
+          clashes.push(`${c.label || c.kind} over a ${s.kind} (${Math.round(a)}–${Math.round(b as number)} mm) in ${r.name}`);
+      }
+    }
+    const ok = clashes.length === 0;
+    checks.push({ name: "Opening clearance (doors/columns)", ok, note: ok
+      ? (structs.length ? "No cabinet overlaps any door / column / ventilator / balcony / stair opening." : "No door/column openings defined for this room.")
+      : clashes.slice(0, 4).join("; ") + " — relocate (drag in the Top View) or move the opening." });
+    if (!ok) GEN_LOG.conflicts.push("Opening clearance: " + clashes[0]);
+  }
   return checks;
 }
 
@@ -4192,6 +4272,8 @@ const generateSchema = z.object({
   points: z.array(z.object({ type: z.string().max(30), wall: z.string().max(40).optional(), along: z.number().optional(), height: z.number().optional(), x: z.number().optional(), z: z.number().optional() })).max(60).optional(),
   // 16/17 6.2: windows the AI must respect (no wall cabinets over them, no tall units in front).
   windows: z.array(z.object({ wall: z.string().max(40).optional(), along: z.number(), width: z.number(), sill: z.number().optional(), height: z.number().optional() })).max(40).optional(),
+  // §3: doors / columns / ventilators / balcony / stair openings the AI must keep cabinets off.
+  structures: z.array(z.object({ kind: z.string().max(30), wall: z.string().max(40).optional(), pos: z.number().optional(), width: z.number().optional(), height: z.number().optional(), drop: z.number().optional(), sill: z.number().optional() })).max(40).optional(),
 });
 const aiPromptSchema = z.object({ prompt: z.string().min(1).max(2000) });
 
@@ -4501,8 +4583,8 @@ function reinforceStandards(cats: string[]) {
 
 app.post("/api/generate", zValidator("json", generateSchema), (c) => {
   try {
-    const { designType, wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows } = c.req.valid("json");
-    const layout = buildLayout(designType, { wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows });
+    const { designType, wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows, structures } = c.req.valid("json");
+    const layout = buildLayout(designType, { wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows, structures });
     const id = randomUUID();
     db.insert(designs).values({ id, designType, params: JSON.stringify({ wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand }), layout: JSON.stringify(layout), createdAt: new Date() }).run();
     // Persist the mandatory-rule audit (conflicts + ±10% adjustments) for the dashboard.
@@ -4525,7 +4607,7 @@ app.post("/api/generate-consensus", zValidator("json", generateSchema), async (c
     // Optional consensus-only fields are not in generateSchema → read them raw.
     let style: string | undefined, storagePriority: string | undefined, structures: any[] | undefined, useExternalAI = false;
     try { const raw = await c.req.json(); style = raw && raw.style; storagePriority = raw && raw.storagePriority; structures = raw && raw.structures; useExternalAI = !!(raw && raw.useExternalAI); } catch { /* body already consumed/empty — fine */ }
-    const dims = { wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows };
+    const dims = { wall, wallB, wallC, chimneyWidth, hob, dishwasher, hiunit, utility, handle, applianceBrand, points, windows, structures };
     const missing = detectMissing(points as any[], designType);
     const autoMode = missing.length > 0;
     const brief = designBrief(designType, dims, points as any[], windows as any[], missing, style, storagePriority, structures as any[]);
@@ -8371,6 +8453,7 @@ const frontendHTML = `<!DOCTYPE html>
           if (isKitchen) { body.chimneyWidth = Number(chimneyWidth); body.hob = hob; body.dishwasher = dishwasher; body.hiunit = hiunit; body.utility = utility; body.handle = handle; body.applianceBrand = applianceBrand; }
           if (isKitchen && points.length) body.points = points.map((p) => ({ type: p.type, wall: p.wall, along: p.along, height: p.height, x: p.x, z: p.z }));   // 15.txt 5.18: marked 3D points drive placement
           if (isKitchen && structures.some((s) => s.kind === "window")) body.windows = structures.filter((s) => s.kind === "window").map((s) => ({ wall: s.wall, along: +s.pos || 0, width: +s.width || 1200, sill: +s.sill || 900, height: +s.height || 1200 }));   // 6.2 windows to respect
+          if (isKitchen && structures.some((s) => s.kind !== "window")) body.structures = structures.filter((s) => s.kind !== "window").map((s) => ({ kind: s.kind, wall: s.wall, pos: +s.pos || 0, width: +s.width || 0, height: +s.height || 0, drop: +s.drop || 0 }));   // §3 doors/columns/ventilators/openings to respect
           if (designMode === "consensus") {   // 18.txt AI Consensus Design Mode (deterministic, internal strategies)
             body.designMode = "consensus"; body.style = style; body.storagePriority = storagePriority; body.useExternalAI = useExtAI;
             if (isKitchen && structures.length) body.structures = structures.map((s) => ({ kind: s.kind, wall: s.wall, pos: +s.pos || 0, width: +s.width || 0 }));   // 15.pdf Stage 2: beams/columns/ducts/doors → Master Design Brief
