@@ -10674,6 +10674,53 @@ const frontendHTML = `<!DOCTYPE html>
         if (t.luxury) ov.luxury = t.luxury;
         setInput((p) => Object.assign({}, p, ov));
       };
+      const rs = (n) => "Rs. " + (Math.round(n) || 0).toLocaleString("en-IN");
+      const wardSlug = (s) => String(s || "wardrobe").toLowerCase().replace(/[^\\w-]+/g, "-");
+      const exportWardrobeCsv = (o) => {
+        const esc = (s) => { s = String(s); return /[",\\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+        const rows = [];
+        rows.push(["WARDROBE", o.label, o.width + "x" + o.height + "x" + o.depth + " mm"]); rows.push([]);
+        rows.push(["CUTTING LIST"]); rows.push(["Panel", "Size", "Qty"]); o.reports.cut.forEach((r) => rows.push([r.part, r.size, r.qty])); rows.push([]);
+        rows.push(["BILL OF QUANTITIES"]); rows.push(["Item", "Qty", "Unit", "Rate", "Amount"]); o.boq.lines.forEach((r) => rows.push([r.item, r.qty, r.unit, r.rate, r.amount]));
+        rows.push(["", "", "", "Subtotal", o.boq.subtotal]); rows.push(["", "", "", "Labour", o.boq.labour]); rows.push(["", "", "", "GST", o.boq.gst]); rows.push(["", "", "", "Grand Total", o.boq.grandTotal]); rows.push([]);
+        rows.push(["HARDWARE"]); rows.push(["Item", "Qty"]); o.reports.hardware.forEach((h) => rows.push([h.item, h.qty])); rows.push([]);
+        rows.push(["CNC (" + o.cnc.system + ")"]); rows.push(["Panel", "Operation", "Holes", "Note"]); o.cnc.ops.forEach((op) => rows.push([op.panel, op.op, op.count, op.note]));
+        const csv = rows.map((r) => r.map(esc).join(",")).join("\\n");
+        saveBlobAs(new Blob([csv], { type: "text/csv" }), "wardrobe-" + wardSlug(o.label) + ".csv");
+      };
+      const exportWardrobePdf = async (o) => {
+        const jsPDF = window.jspdf && window.jspdf.jsPDF; if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
+        const P = new jsPDF({ orientation: "portrait", unit: "pt", format: [595, 842] });
+        const M = 40, PW = 595, PH = 842; let y = M;
+        const ensure = (need) => { if (y + need > PH - M) { P.addPage(); y = M; } };
+        P.setFillColor(79, 70, 229); P.rect(0, 0, PW, 64, "F");
+        P.setTextColor(255, 255, 255); P.setFontSize(18); P.text("Wardrobe Design Proposal", M, 30);
+        P.setFontSize(10); P.text(o.label + "  ·  " + o.width + " x " + o.height + " x " + o.depth + " mm", M, 48);
+        y = 88; P.setTextColor(30, 41, 59);
+        P.setFontSize(11); P.text("Design summary", M, y); y += 16; P.setFontSize(9);
+        [
+          "Users: " + input.maleUsers + " male, " + input.femaleUsers + " female, " + input.children + " children",
+          "Lifestyle: traditional " + input.traditional + " / western " + input.western + " / winter " + input.winter + " / luxury " + input.luxury,
+          "Strategy: " + o.label + "  -  overall confidence " + o.scorecard.overallConfidence + "%",
+          "Storage: " + o.stats.hanging + " hanging, " + o.stats.shelves + " shelves, " + o.stats.drawers + " drawers",
+          "Estimated total (incl. GST): " + rs(o.boq.grandTotal),
+        ].forEach((l) => { P.text(l, M, y); y += 13; });
+        y += 8;
+        for (const v of ["Front", "Internal", "Top", "Side", "Loft"]) {
+          const svg = o.views[v]; if (!svg) continue;
+          let png; try { png = await svgToPng(svg, 2); } catch (e) { continue; }
+          const aw = png.w || 560, ah = png.h || 400, imgW = PW - 2 * M, imgH = imgW * ah / aw;
+          ensure(imgH + 20); P.setFontSize(10); P.text(v + " view", M, y); y += 6; P.addImage(png.dataUrl, "PNG", M, y, imgW, imgH); y += imgH + 14;
+        }
+        ensure(40); P.setFontSize(11); P.text("Cutting list", M, y); y += 14; P.setFontSize(8.5);
+        o.reports.cut.forEach((r) => { ensure(12); P.text(String(r.part), M, y); P.text(String(r.size), M + 180, y); P.text("x" + r.qty, M + 330, y); y += 11; }); y += 6;
+        ensure(40); P.setFontSize(11); P.text("Bill of Quantities", M, y); y += 14; P.setFontSize(8.5);
+        o.boq.lines.forEach((r) => { ensure(12); P.text(String(r.item), M, y); P.text(r.qty + " " + r.unit, M + 230, y); P.text(rs(r.amount), M + 400, y); y += 11; });
+        [["Subtotal", o.boq.subtotal], ["Labour (22%)", o.boq.labour], ["GST (18%)", o.boq.gst], ["Grand Total", o.boq.grandTotal]].forEach((kv) => { ensure(12); P.text(String(kv[0]), M + 230, y); P.text(rs(kv[1]), M + 400, y); y += 12; }); y += 6;
+        ensure(40); P.setFontSize(11); P.text("Hardware", M, y); y += 14; P.setFontSize(8.5);
+        o.reports.hardware.forEach((h) => { ensure(12); P.text(String(h.item), M, y); P.text(String(h.qty), M + 330, y); y += 11; });
+        saveBlobAs(P.output("blob"), "wardrobe-" + wardSlug(o.label) + ".pdf");
+      };
       const opts = (data && data.options) || [];
       const sel = edited || opts[selIdx];   // reports + editor reflect drag-edits; the grid keeps the 3 AI proposals
       const best = data && data.recommendation ? data.recommendation.bestIndex : 0;
@@ -10687,7 +10734,11 @@ const frontendHTML = `<!DOCTYPE html>
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <h2 className="text-base font-semibold text-slate-800">🚪 Wardrobe AI Designer <span className="text-xs font-normal text-slate-400">· lifestyle → 3 optimised options · Indian standards</span></h2>
-            <button onClick={() => generate()} disabled={busy} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">{busy ? "Generating…" : "✨ Generate Options"}</button>
+            <div className="flex items-center gap-2">
+              {sel && <button onClick={() => exportWardrobePdf(sel)} className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium" title="Proposal PDF — drawings + cutting list + BOQ + hardware">⬇ PDF</button>}
+              {sel && <button onClick={() => exportWardrobeCsv(sel)} className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium" title="Cutting list + BOQ + hardware + CNC as CSV">⬇ CSV</button>}
+              <button onClick={() => generate()} disabled={busy} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">{busy ? "Generating…" : "✨ Generate Options"}</button>
+            </div>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
             {countSel("maleUsers", "👨 Male", 3)}{countSel("femaleUsers", "👩 Female", 3)}{countSel("children", "🧒 Children", 3)}{countSel("professionals", "👔 Professionals", 2)}
