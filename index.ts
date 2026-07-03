@@ -22,7 +22,7 @@ import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { eq, desc } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 import { readFileSync as fsRead, writeFileSync as fsWrite, existsSync as fsExists } from "fs";
-import { inflateSync } from "zlib";   // PNG IDAT decode for the server-side walkthrough GIF encoder (#6)
+import { inflateSync, inflateRawSync } from "zlib";   // PNG IDAT decode (GIF encoder #6) + ZIP member inflate (§8 multi-upload)
 
 // =============================================================================
 // 1. DATABASE LAYER — Drizzle ORM + SQLite (the "centralized AI knowledge DB")
@@ -240,6 +240,8 @@ const DRAWING_COMMANDS: string[] = [
 const UPLOAD_EXT: Record<string, string> = {
   dwg: "dwg", dxf: "dxf", pdf: "pdf", jpg: "image", jpeg: "image", png: "image",
   svg: "svg", skp: "skp", xml: "xml", bmp: "image", webp: "image",
+  // §8 multi-upload: extra raster formats + archive
+  tif: "image", tiff: "image", heic: "image", heif: "image", gif: "image", zip: "zip",
 };
 
 const DESIGN_TYPES = [
@@ -489,7 +491,7 @@ async function visionReadDrawing(name: string, fileType: string, category: strin
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": keys.anthropic, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: "claude-opus-4-8", max_tokens: 2000, messages: [{ role: "user", content: [block, { type: "text", text: ask }] }] }),
+        body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5", max_tokens: 2000, messages: [{ role: "user", content: [block, { type: "text", text: ask }] }] }), // regular tier: Sonnet 5 high-res vision reads drawings well at ~cheapest cost (override via ANTHROPIC_MODEL)
         signal: ac.signal,
       });
       if (res.ok) {
@@ -2785,8 +2787,71 @@ function renderPlan(type: string, runs: RunLayout[], dims: { wall: number; wallB
 function svgHead(W: number, H: number): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" data-mmscale="${PLAN_S}" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" font-family="monospace"><rect width="${W}" height="${H}" fill="#f4f7fb"/>`;
 }
-function sinkEllipse(cx: number, cy: number): string {
-  return `<ellipse cx="${cx}" cy="${cy}" rx="9" ry="6" fill="none" stroke="#0891b2" stroke-width="1.2"/>`;
+// ── §5 / §6 PROFESSIONAL ICON LIBRARY ──────────────────────────────────────
+// Single source of truth for appliance / fixture / electrical / plumbing / joinery
+// symbols. Each entry is normalized SVG inner-markup on a 0..24 box drawn with
+// stroke="currentColor" (solid dots use fill="currentColor"); the wrapping <g>
+// tints + scales it. Used by the server-side 2D plan renderers AND injected into
+// the client (as ADS_ICONS) so the interactive 2D canvas and the 3D scene draw
+// the SAME vector symbols — replacing the old flat dots/ellipses everywhere.
+const ADS_ICON_PATHS: Record<string, string> = {
+  generic: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  // ── Kitchen ──
+  sink: '<rect x="3" y="6" width="18" height="13" rx="2"/><circle cx="12" cy="13" r="2.2"/><path d="M12 6 V3.5 H16.5"/>',
+  sink2: '<rect x="2" y="6" width="20" height="13" rx="2"/><line x1="12" y1="6" x2="12" y2="19"/><circle cx="7" cy="12.5" r="1.7"/><circle cx="17" cy="12.5" r="1.7"/><path d="M12 6 V3.5"/>',
+  hob: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="2.4"/><circle cx="15.5" cy="8.5" r="2.4"/><circle cx="8.5" cy="15.5" r="2.4"/><circle cx="15.5" cy="15.5" r="2.4"/>',
+  chimney: '<path d="M3 20 L7 9 H17 L21 20"/><rect x="10" y="3" width="4" height="6"/><line x1="8.5" y1="14.5" x2="15.5" y2="14.5"/>',
+  fridge: '<rect x="6" y="2" width="12" height="20" rx="1.6"/><line x1="6" y1="9" x2="18" y2="9"/><line x1="9" y1="4.5" x2="9" y2="7"/><line x1="9" y1="11" x2="9" y2="15"/>',
+  microwave: '<rect x="2" y="6" width="20" height="12" rx="1.6"/><rect x="4.5" y="8.5" width="11" height="7"/><line x1="18" y1="9" x2="18" y2="15"/><circle cx="18" cy="9.4" r="0.7" fill="currentColor" stroke="none"/>',
+  oven: '<rect x="4" y="3" width="16" height="18" rx="1.6"/><line x1="4" y1="8" x2="20" y2="8"/><circle cx="8" cy="5.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="12" cy="5.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="16" cy="5.6" r="0.9" fill="currentColor" stroke="none"/><rect x="7" y="10.5" width="10" height="8"/>',
+  dishwasher: '<rect x="4" y="3" width="16" height="18" rx="1.6"/><line x1="4" y1="7" x2="20" y2="7"/><circle cx="7" cy="5" r="0.8" fill="currentColor" stroke="none"/><circle cx="12" cy="14" r="4"/>',
+  washing: '<rect x="4" y="3" width="16" height="18" rx="1.6"/><line x1="4" y1="7" x2="20" y2="7"/><circle cx="7" cy="5" r="0.8" fill="currentColor" stroke="none"/><circle cx="16" cy="5" r="0.8" fill="currentColor" stroke="none"/><circle cx="12" cy="14" r="5"/><circle cx="12" cy="14" r="2.3"/>',
+  ro: '<rect x="5" y="4" width="14" height="16" rx="1.6"/><path d="M12 8 c-2 3 -3 4.5 -3 6 a3 3 0 0 0 6 0 c0 -1.5 -1 -3 -3 -6 z"/>',
+  gas: '<path d="M9 7 v11 a3 3 0 0 0 6 0 V7"/><rect x="9" y="4.7" width="6" height="2.5" rx="1"/><rect x="10.5" y="2.4" width="3" height="2.4"/>',
+  water: '<path d="M12 3 c-4 5 -6 8 -6 11 a6 6 0 0 0 12 0 c0 -3 -2 -6 -6 -11 z"/>',
+  plumbing: '<path d="M12 3 c-4 5 -6 8 -6 11 a6 6 0 0 0 12 0 c0 -3 -2 -6 -6 -11 z"/>',
+  drain: '<circle cx="12" cy="12" r="8"/><line x1="7" y1="9.5" x2="17" y2="9.5"/><line x1="6.5" y1="12" x2="17.5" y2="12"/><line x1="7" y1="14.5" x2="17" y2="14.5"/>',
+  // ── Wardrobe / joinery ──
+  hanging: '<line x1="3" y1="6" x2="21" y2="6"/><path d="M8 6 l-3 6 h6 z"/><path d="M16 6 l-3 6 h6 z"/><path d="M7 6 a1 1 0 0 1 2 0"/><path d="M15 6 a1 1 0 0 1 2 0"/>',
+  drawer: '<rect x="3" y="5" width="18" height="14" rx="1.6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="9.5" y1="8.5" x2="14.5" y2="8.5"/><line x1="9.5" y1="15.5" x2="14.5" y2="15.5"/>',
+  trouser: '<rect x="4" y="4" width="16" height="16" rx="1.4"/><line x1="7" y1="8" x2="17" y2="8"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="7" y1="16" x2="17" y2="16"/>',
+  tie: '<rect x="4" y="4" width="16" height="16" rx="1.4"/><g fill="currentColor" stroke="none"><circle cx="8" cy="8" r="0.9"/><circle cx="12" cy="8" r="0.9"/><circle cx="16" cy="8" r="0.9"/><circle cx="8" cy="12" r="0.9"/><circle cx="12" cy="12" r="0.9"/><circle cx="16" cy="12" r="0.9"/><circle cx="8" cy="16" r="0.9"/><circle cx="12" cy="16" r="0.9"/><circle cx="16" cy="16" r="0.9"/></g>',
+  shoe: '<rect x="4" y="4" width="16" height="16" rx="1.4"/><line x1="6" y1="10" x2="18" y2="8"/><line x1="6" y1="15" x2="18" y2="13"/>',
+  jewellery: '<rect x="4" y="7" width="16" height="10" rx="1.4"/><line x1="9.3" y1="7" x2="9.3" y2="17"/><line x1="14.6" y1="7" x2="14.6" y2="17"/><line x1="4" y1="12" x2="20" y2="12"/>',
+  safe: '<rect x="4" y="4" width="16" height="16" rx="1.6"/><circle cx="11" cy="12" r="3.4"/><line x1="11" y1="12" x2="13.2" y2="12"/><line x1="16.6" y1="10" x2="16.6" y2="14"/>',
+  laundry: '<ellipse cx="12" cy="8" rx="6" ry="1.6"/><path d="M6 8 l1.5 12 h9 l1.5 -12"/><line x1="6.6" y1="12" x2="17.4" y2="12"/><line x1="9.5" y1="8" x2="9" y2="20"/><line x1="14.5" y1="8" x2="15" y2="20"/>',
+  // ── Furniture ──
+  tv: '<rect x="3" y="5" width="18" height="12" rx="1.4"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="17" x2="12" y2="20"/>',
+  sofa: '<path d="M4 11 V9 a2 2 0 0 1 2 -2 h12 a2 2 0 0 1 2 2 v2"/><rect x="2.5" y="11" width="19" height="6" rx="2"/><line x1="6" y1="17" x2="6" y2="19"/><line x1="18" y1="17" x2="18" y2="19"/>',
+  bed: '<rect x="3" y="6" width="18" height="12" rx="1.6"/><rect x="5" y="8" width="14" height="3.4" rx="1"/><line x1="3" y1="13.5" x2="21" y2="13.5"/>',
+  dining: '<rect x="7" y="7" width="10" height="10" rx="1.2"/><rect x="2.5" y="9.5" width="2.6" height="5" rx="0.6"/><rect x="18.9" y="9.5" width="2.6" height="5" rx="0.6"/><rect x="9.5" y="2.5" width="5" height="2.6" rx="0.6"/><rect x="9.5" y="18.9" width="5" height="2.6" rx="0.6"/>',
+  study: '<rect x="4" y="8" width="16" height="2.4" rx="0.6"/><line x1="6" y1="10.4" x2="6" y2="19"/><line x1="18" y1="10.4" x2="18" y2="19"/><rect x="12" y="11.5" width="6" height="5"/>',
+  dressing: '<rect x="7" y="3" width="10" height="9" rx="4"/><rect x="4" y="13" width="16" height="3" rx="0.8"/><line x1="6" y1="16" x2="6" y2="20"/><line x1="18" y1="16" x2="18" y2="20"/>',
+  // ── Electrical ──
+  switchboard: '<rect x="5" y="3" width="14" height="18" rx="1.6"/><rect x="8" y="6" width="8" height="3" rx="0.6"/><rect x="8" y="11" width="8" height="3" rx="0.6"/><rect x="8" y="16" width="8" height="3" rx="0.6"/>',
+  socket: '<circle cx="12" cy="12" r="8"/><rect x="11.2" y="7.6" width="1.6" height="2.6" rx="0.6" fill="currentColor" stroke="none"/><rect x="8.8" y="13" width="1.6" height="2.6" rx="0.6" fill="currentColor" stroke="none"/><rect x="13.6" y="13" width="1.6" height="2.6" rx="0.6" fill="currentColor" stroke="none"/>',
+  light: '<circle cx="12" cy="10" r="5"/><path d="M9.5 14 h5 M10 16.5 h4 M10.5 19 h3"/><path d="M12 3 V1.4 M4.6 6 L3.4 4.8 M19.4 6 l1.2 -1.2 M4 11 H2.4 M22 11 h-1.6"/>',
+  fan: '<circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><path d="M12 12 C9 9 8 5 11 4 c2 0 2 4 1 8 z"/><path d="M12 12 C15 9 19 8 20 11 c0 2 -4 2 -8 1 z"/><path d="M12 12 C13 15 12 19 9 20 c-2 -1 -1 -5 3 -8 z"/>',
+};
+// Default tint per type (mirrors the client PC map; extra joinery/furniture keys added).
+const ADS_ICON_COLORS: Record<string, string> = {
+  sink: "#2563eb", sink2: "#2563eb", plumbing: "#0891b2", water: "#0891b2", drain: "#0e7490",
+  ro: "#14b8a6", chimney: "#6366f1", hob: "#ea580c", gas: "#dc2626", fridge: "#8b5cf6",
+  microwave: "#f59e0b", oven: "#d97706", dishwasher: "#0ea5e9", washing: "#64748b",
+  switchboard: "#eab308", socket: "#22c55e", light: "#f59e0b", fan: "#0ea5e9",
+  hanging: "#7c3aed", drawer: "#9333ea", trouser: "#7c3aed", tie: "#a855f7", shoe: "#8b5cf6",
+  jewellery: "#c026d3", safe: "#475569", laundry: "#0d9488",
+  tv: "#334155", sofa: "#b45309", bed: "#be123c", dining: "#a16207", study: "#0f766e", dressing: "#db2777",
+  generic: "#334155",
+};
+// Server-side icon → <g> wrapper (translate+scale a 24-box to pixel size at cx,cy).
+function svgIcon(type: string, cx: number, cy: number, size: number, color?: string): string {
+  const inner = ADS_ICON_PATHS[type] || ADS_ICON_PATHS.generic;
+  const s = size / 24, col = color || ADS_ICON_COLORS[type] || "#334155";
+  return `<g transform="translate(${(cx - size / 2).toFixed(2)},${(cy - size / 2).toFixed(2)}) scale(${s.toFixed(4)})" style="color:${col}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${inner}</g>`;
+}
+function sinkEllipse(cx: number, cy: number, size = 26): string {
+  return svgIcon("sink", cx, cy, size);
 }
 
 function renderPlanStraight(type: string, run: RunLayout): string {
@@ -2799,9 +2864,10 @@ function renderPlanStraight(type: string, run: RunLayout): string {
   for (const c of run.base) {
     p.push(`<rect x="${xOf(c.x)}" y="${top}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
     if (c.kind === "sink") p.push(sinkEllipse(xOf(c.x) + c.w * S / 2, top + d * S / 2));
+    if (c.kind === "hob" || c.kind === "drawer3") p.push(svgIcon("hob", xOf(c.x) + c.w * S / 2, top + d * S / 2, Math.min(c.w * S, d * S) * 0.62));
   }
-  p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${top - 6}" width="${GEN.chimneyWidth * S}" height="5" fill="#a5b4fc"/>`);
-  p.push(`<text x="${xOf(La / 2)}" y="${top - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
+  p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${top - 5}" width="${GEN.chimneyWidth * S}" height="3.5" fill="#c7d2fe"/>`);
+  p.push(svgIcon("chimney", xOf(La / 2), top - 11, 20));
   p.push(`</svg>`);
   return p.join("");
 }
@@ -2819,15 +2885,19 @@ function renderPlanL(runA: RunLayout, runB: RunLayout, La: number, Lb: number, o
   if (!opts.openLeg) p.push(`<line x1="${ox}" y1="${oy}" x2="${ox}" y2="${yOf(Lb)}" stroke="#64748b" stroke-width="3"/>`);
   else p.push(`<text x="${ox + d * S / 2}" y="${yOf(Lb) + 8}" fill="#94a3b8" font-size="6" text-anchor="middle">seating</text>`);
   // Run A — back wall (cabinets hang down)
-  for (const c of runA.base) p.push(`<rect x="${xOf(c.x)}" y="${oy}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+  for (const c of runA.base) {
+    p.push(`<rect x="${xOf(c.x)}" y="${oy}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+    if (c.kind === "sink") p.push(sinkEllipse(xOf(c.x) + c.w * S / 2, oy + d * S / 2));
+    if (c.kind === "hob" || c.kind === "drawer3") p.push(svgIcon("hob", xOf(c.x) + c.w * S / 2, oy + d * S / 2, Math.min(c.w * S, d * S) * 0.62));
+  }
   // Run B — left wall (cabinets extend right), drawn vertically
   for (const c of runB.base) {
     p.push(`<rect x="${ox}" y="${yOf(c.x)}" width="${d * S}" height="${c.w * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
     if (c.kind === "sink") p.push(sinkEllipse(ox + d * S / 2, yOf(c.x) + c.w * S / 2));
   }
   // chimney mark on Run A centre + corner label
-  p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${oy - 6}" width="${GEN.chimneyWidth * S}" height="5" fill="#a5b4fc"/>`);
-  p.push(`<text x="${xOf(La / 2)}" y="${oy - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
+  p.push(`<rect x="${xOf(La / 2 - GEN.chimneyWidth / 2)}" y="${oy - 5}" width="${GEN.chimneyWidth * S}" height="3.5" fill="#c7d2fe"/>`);
+  p.push(svgIcon("chimney", xOf(La / 2), oy - 11, 20));
   p.push(`<text x="${ox + d * S / 2}" y="${oy + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">corner</text>`);
   p.push(`</svg>`);
   return p.join("");
@@ -4164,42 +4234,106 @@ app.post("/api/references", zValidator("json", uploadSchema), (c) => {
   } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
 });
 
+// §8 ZIP extractor — dependency-free (Node zlib inflateRawSync). Parses the
+// Central Directory (reliable sizes/offsets), then reads + inflates each stored
+// (0) / deflated (8) member. No zip64 / encryption. Directory + __MACOSX skipped.
+function unzipEntries(zip: Buffer): { name: string; buf: Buffer }[] {
+  const out: { name: string; buf: Buffer }[] = [];
+  let eocd = -1;
+  for (let i = zip.length - 22; i >= Math.max(0, zip.length - 66000); i--) {
+    if (zip.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) return out;
+  const count = zip.readUInt16LE(eocd + 10);
+  let p = zip.readUInt32LE(eocd + 16);   // start of central directory
+  for (let n = 0; n < count && p + 46 <= zip.length; n++) {
+    if (zip.readUInt32LE(p) !== 0x02014b50) break;
+    const method = zip.readUInt16LE(p + 10);
+    const compSize = zip.readUInt32LE(p + 20);
+    const fnLen = zip.readUInt16LE(p + 28);
+    const exLen = zip.readUInt16LE(p + 30);
+    const cmLen = zip.readUInt16LE(p + 32);
+    const lho = zip.readUInt32LE(p + 42);   // local header offset
+    const name = zip.slice(p + 46, p + 46 + fnLen).toString("utf8");
+    p += 46 + fnLen + exLen + cmLen;
+    if (name.endsWith("/") || name.startsWith("__MACOSX")) continue;
+    if (lho + 30 > zip.length || zip.readUInt32LE(lho) !== 0x04034b50) continue;
+    const dataStart = lho + 30 + zip.readUInt16LE(lho + 26) + zip.readUInt16LE(lho + 28);
+    const rawData = zip.slice(dataStart, dataStart + compSize);
+    try {
+      const data = method === 0 ? rawData : method === 8 ? inflateRawSync(rawData) : null;
+      if (data && data.length) out.push({ name: name.split("/").pop() || name, buf: Buffer.from(data) });
+    } catch (_) { /* skip corrupt member */ }
+  }
+  return out;
+}
+
+// Ingest ONE drawing (analyse → dedup → persist → features). Returns a summary row.
+async function ingestOne(name: string, buf: Buffer, category: string, approved: boolean): Promise<any> {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  const fileType = UPLOAD_EXT[ext];
+  if (!fileType || fileType === "zip") return { name, status: "skipped", error: `Unsupported .${ext}` };
+  const hash = createHash("sha256").update(buf).digest("hex").slice(0, 16); // hash CONTENT (true dedup)
+  const dup = db.select().from(references).where(eq(references.contentHash, hash)).get();
+  const analysis = await analyzeDrawing(name, fileType, category, buf);
+  if (dup) analysis.status = "duplicate";
+  const id = randomUUID();
+  db.insert(references).values({
+    id, name, fileType, category, status: analysis.status === "duplicate" ? "duplicate" : "learned",
+    approved: approved ? 1 : 0, confidence: dup ? 0 : analysis.confidence, contentHash: hash,
+    size: buf.length, analysis: JSON.stringify(analysis), createdAt: new Date(),
+  }).run();
+  if (!dup) {   // persist detected features for the dashboard / drill-down
+    const insFeat = sqlite.prepare(`INSERT INTO features(id,ref_id,kind,label,created_at) VALUES(?,?,?,?,?)`);
+    for (const cab of analysis.detectedCabinets) insFeat.run(randomUUID(), id, "cabinet", cab, Date.now());
+    for (const u of analysis.utilities) insFeat.run(randomUUID(), id, "utility", u, Date.now());
+  }
+  return { id, name, fileType, category, status: analysis.status, size: buf.length, analysis };
+}
+
 // POST /api/references/upload — REAL file upload (2.txt Drawing Upload module).
-// Accepts dwg/dxf/pdf/jpg/png/svg/skp/… analyses the drawing, stores it as
-// learned with a "What AI Learned from Uploaded Drawing" summary.
+// §8: now accepts MANY files at once (multi-select / folder / drag-drop) and
+// expands ZIP archives, ingesting every supported member. Back-compat: `data`
+// = the first result; `results[]` + `summary` cover the whole batch.
 app.post("/api/references/upload", async (c) => {
   try {
-    const body = await c.req.parseBody();
-    const file = body["file"] as unknown as File;
-    if (!file || typeof (file as any).arrayBuffer !== "function") return c.json({ error: "No file uploaded (field 'file')" }, 400);
-    const category = String(body["category"] || "kitchen");
-    const approved = String(body["approved"] || "") === "true";
-    const name = (file as any).name || "drawing";
-    const ext = (name.split(".").pop() || "").toLowerCase();
-    const fileType = UPLOAD_EXT[ext];
-    if (!fileType) return c.json({ error: `Unsupported format .${ext}. Allowed: ${[...new Set(Object.keys(UPLOAD_EXT))].join(", ")}` }, 400);
+    const body = await c.req.parseBody({ all: true });
+    const category = String((body["category"] as any) || "kitchen");
+    const approved = String((body["approved"] as any) || "") === "true";
+    const raw: any[] = [];
+    for (const k of ["file", "file[]", "files", "files[]"]) {
+      const v = (body as any)[k];
+      if (Array.isArray(v)) raw.push(...v); else if (v) raw.push(v);
+    }
+    const files = raw.filter((f) => f && typeof f.arrayBuffer === "function");
+    if (!files.length) return c.json({ error: "No file uploaded (field 'file')" }, 400);
 
-    const buf = Buffer.from(await (file as any).arrayBuffer());
-    const hash = createHash("sha256").update(buf).digest("hex").slice(0, 16); // hash CONTENT (true dedup)
-    const dup = db.select().from(references).where(eq(references.contentHash, hash)).get();
-    const analysis = await analyzeDrawing(name, fileType, category, buf);
-    if (dup) analysis.status = "duplicate";
-
-    const id = randomUUID();
-    db.insert(references).values({
-      id, name, fileType, category, status: analysis.status === "duplicate" ? "duplicate" : "learned",
-      approved: approved ? 1 : 0, confidence: dup ? 0 : analysis.confidence, contentHash: hash,
-      size: buf.length, analysis: JSON.stringify(analysis), createdAt: new Date(),
-    }).run();
-
-    // Persist detected features for the dashboard / drill-down.
-    if (!dup) {
-      const insFeat = sqlite.prepare(`INSERT INTO features(id,ref_id,kind,label,created_at) VALUES(?,?,?,?,?)`);
-      for (const cab of analysis.detectedCabinets) insFeat.run(randomUUID(), id, "cabinet", cab, Date.now());
-      for (const u of analysis.utilities) insFeat.run(randomUUID(), id, "utility", u, Date.now());
+    const results: any[] = [];
+    for (const f of files) {
+      const name = (f as any).name || "drawing";
+      const ext = (name.split(".").pop() || "").toLowerCase();
+      const buf = Buffer.from(await (f as any).arrayBuffer());
+      if (ext === "zip") {
+        const entries = unzipEntries(buf);
+        if (!entries.length) { results.push({ name, status: "skipped", error: "Empty / unreadable ZIP" }); continue; }
+        for (const e of entries) results.push(await ingestOne(e.name, e.buf, category, approved));
+      } else if (UPLOAD_EXT[ext]) {
+        results.push(await ingestOne(name, buf, category, approved));
+      } else {
+        results.push({ name, status: "skipped", error: `Unsupported .${ext}` });
+      }
     }
     cache.invalidatePrefix("kb:");
-    return c.json({ data: { id, name, fileType, category, status: analysis.status, size: buf.length, analysis } }, 201);
+    const ok = results.filter((r) => r.status !== "skipped");
+    return c.json({
+      data: ok[0] || results[0], results,
+      summary: {
+        total: results.length,
+        learned: results.filter((r) => r.status === "learned").length,
+        duplicate: results.filter((r) => r.status === "duplicate").length,
+        skipped: results.filter((r) => r.status === "skipped").length,
+      },
+    }, 201);
   } catch (err) { console.error(err); return c.json({ error: "Upload/analysis failed" }, 500); }
 });
 
@@ -4954,6 +5088,16 @@ const frontendHTML = `<!DOCTYPE html>
     const { useState, useEffect, useCallback, useRef } = React;
     const api = (url, opts) => fetch(url, opts).then(r => r.json());
     const CABINET_WIDTHS = ${JSON.stringify([300, 350, 400, 450, 500, 600, 700, 800, 900, 1000, 1200])};
+    // §5/§6 shared professional icon library (same vectors the server draws in 2D plans).
+    const ADS_ICONS = ${JSON.stringify(ADS_ICON_PATHS)};
+    const ADS_ICON_COLORS = ${JSON.stringify(ADS_ICON_COLORS)};
+    // Render a normalized 24-box symbol as an SVG <g> (scaled + tinted) at (cx,cy).
+    function IconSym({ type, cx, cy, size, color }) {
+      const inner = (ADS_ICONS[type] || ADS_ICONS.generic) || "";
+      const col = color || ADS_ICON_COLORS[type] || "#334155";
+      const tx = (cx - size / 2), ty = (cy - size / 2), s = size / 24;
+      return <g transform={"translate(" + tx + "," + ty + ") scale(" + s + ")"} style={{ color: col }} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" dangerouslySetInnerHTML={{ __html: inner }} />;
+    }
     const DRAWER_WIDTHS_C = ${JSON.stringify(DRAWER_WIDTHS)};
     const STD_C = ${JSON.stringify(STD)};
     const FAB_MATERIALS_C = ${JSON.stringify(["18mm BWR Plywood", "18mm MR Plywood", "18mm HDHMR", "18mm MDF", "18mm Particle Board", "16mm BWR Plywood", "12mm Plywood", "6mm Back Panel", "4mm Back Laminate"])};
@@ -6115,7 +6259,15 @@ const frontendHTML = `<!DOCTYPE html>
         const sel = isSel("point", p.id);
         const down = (e) => { e.stopPropagation(); onSelect && onSelect({ kind: "point", id: p.id }); if (p.wall !== "Floor") setDrag({ kind: "point", id: p.id, wall: p.wall, width: 0 }); };
         const ctx = (e) => { e.preventDefault(); e.stopPropagation(); onDeleteObj && onDeleteObj("point", p.id); };
-        els.push(<circle key={p.id} cx={px} cy={py} r={sel ? 7 : 5.5} fill={PC[p.type] || "#334155"} stroke={sel ? "#ea580c" : "#fff"} strokeWidth={sel ? 2.5 : 1.4} style={{ cursor: "move" }} onPointerDown={down} onContextMenu={ctx} />);
+        // §5/§6: professional vector symbol (not a dot). Selection halo + a transparent
+        // hit-disc keeps the whole icon grabbable (icons are stroke-only → fill=none isn't hittable).
+        els.push(
+          <g key={p.id} style={{ cursor: "move" }} onPointerDown={down} onContextMenu={ctx}>
+            {sel && <circle cx={px} cy={py} r={13} fill="#fff7ed" stroke="#ea580c" strokeWidth={2} />}
+            <IconSym type={p.type} cx={px} cy={py} size={sel ? 22 : 19} />
+            <circle cx={px} cy={py} r={12} fill="transparent" />
+          </g>
+        );
       });
       els.push(<text key="lab" x={pad + w / 2} y={pad + h + 14} fill="#94a3b8" fontSize="9" textAnchor="middle">Top View — {Wd}×{Dp} mm · drag objects · right-click to delete</text>);
       return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Top View (editable) — click &amp; drag doors/windows/beams/points along their wall · right-click to delete</div><svg ref={svgRef} width={w + pad * 2} height={h + pad * 2 + 18} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
@@ -6171,7 +6323,19 @@ const frontendHTML = `<!DOCTYPE html>
         mkWall("Wall D (left)", Dp, 0, Dp / 2, Math.PI / 2);
         // 5.17 mandatory-point markers (sphere per point on its wall/floor; distance + height stored)
         const pointWorld = (p) => { const a = +p.along || 0, hy = +p.height || 0; if (p.wall === "Floor") return [+p.x || Wd / 2, 35, +p.z || Dp / 2]; if (p.wall.indexOf("back") >= 0) return [a, hy, th / 2 + 10]; if (p.wall.indexOf("front") >= 0) return [a, hy, Dp - th / 2 - 10]; if (p.wall.indexOf("right") >= 0) return [Wd - th / 2 - 10, hy, a]; return [th / 2 + 10, hy, a]; };
-        (points || []).forEach((p) => { const w3 = pointWorld(p); const col = POINT_COLORS[p.type] || 0x334155; const m = new THREE.Mesh(new THREE.SphereGeometry(48, 14, 14), new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.35 })); m.position.set(w3[0], w3[1], w3[2]); m.castShadow = true; scene.add(m); });
+        (points || []).forEach((p) => {
+          const w3 = pointWorld(p); const col = POINT_COLORS[p.type] || 0x334155;
+          const m = new THREE.Mesh(new THREE.SphereGeometry(30, 12, 12), new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.35 })); m.position.set(w3[0], w3[1], w3[2]); m.castShadow = true; scene.add(m);
+          // §5/§6: float the SAME vector symbol above the marker as a billboard sprite (no more bare dots in 3D)
+          const hex = "#" + col.toString(16).padStart(6, "0");
+          const inner = (ADS_ICONS[p.type] || ADS_ICONS.generic) || "";
+          const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='128' height='128' viewBox='-2 -2 28 28' fill='none' stroke='" + hex + "' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round' style='color:" + hex + "'><rect x='-2' y='-2' width='28' height='28' rx='5' fill='white'/>" + inner + "</svg>";
+          const tex = new THREE.Texture(); const img = new Image();
+          img.onload = () => { tex.image = img; tex.needsUpdate = true; };
+          img.src = "data:image/svg+xml;base64," + btoa(svg);
+          const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+          sp.position.set(w3[0], w3[1] + 170, w3[2]); sp.scale.set(230, 230, 1); scene.add(sp);
+        });
         const cx = Wd / 2, cz = Dp / 2, span = Math.max(Wd, Dp, 2000);
         camera.position.set(cx + span * 0.7, Ht * 1.6, cz + span * 1.3);
         const controls = new THREE.OrbitControls(camera, renderer.domElement);
@@ -9009,6 +9173,36 @@ const frontendHTML = `<!DOCTYPE html>
                     </ul>
                   </div>
                 )}
+                {result.standardsChecks && result.standardsChecks.length > 0 && (() => {
+                  const cs = result.standardsChecks;
+                  const errs = cs.filter(c => c.level === "error").length;
+                  const warns = cs.filter(c => c.level === "warning").length;
+                  const passed = cs.filter(c => c.ok).length;
+                  const badge = errs > 0 ? "bg-red-100 text-red-700 border-red-300"
+                    : warns > 0 ? "bg-amber-100 text-amber-700 border-amber-300"
+                    : "bg-emerald-100 text-emerald-700 border-emerald-300";
+                  const icon = errs > 0 ? "✕" : warns > 0 ? "⚠" : "✓";
+                  const label = errs > 0 ? (errs + (errs > 1 ? " issues" : " issue"))
+                    : warns > 0 ? (warns + (warns > 1 ? " warnings" : " warning"))
+                    : "All ergonomic";
+                  return (
+                    <div>
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <h3 className="text-sm font-semibold text-cyan-600">Indian standards</h3>
+                        <span className={"text-[11px] font-semibold px-2 py-0.5 rounded-full border " + badge}>{icon} {label} · {passed}/{cs.length}</span>
+                      </div>
+                      <ul className="text-xs space-y-1">
+                        {cs.filter(c => !c.ok).map((m, i) => (
+                          <li key={i} className={m.level === "error" ? "text-red-700" : "text-amber-700"}>
+                            <span className="font-medium">{m.level === "error" ? "✕" : "⚠"} {m.name}:</span> {m.note}
+                          </li>
+                        ))}
+                        {errs === 0 && warns === 0 && <li className="text-emerald-600">✓ All {cs.length} dimensions within Indian wardrobe/kitchen standards (hanging heights, shelf gaps, depths, parts-sum-to-whole).</li>}
+                        {errs > 0 && <li className="text-[11px] text-red-500 italic">Errors mean the unit is not buildable/usable as dimensioned — fix before approval.</li>}
+                      </ul>
+                    </div>
+                  );
+                })()}
                 {result.id && <StructurePanel designId={result.id} runs={liveRuns || result.runs} dtype={type} dresult={result} />}
                 {result.cutList && result.cutList.length > 0 && (
                   <details className="text-xs">
@@ -9108,22 +9302,40 @@ const frontendHTML = `<!DOCTYPE html>
       const [selected, setSelected] = useState(null);
       const [learnBusy, setLearnBusy] = useState(null);
       const fileRef = useRef(null);
+      const folderRef = useRef(null);
       const load = useCallback(async () => { setLoading(true); const j = await api("/api/references"); setRefs(j.data || []); setLoading(false); }, []);
       useEffect(() => { load(); }, [load]);
 
-      const upload = async (file) => {
-        if (!file) return;
-        setUploading(true); setUploadMsg("");
+      // §8: upload MANY files at once (multi-select / folder / drop / ZIP). Batched
+      // in chunks so a large folder streams with live progress; the server expands
+      // ZIPs and returns a per-batch summary that we aggregate.
+      const uploadMany = async (fileList) => {
+        const all = Array.from(fileList || []).filter(Boolean);
+        if (!all.length) return;
+        setUploading(true); setUploadMsg("Uploading " + all.length + " file(s)…");
+        const agg = { total: 0, learned: 0, duplicate: 0, skipped: 0 }; let firstData = null;
         try {
-          const fd = new FormData();
-          fd.append("file", file); fd.append("category", category); fd.append("approved", approved ? "true" : "false");
-          const res = await fetch("/api/references/upload", { method: "POST", body: fd });
-          const j = await res.json();
-          if (j.error) setUploadMsg("✗ " + j.error);
-          else { setSelected(j.data); setUploadMsg("✓ Analyzed " + j.data.name + " — " + j.data.status); await load(); }
+          const CH = 12;
+          for (let i = 0; i < all.length; i += CH) {
+            const chunk = all.slice(i, i + CH);
+            const fd = new FormData();
+            chunk.forEach(f => fd.append("file", f));
+            fd.append("category", category); fd.append("approved", approved ? "true" : "false");
+            setUploadMsg("Analyzing " + Math.min(i + CH, all.length) + "/" + all.length + "…");
+            const res = await fetch("/api/references/upload", { method: "POST", body: fd });
+            const j = await res.json();
+            if (j.error) { setUploadMsg("✗ " + j.error); setUploading(false); return; }
+            const s = j.summary || { total: (j.results || []).length, learned: 0, duplicate: 0, skipped: 0 };
+            agg.total += s.total; agg.learned += s.learned; agg.duplicate += s.duplicate; agg.skipped += s.skipped;
+            if (!firstData && j.data) firstData = j.data;
+          }
+          if (firstData) setSelected(firstData);
+          setUploadMsg("✓ " + agg.total + " processed · " + agg.learned + " learned · " + agg.duplicate + " dup" + (agg.skipped ? " · " + agg.skipped + " skipped" : ""));
+          await load();
         } catch (e) { setUploadMsg("✗ Upload failed"); }
         setUploading(false);
       };
+      const upload = (file) => uploadMany(file ? [file] : []);
       const open = async (id) => { const j = await api("/api/references/" + id); if (j.data) setSelected(j.data); };
       const learn = async (command) => {
         if (!selected) return;
@@ -9140,15 +9352,20 @@ const frontendHTML = `<!DOCTYPE html>
           {/* Upload + corpus */}
           <div className="space-y-4">
             <div className="bg-white rounded-xl p-5 border border-slate-200 space-y-3">
-              <h2 className="text-lg font-semibold">Upload Reference Drawing</h2>
-              <p className="text-xs text-slate-500">Upload a CAD/drawing file. The AI reads &amp; learns from it before generating new designs (2.txt module). DXF/SVG are vector-parsed; others use heuristic detection. Duplicate content is auto-detected.</p>
+              <h2 className="text-lg font-semibold">Upload Reference Drawings</h2>
+              <p className="text-xs text-slate-500">Upload many CAD/drawing files at once — multi-select, whole folders, or a ZIP. The AI reads &amp; learns from each before generating new designs (2.txt module). DXF/SVG are vector-parsed; others use heuristic detection. Duplicate content is auto-detected.</p>
               <div onClick={() => fileRef.current && fileRef.current.click()}
                 onDragOver={e => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)}
-                onDrop={e => { e.preventDefault(); setDragOver(false); upload(e.dataTransfer.files[0]); }}
+                onDrop={e => { e.preventDefault(); setDragOver(false); uploadMany(e.dataTransfer.files); }}
                 className={"border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors " + (dragOver ? "border-cyan-500 bg-cyan-500/5" : "border-slate-300 hover:border-slate-400")}>
-                <input ref={fileRef} type="file" className="hidden" accept=".dwg,.dxf,.pdf,.jpg,.jpeg,.png,.svg,.skp,.xml,.bmp,.webp" onChange={e => upload(e.target.files[0])} />
-                <div className="text-slate-700 text-sm">{uploading ? "Analyzing drawing…" : "Drop a drawing here or click to browse"}</div>
-                <div className="text-[11px] text-slate-500 mt-1">.dwg .dxf .pdf .jpg .png .svg .skp .xml</div>
+                <input ref={fileRef} type="file" multiple className="hidden" accept=".dwg,.dxf,.pdf,.jpg,.jpeg,.png,.svg,.skp,.xml,.bmp,.webp,.tif,.tiff,.heic,.heif,.gif,.zip" onChange={e => uploadMany(e.target.files)} />
+                <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={e => uploadMany(e.target.files)} />
+                <div className="text-slate-700 text-sm">{uploading ? "Analyzing drawings…" : "Drop drawings/ZIP here, or click to select multiple"}</div>
+                <div className="text-[11px] text-slate-500 mt-1">.dwg .dxf .pdf .jpg .png .svg .tif .heic .gif .zip · multi-select &amp; folders</div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => fileRef.current && fileRef.current.click()} className="flex-1 text-xs px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 hover:border-cyan-500 hover:text-cyan-700 transition-colors">🖼 Select files</button>
+                <button onClick={() => folderRef.current && folderRef.current.click()} className="flex-1 text-xs px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 hover:border-cyan-500 hover:text-cyan-700 transition-colors">📁 Upload folder</button>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <input value={category} onChange={e => setCategory(e.target.value)} placeholder="category" className="px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg text-sm" />
