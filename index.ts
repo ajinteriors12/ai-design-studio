@@ -11276,6 +11276,10 @@ function rederiveLayout(layout: any) {
   if (layout.applianceBrand) GEN.applianceBrand = layout.applianceBrand;
   try { GEN_LOG.conflicts.length = 0; GEN_LOG.adjustments.length = 0; } catch { }
   try { if (Array.isArray(layout.runs)) layout.elevations = layout.runs.map((r: any) => ({ name: r.name, svg: renderRunElevation(r) })); } catch { }
+  // Rebuild the PLAN + sections from the edited runs too — previously only elevations
+  // were re-rendered, so after a canvas edit / propagate / beam-trim the plan drawing
+  // (the primary view, also the DXF/spec-sheet source) silently showed pre-edit widths.
+  try { if (Array.isArray(layout.runs) && layout.type && layout.dims) { layout.planSvg = renderPlan(layout.type, layout.runs, layout.dims); layout.sections = layout.runs.map((r: any) => ({ name: r.name, svg: renderRunSection(r) })); } } catch { }
   layout.cutList = cutList(layout);
   layout.hardware = hardwareSchedule(layout);
   layout.boq = boq(layout);
