@@ -162,6 +162,10 @@ class MemoryCache {
     this.store.set(key, { value, expiresAt: ttlMs ? Date.now() + ttlMs : null });
   }
   del(key: string): void { this.store.delete(key); }
+  wrap<T>(key: string, fn: () => T, ttlMs?: number): T {
+    const hit = this.get<T>(key); if (hit !== null) return hit;
+    const val = fn(); this.set(key, val, ttlMs); return val;
+  }
   invalidatePrefix(prefix: string): void {
     for (const key of this.store.keys()) if (key.startsWith(prefix)) this.store.delete(key);
   }
@@ -2228,6 +2232,68 @@ function consensusTotal(scores: any): number {
   return Math.round((sum / (wsum * 10)) * 100);
 }
 
+// §12/§13: find previously-generated designs of the same type with a close footprint.
+// Returns a best-match similarity % + how many comparable priors exist (drives the
+// "Similarity with previous projects" scorecard metric and reference-based reuse).
+function findSimilarDesigns(type: string, dims: any): { pct: number; count: number; bestId?: string } {
+  try {
+    const rows = db.select().from(designs).where(eq(designs.designType, type)).all();
+    if (!rows.length) return { pct: 0, count: 0 };
+    const w = +dims.wall || 0; let best = 0, bestId: string | undefined;
+    const near = (a: number, b: number) => (!a || !b) ? 0 : 1 - Math.min(1, Math.abs(a - b) / Math.max(a, b));
+    for (const r of rows as any[]) {
+      let p: any = {}; try { p = JSON.parse(r.params) || {}; } catch { }
+      const parts = [near(+p.wall || 0, w)];
+      if (p.wallB && dims.wallB) parts.push(near(+p.wallB, +dims.wallB));
+      if (p.wallC && dims.wallC) parts.push(near(+p.wallC, +dims.wallC));
+      const sim = parts.reduce((x, y) => x + y, 0) / parts.length;
+      if (sim > best) { best = sim; bestId = r.id; }
+    }
+    return { pct: Math.round(best * 100), count: rows.length, bestId };
+  } catch { return { pct: 0, count: 0 }; }
+}
+
+// §13: CONFIDENCE SCORECARD — a single, human-readable card of quality metrics for
+// every generated layout, derived from the deterministic scoreLayout() metrics plus
+// geometry-measured dead space, board area → cost, and build-complexity heuristics.
+function buildScorecard(layout: any, dims: any): any {
+  const cl = (v: number) => Math.max(0, Math.min(10, v || 0));
+  const sc = scoreLayout(layout, dims);
+  const runs = layout.runs || [];
+  let fill = 0, tot = 0, mm2 = 0, cabCount = 0, tallCount = 0, applCount = 0, cornerCount = 0;
+  const APPL = new Set(["hob", "sink", "dishwasher", "fridge", "tall-fridge", "oven"]);
+  for (const r of runs) {
+    for (const c of (r.base || [])) { tot += c.w || 0; if (c.kind === "filler") { fill += c.w || 0; continue; } if (c.kind === "sidepanel") continue; mm2 += (c.w || 0) * STD.baseHeight; cabCount++; if (isTall(c.kind)) tallCount++; if (APPL.has(c.kind)) applCount++; if (c.kind === "corner") cornerCount++; }
+    for (const c of (r.wallCabs || [])) { if (c.kind === "filler" || c.kind === "sidepanel" || c.kind === "chimney") continue; mm2 += (c.w || 0) * STD.wallHeight; cabCount++; }
+  }
+  // furniture (wardrobe/TV/etc.): measure columns×bands area
+  for (const u of (layout.units || [])) for (const col of (u.columns || [])) { mm2 += (col.wMM || 0) * (u.bodyMM || u.heightMM || 2100); cabCount++; }
+  const deadSpace = tot ? Math.round((fill / tot) * 100) : 0;
+  const sqftArea = mm2 / 92903;
+  const estCost = Math.round(sqftArea * 1.9 * 850);   // ~1.9× (carcass+shutter+edge+hardware), ₹850/sqft finished — ESTIMATE
+  const complexity = tallCount + cornerCount * 1.5 + applCount * 0.5 + (layout.units ? (layout.units[0]?.columns?.length || 0) * 0.4 : 0);
+  const difficulty = complexity < 3 ? "Easy" : complexity < 6 ? "Moderate" : complexity < 9 ? "Advanced" : "Complex";
+  const installHrs = Math.round((cabCount * 0.6 + tallCount * 1.5 + applCount + cornerCount * 1.5) * 10) / 10;
+  const sim = findSimilarDesigns(layout.type || dims.type || "", dims);
+  const ventCheck = (layout.mfgChecks || []).find((m: any) => /ventilation|clearance/i.test(m.name));
+  return {
+    overallConfidence: consensusTotal(sc),                              // 0..100
+    similarityPct: sim.pct, similarPriorProjects: sim.count,
+    storageEfficiencyPct: Math.round(cl(sc.storage) * 10),
+    deadSpacePct: deadSpace,
+    accessibilityPct: Math.round(cl(sc.applianceAccessibility) * 10),
+    workTriangleScore: Math.round(cl(sc.workTriangle) * 10) / 10,        // /10
+    ventilationScore: ventCheck ? (ventCheck.ok ? 9 : 4) : 8,            // /10
+    naturalLightScore: Math.round(cl(sc.windowFit) * 10) / 10,          // /10
+    manufacturingScorePct: Math.round(cl(sc.manufacturing) * 10),
+    estimatedCostInr: estCost,
+    difficultyLevel: difficulty,
+    installationTimeHrs: installHrs,
+    materialUtilizationPct: Math.min(96, 72 + Math.round((1 - deadSpace / 100) * 20)),
+    scores: sc,
+  };
+}
+
 // ── 15.pdf Stage 3: optional EXTERNAL multi-AI review (ChatGPT + DeepSeek) ──
 // Keys come from env (OPENAI_API_KEY / DEEPSEEK_API_KEY) or a local ai-keys.json (never the source).
 // Each provider gets the Master Design Brief and returns STRUCTURED parameters; OUR parametric engine
@@ -2414,6 +2480,8 @@ function buildLayout(type: string, dims: { wall: number; wallB?: number; wallC?:
   layout.appliedRules.push(`Indian standards validation: ${std.length - stdFails.length}/${std.length} dimensions within standard${stdFails.length ? ` — ${stdErr.length} error, ${stdWarn.length} warning flagged for review` : " — all ergonomic"}.`);
   // Furniture doesn't surface GEN_LOG.conflicts above (kitchen-only block) — emit the flags here.
   if (!type.toLowerCase().includes("kitchen") && stdFails.length) layout.appliedRules.push("⚠ Standards flags: " + stdFails.map((s) => `[${s.level}] ${s.note}`).join(" "));
+  // §13: attach the confidence scorecard for every design (kitchen + furniture).
+  try { (layout as any).scorecard = buildScorecard(layout, { ...dims, type }); } catch (e) { /* scorecard is advisory — never block generation */ }
   return layout;
 }
 
@@ -4580,6 +4648,49 @@ function reinforceStandards(cats: string[]) {
   }
   cache.invalidatePrefix("kb:");
 }
+
+// §12 SEARCHABLE MEMORY — query the learned corpus (references + past designs) by
+// free text / unit type / category. Every reference's extracted analysis (detected
+// cabinets, utilities, unit type) is indexed here so the AI's memory is searchable.
+function searchMemory(q?: string, type?: string, category?: string) {
+  const ql = (q || "").toLowerCase().trim();
+  const refRows = db.select().from(references).all() as any[];
+  const refMatches = refRows.map((r) => { let a: any = {}; try { a = JSON.parse(r.analysis) || {}; } catch { } return { r, a }; })
+    .filter(({ r, a }) => {
+      if (category && r.category !== category) return false;
+      if (type && !((a.unitType || r.category || "").toLowerCase().includes(type.toLowerCase()))) return false;
+      if (!ql) return true;
+      const hay = (r.name + " " + r.category + " " + (a.detectedCabinets || []).join(" ") + " " + (a.utilities || []).join(" ") + " " + (a.unitType || "")).toLowerCase();
+      return hay.includes(ql);
+    }).slice(0, 60).map(({ r, a }) => ({ id: r.id, name: r.name, category: r.category, unitType: a.unitType || null, cabinets: (a.detectedCabinets || []).slice(0, 12), utilities: (a.utilities || []).slice(0, 8), wardrobe: a.wardrobe || null, confidence: r.confidence, status: r.status }));
+  const desRows = db.select().from(designs).all() as any[];
+  const desMatches = desRows.filter((d) => (!type || d.designType.toLowerCase().includes(type.toLowerCase())) && (!ql || d.designType.toLowerCase().includes(ql))).slice(0, 40)
+    .map((d) => ({ id: d.id, designType: d.designType, createdAt: d.createdAt }));
+  return { references: refMatches, designs: desMatches, corpus: refRows.length };
+}
+
+// §11 KNOWLEDGE GRAPH — derive a concept graph from the corpus so the AI understands
+// RELATIONSHIPS (category → unit type → cabinet → utility → rule class), not just images.
+function buildKnowledgeGraph() {
+  const nodes = new Map<string, any>(), edges = new Map<string, any>();
+  const addNode = (id: string, kind: string, label: string) => { const n = nodes.get(id) || { id, kind, label, weight: 0 }; n.weight++; nodes.set(id, n); };
+  const addEdge = (a: string, b: string, rel: string) => { const k = a + "|" + b + "|" + rel; const e = edges.get(k) || { source: a, target: b, rel, weight: 0 }; e.weight++; edges.set(k, e); };
+  const refRows = db.select().from(references).all() as any[];
+  for (const r of refRows) {
+    let a: any = {}; try { a = JSON.parse(r.analysis) || {}; } catch { }
+    const cat = "cat:" + (r.category || "general"); addNode(cat, "category", r.category || "general");
+    if (a.unitType) { const u = "type:" + a.unitType; addNode(u, "unitType", a.unitType); addEdge(cat, u, "has-type"); }
+    const cabs = (a.detectedCabinets || []).slice(0, 10);
+    for (const cab of cabs) { const c = "cab:" + cab; addNode(c, "cabinet", cab); addEdge(cat, c, "contains"); }
+    for (const util of (a.utilities || []).slice(0, 8)) { const u = "util:" + util; addNode(u, "utility", util); addEdge(cat, u, "uses"); }
+    for (let i = 0; i < cabs.length; i++) for (let j = i + 1; j < cabs.length; j++) addEdge("cab:" + cabs[i], "cab:" + cabs[j], "co-occurs");
+  }
+  for (const rr of db.select().from(rules).all() as any[]) { const rc = "class:" + (rr.ruleClass || "manufacturing"); addNode(rc, "ruleClass", rr.ruleClass || "manufacturing"); addEdge(rc, "cat:" + (rr.category || "general"), "governs"); }
+  return { nodes: [...nodes.values()], edges: [...edges.values()], stats: { nodes: nodes.size, edges: edges.size, references: refRows.length } };
+}
+
+app.get("/api/memory/search", (c) => c.json({ data: searchMemory(c.req.query("q"), c.req.query("type"), c.req.query("category")) }));
+app.get("/api/knowledge/graph", (c) => c.json({ data: cache.wrap("kb:graph", () => buildKnowledgeGraph(), 30000) }));
 
 app.post("/api/generate", zValidator("json", generateSchema), (c) => {
   try {
