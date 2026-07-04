@@ -141,6 +141,30 @@ sqlite.exec(`
     cabinets INTEGER NOT NULL DEFAULT 0, panels INTEGER NOT NULL DEFAULT 0,
     sheets INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL);
 `);
+// Module 5 §8: paid supplier directory — contacts gated behind an unlock.
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS suppliers (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, brand TEXT NOT NULL DEFAULT '', city TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', whatsapp TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '', address TEXT NOT NULL DEFAULT '', gst TEXT NOT NULL DEFAULT '',
+    discount TEXT NOT NULL DEFAULT '', moq TEXT NOT NULL DEFAULT '', delivery TEXT NOT NULL DEFAULT '',
+    verified INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+`);
+try {
+  const n: any = sqlite.prepare(`SELECT COUNT(*) c FROM suppliers`).get();
+  if (!n || !n.c) {
+    const seed = [
+      ["Shree Hardware Mart", "Hettich, Hafele", "Mumbai", "Hardware", "+91 98200 11001", "+91 98200 11001", "sales@shreehw.in", "Lamington Road, Mumbai", "27ABCDS1234A1Z5", "18%", "₹5,000", "Mumbai MMR", 1],
+      ["National Ply & Laminate", "Century, Greenlam, Merino", "Delhi", "Plywood/Laminate", "+91 98110 22002", "+91 98110 22002", "info@nationalply.in", "Kirti Nagar, New Delhi", "07PQRSN5678B1Z2", "12%", "₹10,000", "Delhi NCR", 1],
+      ["Blum India Distributor", "Blum", "Bengaluru", "Hardware", "+91 98450 33003", "+91 98450 33003", "blr@blumdist.in", "Peenya, Bengaluru", "29LMNOB9012C1Z8", "10%", "₹8,000", "Karnataka", 1],
+      ["Ozone Fittings House", "Ozone, Dorset", "Ahmedabad", "Hardware/Fittings", "+91 99250 44004", "+91 99250 44004", "amd@ozonehouse.in", "CG Road, Ahmedabad", "24GHIJO3456D1Z1", "15%", "₹4,000", "Gujarat", 0],
+      ["Sirca Paint Depot", "Sirca, ICA", "Pune", "PU Paint/Finish", "+91 98220 55005", "+91 98220 55005", "pune@sircadepot.in", "Bhosari, Pune", "27TUVWS7890E1Z4", "8%", "₹6,000", "Maharashtra", 1],
+      ["Action Tesa Board Point", "Action TESA, HDHMR", "Hyderabad", "Boards", "+91 90000 66006", "+91 90000 66006", "hyd@tesapoint.in", "Balanagar, Hyderabad", "36XYZAT2345F1Z9", "14%", "₹9,000", "Telangana", 0],
+    ];
+    const st = sqlite.prepare(`INSERT INTO suppliers(id,name,brand,city,category,phone,whatsapp,email,address,gst,discount,moq,delivery,verified,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    seed.forEach((s, i) => st.run("sup" + (i + 1), s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11], s[12], Date.now()));
+  }
+} catch (e) { /* seed best-effort */ }
 
 // =============================================================================
 // 2. CACHING LAYER — In-Memory Redis-Like Store (with hit/miss observability)
@@ -10555,7 +10579,7 @@ const frontendHTML = `<!DOCTYPE html>
     // a full factory-ready production package (panels / shutters / drawers /
     // edge-banding / BOM / CNC / plywood nesting / 3D-verify / error detection).
     // =========================================================================
-    const FAB_VIEWS = ["Summary", "3D Model", "Panels", "Shutters", "Drawers", "Edge Banding", "Material & Hardware", "CNC", "Nesting", "Verify"];
+    const FAB_VIEWS = ["Summary", "3D Model", "Panels", "Shutters", "Drawers", "Edge Banding", "Material & Hardware", "CNC", "Nesting", "Verify", "Floating", "Install Guide", "Packing", "Suppliers"];
     const csvCell = (x) => '"' + String(x == null ? "" : x).replace(/"/g, '""') + '"';
     const downloadCsv = (rows, fname) => saveBlobAs(new Blob([rows.map(r => r.map(csvCell).join(",")).join("\\n")], { type: "text/csv" }), fname);
 
@@ -11384,6 +11408,13 @@ const frontendHTML = `<!DOCTYPE html>
       const [projects, setProjects] = useState([]);
       const [stats, setStats] = useState(null);
       const fileRef = useRef(null);
+      // Module 5 §8: paid supplier directory
+      const [suppliers, setSuppliers] = useState(null);
+      const [supTok, setSupTok] = useState("");
+      const [supQ, setSupQ] = useState("");
+      const loadSuppliers = () => { const t = supTok ? "&token=" + encodeURIComponent(supTok) : ""; api("/api/suppliers?q=" + encodeURIComponent(supQ) + t).then(j => { if (j.data) setSuppliers(j.data.suppliers); }); };
+      const unlockSuppliers = () => api("/api/suppliers/unlock", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan: "single" }) }).then(j => { if (j.data && j.data.token) { setSupTok(j.data.token); } });
+      useEffect(() => { if (view === "Suppliers") loadSuppliers(); }, [view, supQ, supTok]);
 
       useEffect(() => { api("/api/fabrik/meta").then(j => { if (j.data) setMeta(j.data); }); refreshProjects(); }, []);
       const refreshProjects = () => { api("/api/fabrik/projects").then(j => setProjects(j.data || [])); api("/api/fabrik/stats").then(j => setStats(j.data)); };
@@ -11401,6 +11432,7 @@ const frontendHTML = `<!DOCTYPE html>
           material: c.material, shutterFinish: c.finish, shutters: c.shutters ? +c.shutters : undefined,
           shutterless: !!c.shutterless, drawers: +c.drawerCount > 0 ? Array.from({ length: +c.drawerCount }, () => ({})) : [],
           drawerHardware: c.drawerHardware || undefined, drawerType: c.drawerType || undefined,
+          floating: !!c.floating, wallType: c.wallType || undefined,
         })),
       });
       const buildSpec = () => buildSpecFrom(cabs, proj, overrides);
@@ -11563,7 +11595,7 @@ const frontendHTML = `<!DOCTYPE html>
           <div className="bg-white border border-slate-200 rounded-xl p-3 mb-4 overflow-x-auto">
             <div className="text-sm font-semibold text-slate-700 mb-2">Cabinet specification <span className="text-slate-400 font-normal">— editable; every change re-generates the whole package</span></div>
             <table className="w-full text-xs border-collapse">
-              <thead><tr>{["Code", "Name", "W", "H", "D", "Material", "Finish", "Shutters", "Drawers", "No shutter", ""].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+              <thead><tr>{["Code", "Name", "W", "H", "D", "Material", "Finish", "Shutters", "Drawers", "No shutter", "Float", "Wall", ""].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
               <tbody>
                 {cabs.map((c, i) => (
                   <tr key={i}>
@@ -11577,6 +11609,8 @@ const frontendHTML = `<!DOCTYPE html>
                     <td className={td}><input className={inp} style={{ width: 50 }} type="number" placeholder="auto" value={c.shutters} onChange={e => setCab(i, { shutters: e.target.value })} /></td>
                     <td className={td}><input className={inp} style={{ width: 50 }} type="number" value={c.drawerCount} onChange={e => setCab(i, { drawerCount: e.target.value })} /></td>
                     <td className={td + " text-center"}><input type="checkbox" checked={c.shutterless} onChange={e => setCab(i, { shutterless: e.target.checked })} /></td>
+                    <td className={td + " text-center"}><input type="checkbox" checked={!!c.floating} onChange={e => setCab(i, { floating: e.target.checked })} title="Wall-hung / floating" /></td>
+                    <td className={td}><select className={inp} style={{ width: 92 }} value={c.wallType || "brick"} disabled={!c.floating} onChange={e => setCab(i, { wallType: e.target.value })}>{[["concrete", "Concrete"], ["brick", "Brick"], ["aac", "AAC block"], ["drywall", "Drywall"], ["wood", "Wood"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></td>
                     <td className={td}><button onClick={() => delCab(i)} className="text-rose-500 hover:text-rose-700">✕</button></td>
                   </tr>
                 ))}
@@ -11774,6 +11808,69 @@ const frontendHTML = `<!DOCTYPE html>
                     {pkg.verify.questions.length > 0 && <div><div className="text-sm font-semibold text-slate-700 mb-1">Critical questions</div>
                       <ul className="text-xs text-slate-600 list-disc pl-4">{pkg.verify.questions.map((q, i) => <li key={i}>{q}</li>)}</ul></div>}
                   </div>
+                </div>
+              )}
+
+              {/* Module 5: Floating furniture */}
+              {view === "Floating" && (
+                <div>
+                  {pkg.cabinets.filter(c => c.floatingCheck).length === 0
+                    ? <div className="text-xs text-slate-500">No floating cabinets. Tick <b>Float</b> on a cabinet (and pick its wall type) to run the wall-load & suspension-hardware check.</div>
+                    : (<div className="space-y-2">
+                        {pkg.floatingSummary && <div className="text-xs text-slate-600">{pkg.floatingSummary.count} floating unit(s) · total {pkg.floatingSummary.totalWeightKg}kg · {pkg.floatingSummary.allOk ? <span className="text-emerald-600 font-semibold">all within safe wall load ✓</span> : <span className="text-rose-600 font-semibold">some exceed wall capacity ⚠</span>}</div>}
+                        {pkg.cabinets.filter(c => c.floatingCheck).map((c, i) => { const f = c.floatingCheck; return (
+                          <div key={i} className={"rounded border p-2.5 " + (f.ok ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50")}>
+                            <div className="flex items-center justify-between"><span className="text-xs font-semibold text-slate-800">{f.ok ? "✅" : "⛔"} {c.code} · {c.name}</span><span className="text-[10px] text-slate-500">{f.wallLabel} · {f.fixing}</span></div>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 mt-1.5 text-[11px]">
+                              {[["Weight (loaded)", f.weightKg + " kg"], ["Fixing points", f.fixingPoints], ["Wall capacity", f.wallCapacityKg + " kg"], ["Required (2× safety)", f.requiredKg + " kg"]].map((kv, k) => <div key={k} className="bg-white/70 rounded px-2 py-1 border border-slate-100"><div className="text-slate-400 uppercase text-[9px]">{kv[0]}</div><div className="text-slate-800 font-medium">{kv[1]}</div></div>)}
+                            </div>
+                            {f.warnings.map((w, k) => <div key={k} className="text-[11px] text-rose-700 mt-1">⚠ {w}</div>)}
+                            <div className="text-[11px] text-slate-600 mt-1"><b>Suspension:</b> {f.hardware.map(h => h.brand + " " + h.model).join(" · ")}</div>
+                          </div>
+                        ); })}
+                      </div>)}
+                </div>
+              )}
+
+              {/* Module 5: Installation guide */}
+              {view === "Install Guide" && (
+                <div className="space-y-2">
+                  <div className="text-xs text-slate-500">Step-by-step site sequence{pkg.installGuide.floating ? " (includes floating suspension)" : ""} — panel-numbered, tool & hardware per step.</div>
+                  {pkg.installGuide.steps.map((s, i) => (
+                    <div key={i} className="rounded border border-slate-200 bg-white p-2.5">
+                      <div className="text-xs font-semibold text-indigo-700">Step {s.no}: {s.title}</div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">{s.detail}</div>
+                      <div className="text-[10px] text-slate-400 mt-1">🔧 Tools: {(s.tools || []).join(", ")} · 🔩 {s.hardware}</div>
+                    </div>
+                  ))}
+                  <div className="rounded border border-amber-200 bg-amber-50 p-2.5"><div className="text-xs font-semibold text-amber-700 mb-1">⚠ Safety</div><ul className="text-[11px] text-amber-800 list-disc pl-4">{pkg.installGuide.safety.map((s, i) => <li key={i}>{s}</li>)}</ul></div>
+                </div>
+              )}
+
+              {/* Module 5: Packing list */}
+              {view === "Packing" && (
+                <div>
+                  <div className="text-xs text-slate-500 mb-2">Room: <b>{pkg.packingList.room}</b> · {pkg.packingList.totalPanels} panels · {pkg.packingList.cartons} cartons — for warehouse dispatch &amp; site unpacking.</div>
+                  <div className="overflow-x-auto"><table className="w-full text-[11px]"><thead><tr>{["#", "Cabinet", "Panel No", "Panel", "Size W×H×Th", "Material", "Edge", "HW pkt", "Carton"].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                    <tbody>{pkg.packingList.rows.map((r, i) => (<tr key={i}><td className={td}>{r.seq}</td><td className={td}>{r.cabinet}</td><td className={td + " font-mono text-slate-500"}>{r.panelNo}</td><td className={td}>{r.panelName}</td><td className={td}>{r.size}</td><td className={td}>{r.material}</td><td className={td}>{r.edge}</td><td className={td}>{r.hardwarePacket}</td><td className={td + " font-semibold text-indigo-600"}>{r.carton}</td></tr>))}</tbody>
+                  </table></div>
+                </div>
+              )}
+
+              {/* Module 5: Paid supplier directory */}
+              {view === "Suppliers" && (
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap mb-2">
+                    <input value={supQ} onChange={e => setSupQ(e.target.value)} placeholder="Search brand / category / city…" className={inp} style={{ width: 220 }} />
+                    {!supTok
+                      ? <button onClick={unlockSuppliers} className="px-2.5 py-1 rounded bg-gradient-to-r from-amber-500 to-orange-600 text-white text-xs font-semibold">🔓 Unlock contacts (paid)</button>
+                      : <span className="text-xs text-emerald-600 font-semibold">✓ Contacts unlocked</span>}
+                    <span className="text-[11px] text-slate-400">Free: brand/category · Paid: phone, WhatsApp, email, GST</span>
+                  </div>
+                  <div className="overflow-x-auto"><table className="w-full text-[11px]"><thead><tr>{["Supplier", "Brand", "Category", "City", "Phone", "WhatsApp", "GST", "Disc", "Verified"].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                    <tbody>{(suppliers || []).map((s, i) => (<tr key={i}><td className={td + " font-medium"}>{s.name}</td><td className={td}>{s.brand}</td><td className={td}>{s.category}</td><td className={td}>{s.city}</td><td className={td + (s.locked ? " text-slate-400 italic" : "")}>{s.phone}</td><td className={td + (s.locked ? " text-slate-400 italic" : "")}>{s.whatsapp}</td><td className={td + (s.locked ? " text-slate-400 italic" : "")}>{s.gst}</td><td className={td}>{s.discount}</td><td className={td}>{s.verified ? "✅" : "—"}</td></tr>))}</tbody>
+                  </table></div>
+                  {(!suppliers || suppliers.length === 0) && <div className="text-xs text-slate-400 mt-2">Loading suppliers…</div>}
                 </div>
               )}
             </div>
@@ -12255,6 +12352,85 @@ function fabVerify(cabs: any[], geos: any[]) {
   return { checks, passed: pass, total: checks.length, errors, questions, estimates };
 }
 
+// ── Module 5: FLOATING FURNITURE, INSTALL GUIDE, PANEL NUMBERING, PACKING ─────
+// Wall load capacities (kg pull-out per fixing point) + suspension hardware for
+// wall-hung cabinets. Safety factor 2× per the spec.
+const FAB_WALL_TYPES: Record<string, { label: string; perPoint: number; fixing: string; note: string }> = {
+  concrete: { label: "RCC / Concrete", perPoint: 60, fixing: "M8 sleeve/chemical anchor", note: "Strongest — takes heavy wall-hung units." },
+  brick:    { label: "Solid Brick",    perPoint: 35, fixing: "10mm nylon plug + chemical anchor", note: "Good for medium units; use chemical anchor for heavy." },
+  aac:      { label: "AAC / Fly-ash Block", perPoint: 18, fixing: "AAC-specific anchor (Fischer GB)", note: "Weaker — spread the load, prefer a suspension rail." },
+  drywall:  { label: "Drywall / Gypsum", perPoint: 8, fixing: "Toggle/butterfly anchor into a stud", note: "Low — must hit studs or add a backing frame." },
+  wood:     { label: "Wood / Ply partition", perPoint: 25, fixing: "Wood screw into stud/backing", note: "OK when fixed into solid studs or a ply backing." },
+};
+const FAB_FLOATING_HW = [
+  { item: "Cabinet Hanger Bracket (pair)", brand: "Hettich", model: "Cabinet Hanger + Suspension Rail", load: 120, note: "Adjustable self-locking — primary suspension for wall-hung cabinets." },
+  { item: "French Cleat (aluminium)", brand: "Hafele", model: "AL French Cleat", load: 80, note: "Continuous rail — spreads load along the wall." },
+  { item: "Heavy L-bracket", brand: "Ebco", model: "HD L-Bracket", load: 40, note: "Secondary/bottom support." },
+  { item: "Anti-lift safety lock", brand: "Hettich", model: "Anti-lift clip", load: 0, note: "Prevents accidental lift-off — mandatory on floating units." },
+];
+function fabCabinetWeightKg(cab: any, geo: any): number {
+  // panel area × board density (~11.6 kg/m² for 18mm ply) + shutters + hardware, then contents.
+  let mm2 = 0; for (const p of geo.panels) mm2 += (p.w || 0) * (p.h || 0) * (p.qty || 1);
+  const boardKg = (mm2 / 1_000_000) * (geo.thk >= 18 ? 11.6 : 8);
+  const shutterKg = (geo.nShutters || 0) * ((geo.W * geo.H) / 1_000_000) * 9;
+  const carcassKg = boardKg + shutterKg + 3;                       // + hinges/handles/rail
+  const volM3 = (geo.W * geo.H * geo.D) / 1_000_000_000;
+  const contentsKg = volM3 * (geo.isDrawerUnit ? 120 : 60);        // loaded drawers heavier than shelves
+  return Math.round(carcassKg + contentsKg);
+}
+function fabFloatingCheck(cab: any, geo: any): any {
+  const wallKey = String(cab.wallType || "brick");
+  const wall = FAB_WALL_TYPES[wallKey] || FAB_WALL_TYPES.brick;
+  const totalKg = fabCabinetWeightKg(cab, geo);
+  const points = Math.max(2, Math.round((geo.W || 600) / 300));    // one fixing ~ every 300 mm
+  const wallCapacity = points * wall.perPoint;
+  const safety = 2;
+  const required = totalKg * safety;
+  const ok = wallCapacity >= required;
+  const rail = FAB_FLOATING_HW[0];
+  const warnings: string[] = [];
+  if (!ok) warnings.push("Wall capacity " + wallCapacity + "kg (" + points + " × " + wall.perPoint + "kg on " + wall.label + ") is below the " + required + "kg needed (" + totalKg + "kg × " + safety + " safety) — add fixing points, use chemical anchors, or a full suspension rail + backing frame.");
+  if (wallKey === "drywall" && totalKg > 30) warnings.push("Drywall cannot safely carry " + totalKg + "kg wall-hung — fix into studs or add a plywood backing frame first.");
+  const hardware = ok ? [FAB_FLOATING_HW[0], FAB_FLOATING_HW[3]] : FAB_FLOATING_HW.slice();
+  return { floating: true, wallType: wallKey, wallLabel: wall.label, fixing: wall.fixing, weightKg: totalKg, fixingPoints: points, wallCapacityKg: wallCapacity, requiredKg: required, safetyFactor: safety, ok, hardware, rail: rail.model, warnings };
+}
+// Step-by-step installation guide (site-worker friendly) for the whole project.
+function fabInstallGuide(cabinets: any[], unitType: string): any {
+  const floating = cabinets.some((c) => c.floatingCheck);
+  const steps: any[] = [];
+  let n = 1;
+  steps.push({ no: n++, title: "Site check & marking", detail: "Check wall plumb & level. Mark the cabinet base/hang line with a laser level; mark stud/beam positions.", tools: ["Laser level", "Tape", "Pencil", "Stud finder"], hardware: "—" });
+  if (floating) steps.push({ no: n++, title: "Fix the suspension rail", detail: "Drill and fix the Hettich suspension rail / French cleat to the marked line using the wall-appropriate anchors. Verify it is dead level.", tools: ["Hammer drill", "8mm bit", "Spirit level", "Spanner"], hardware: "Suspension rail + " + (FAB_WALL_TYPES[String(cabinets.find((c) => c.floatingCheck)?.floatingCheck?.wallType || "brick")]?.fixing || "wall anchors") });
+  steps.push({ no: n++, title: "Assemble carcasses", detail: "Assemble each cabinet carcass on a clean floor per its panel numbers (sides → bottom → top → back). Square each box with the back panel before the glue sets.", tools: ["Cordless drill", "4mm bit", "Rubber mallet", "Square"], hardware: "Confirmat screws 5×50, 8mm dowels, cam locks" });
+  steps.push({ no: n++, title: "Install carcasses in sequence", detail: floating ? "Hang each carcass on the rail from the corner outward; level with the bracket adjusters; engage the anti-lift lock." : "Set base cabinets from the corner outward on adjustable legs; level each; clamp and join adjacent cabinets.", tools: ["Level", "Clamps", "Spanner"], hardware: floating ? "Cabinet hangers + anti-lift clips" : "Adjustable legs, inter-cabinet connectors" });
+  steps.push({ no: n++, title: "Fit shutters, drawers & hardware", detail: "Hang shutters on soft-close hinges and adjust the 3-way gap to an even reveal. Fit drawer runners at the marked drill positions and install drawer boxes; set handles.", tools: ["Screwdriver", "Drawer jig"], hardware: "Hinges, drawer runners, handles" });
+  if (/kitchen/i.test(unitType)) steps.push({ no: n++, title: "Countertop, appliances & services", detail: "Place the countertop, cut the sink/hob openings, connect plumbing/electrical, then fit the chimney and built-in appliances leaving the specified ventilation gaps.", tools: ["Jigsaw", "Silicone gun"], hardware: "Sink clips, appliance brackets" });
+  steps.push({ no: n++, title: "Final alignment & safety", detail: "Align all reveals, tighten every fixing, confirm floating units pass the pull/lift test, clean, and hand over.", tools: ["Screwdriver", "Cloth"], hardware: "—" });
+  return { steps, floating, safety: ["Wear safety glasses when drilling.", "Never stand a loaded floating cabinet on hardware not rated for it.", "Two people to lift tall/heavy units.", "Verify anchors are fully cured before loading (chemical anchors)."] };
+}
+// Cabinet/room-wise packing list with carton grouping.
+function fabPackingList(project: any, unitType: string, cabinets: any[]): any {
+  const room = (project && project.room) || (unitType ? unitType.charAt(0).toUpperCase() + unitType.slice(1) : "Room");
+  const rows: any[] = [];
+  let carton = 1, inCarton = 0, seq = 1;
+  for (const cab of cabinets) {
+    const allParts = (cab.panels || []).concat(cab.drawerComponents || []);
+    for (const p of allParts) {
+      if (inCarton >= 8) { carton++; inCarton = 0; }
+      rows.push({
+        seq: seq++, room, furniture: unitType, cabinet: cab.code, cabinetName: cab.name,
+        panelNo: p.code, panelName: p.panel, size: (p.w || 0) + "×" + (p.h || 0) + "×" + (p.thk || 18),
+        material: p.material || cab.material, finish: cab.shutterFinish || "—",
+        edge: p.edges ? ["top", "bottom", "left", "right"].filter((e) => p.edges[e]).map((e) => e[0].toUpperCase()).join("") || "—" : "—",
+        hardwarePacket: "HW-" + cab.code, carton: "BOX-" + String(carton).padStart(2, "0"),
+      });
+      inCarton += (p.qty || 1);
+    }
+  }
+  const cartonSet = new Set(rows.map((r) => r.carton));
+  return { project: (project && project.name) || "Untitled", room, rows: rows.slice(0, 600), totalPanels: rows.length, cartons: cartonSet.size };
+}
+
 // ── Orchestrator: spec → full manufacturing package ──────────────────────────
 function fabrikGenerate(spec: any) {
   const defaults = spec.defaults || {};
@@ -12266,6 +12442,7 @@ function fabrikGenerate(spec: any) {
     material: c.material || defaults.material || "18mm BWR Plywood",
     shutterFinish: c.shutterFinish || defaults.shutterFinish || "Laminate",
     shutters: c.shutters, shutterless: !!c.shutterless, drawers: c.drawers || [], toeKick: c.toeKick,
+    floating: !!c.floating, wallType: c.wallType || defaults.wallType || "brick",
   })).filter((c: any) => c.w && c.h);
 
   // Freeform per-panel overrides (keyed by panel/shutter code) — a single part can be
@@ -12293,6 +12470,7 @@ function fabrikGenerate(spec: any) {
     cabinets.push({
       code: c.code, name: c.name, w: geo.W, h: geo.H, d: geo.D, material: geo.mat, thk: geo.thk,
       panels, shutters, drawers: dr.drawers, drawerComponents: drComps,
+      floating: !!c.floating, floatingCheck: c.floating ? fabFloatingCheck(c, geo) : null,
     });
   }
   const overrideCount = Object.keys(overrides).length;
@@ -12311,6 +12489,13 @@ function fabrikGenerate(spec: any) {
   const usedHw = new Map<string, any>();
   cabinets.forEach((cab) => (cab.drawers || []).forEach((dr: any) => { const h = usedHw.get(dr.hardware.id) || { ...dr.hardware, count: 0 }; h.count += 1; usedHw.set(dr.hardware.id, h); }));
   const hardwareSummary = { systems: [...usedHw.values()], totalDrawers: drawerData.reduce((s, d) => s + d.drawers.length, 0), warnings: hwWarnings.length };
+  // Module 5: floating checks → verify stream; install guide + packing list
+  const floatingCabs = cabinets.filter((cab) => cab.floatingCheck);
+  floatingCabs.forEach((cab) => (cab.floatingCheck.warnings || []).forEach((w: string) => verify.errors.push({ level: cab.floatingCheck.ok ? "warn" : "error", cabinet: cab.code, msg: "Floating: " + w })));
+  if (floatingCabs.length) { verify.checks.push({ cabinet: "—", label: "Floating fixing capacity", ok: floatingCabs.every((cab) => cab.floatingCheck.ok), detail: floatingCabs.filter((cab) => cab.floatingCheck.ok).length + "/" + floatingCabs.length + " within safe wall load (2× safety)" }); verify.total = verify.checks.length; verify.passed = verify.checks.filter((c: any) => c.ok).length; }
+  const installGuide = fabInstallGuide(cabinets, spec.unitType || "kitchen");
+  const packingList = fabPackingList(spec.project || {}, spec.unitType || "kitchen", cabinets);
+  const floatingSummary = floatingCabs.length ? { count: floatingCabs.length, allOk: floatingCabs.every((cab) => cab.floatingCheck.ok), totalWeightKg: floatingCabs.reduce((s, cab) => s + cab.floatingCheck.weightKg, 0) } : null;
   const totalSheets = nest.reduce((s, g) => s + g.count, 0);
   return {
     project: spec.project || { name: "Untitled", client: "" },
@@ -12319,8 +12504,9 @@ function fabrikGenerate(spec: any) {
       cabinets: cabinets.length, panels: allPanels.reduce((s, p) => s + p.qty, 0), shutters: allShutters.length,
       drawers: drawerData.reduce((s, d) => s + d.drawers.length, 0), sheets: totalSheets,
       edgeBandM: edgeBanding.totalRunningM, verifyPass: verify.passed + "/" + verify.total, overrides: overrideCount,
+      cartons: packingList.cartons, floating: floatingCabs.length,
     },
-    cabinets, edgeBanding, nest, bom, cnc, verify, sheetKey, hardwareSummary,
+    cabinets, edgeBanding, nest, bom, cnc, verify, sheetKey, hardwareSummary, installGuide, packingList, floatingSummary,
     standards: { thickness: FAB.carcassThk + "mm carcass / " + FAB.backThk + "mm back", system: "32mm", gap: FAB.shutterGap + "mm full-overlay", note: "Indian modular-furniture standards" },
   };
 }
@@ -12415,6 +12601,49 @@ app.get("/api/fabrik/stats", (c) => {
   }
   return c.json({ data: { projects: rows.length, cabinets, panels, sheets, byType, byMaterial, byFinish } });
 });
+
+// Module 5 §1/§7: floating-furniture meta (wall types + suspension hardware).
+app.get("/api/fabrik/floating-meta", (c) => c.json({ data: {
+  wallTypes: Object.entries(FAB_WALL_TYPES).map(([k, v]: any) => ({ key: k, ...v })),
+  hardware: FAB_FLOATING_HW,
+} }));
+
+// Module 5 §8/§9: PAID SUPPLIER DIRECTORY — contacts are masked until unlocked.
+const SUP_UNLOCK = new Set<string>();   // in-memory unlock tokens (simulated payment)
+function maskSupplier(r: any, unlocked: boolean): any {
+  const base = { id: r.id, name: r.name, brand: r.brand, city: r.city, category: r.category, verified: !!r.verified, discount: r.discount, moq: r.moq, delivery: r.delivery };
+  if (unlocked) return { ...base, phone: r.phone, whatsapp: r.whatsapp, email: r.email, address: r.address, gst: r.gst, locked: false };
+  const mask = (s: string) => s ? (s.slice(0, 3) + "•••• (unlock)") : "";
+  return { ...base, phone: mask(r.phone), whatsapp: mask(r.whatsapp), email: r.email ? "••••@•••• (unlock)" : "", address: r.city, gst: "•••• (unlock)", locked: true };
+}
+app.post("/api/suppliers/unlock", async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const token = "unlocked-" + (b.plan || "single") + "-" + Date.now();
+  SUP_UNLOCK.add(token);
+  return c.json({ data: { token, plan: b.plan || "single", note: "Simulated payment — contacts unlocked for this session." } });
+});
+app.get("/api/suppliers", (c) => {
+  const token = c.req.query("token") || c.req.header("x-unlock") || "";
+  const unlocked = !!token && SUP_UNLOCK.has(token);
+  const q = (c.req.query("q") || "").toLowerCase(), cat = c.req.query("category") || "", brand = (c.req.query("brand") || "").toLowerCase(), city = c.req.query("city") || "";
+  let rows: any[] = sqlite.prepare(`SELECT * FROM suppliers ORDER BY verified DESC, name ASC`).all();
+  if (q) rows = rows.filter((r) => (r.name + " " + r.brand + " " + r.category + " " + r.city).toLowerCase().indexOf(q) >= 0);
+  if (cat) rows = rows.filter((r) => r.category === cat);
+  if (brand) rows = rows.filter((r) => r.brand.toLowerCase().indexOf(brand) >= 0);
+  if (city) rows = rows.filter((r) => r.city === city);
+  const cats = [...new Set((sqlite.prepare(`SELECT category FROM suppliers`).all() as any[]).map((r) => r.category))].filter(Boolean);
+  const cities = [...new Set((sqlite.prepare(`SELECT city FROM suppliers`).all() as any[]).map((r) => r.city))].filter(Boolean);
+  return c.json({ data: { suppliers: rows.map((r) => maskSupplier(r, unlocked)), unlocked, facets: { categories: cats, cities } } });
+});
+app.post("/api/suppliers", async (c) => {   // admin add (unauth like the app's other local admin endpoints)
+  const b = await c.req.json().catch(() => ({} as any));
+  if (!b.name) return c.json({ error: "name required" }, 400);
+  const id = "sup" + Date.now();
+  sqlite.prepare(`INSERT INTO suppliers(id,name,brand,city,category,phone,whatsapp,email,address,gst,discount,moq,delivery,verified,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, String(b.name), String(b.brand || ""), String(b.city || ""), String(b.category || ""), String(b.phone || ""), String(b.whatsapp || b.phone || ""), String(b.email || ""), String(b.address || ""), String(b.gst || ""), String(b.discount || ""), String(b.moq || ""), String(b.delivery || ""), b.verified ? 1 : 0, Date.now());
+  return c.json({ data: { id, ok: true } });
+});
+app.delete("/api/suppliers/:id", (c) => { sqlite.prepare(`DELETE FROM suppliers WHERE id=?`).run(c.req.param("id")); return c.json({ data: { ok: true } }); });
 
 // =============================================================================
 // WARDROBE OPTIONS ENGINE — lifestyle-driven 3-option wardrobe designer.
