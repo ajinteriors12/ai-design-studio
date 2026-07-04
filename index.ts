@@ -5017,6 +5017,41 @@ app.post("/api/render/photoreal", async (c) => {
   }
 });
 
+// Universal one-click photoreal (text-to-image) — works for ANY furniture type
+// (kitchen, wardrobe, TV unit, crockery, vanity, study/office, mandir, wall
+// panel, bed, dresser, shoe rack…). Builds a type-aware prompt from the design
+// spec and renders via Stability — no 3D capture needed. Feeds the spec sheet.
+function autoPhotoPrompt(designType: string, finish: string, dims: string): string {
+  const t = String(designType || "").toLowerCase();
+  const fin = (finish && finish.trim()) ? finish.trim().toLowerCase() + " finish" : "premium laminate finish";
+  const base = ", " + fin + (dims ? ", approx " + dims : "") + ", warm ambient lighting, professional real-estate interior photography, ultra realistic, physically based materials, soft global illumination, ambient occlusion, 8k, interior-design magazine quality, cinematic";
+  let subject: string;
+  if (/wardrobe/.test(t)) subject = "Photorealistic interior render of a modern Indian " + t + " built into a contemporary bedroom, some shutters open revealing organised hanging clothes, shelves and drawers, full-length mirror";
+  else if (/kitchen/.test(t)) subject = "Photorealistic architectural interior render of a modern Indian modular " + t + ", base and wall cabinets, polished granite countertop, chimney hood, built-in hob, tall unit, subway-tile backsplash, glossy floor tiles";
+  else if (/tv|entertainment/.test(t)) subject = "Photorealistic interior render of a modern TV entertainment unit on a living-room feature wall, floating shelves, closed cabinets, back-lit niche, wall-mounted television";
+  else if (/crockery/.test(t)) subject = "Photorealistic interior render of a modern crockery display unit with glass shutters, glass shelves, crockery and glassware neatly arranged, warm interior lighting";
+  else if (/vanity|dress/.test(t)) subject = "Photorealistic interior render of a modern bathroom vanity / dresser unit with a stone countertop, mirror, drawers and cabinets in a well-lit contemporary space";
+  else if (/study|office|table/.test(t)) subject = "Photorealistic interior render of a modern study / office storage unit with a desk, open shelves, drawers and overhead cabinets in a bright workspace";
+  else if (/mandir|temple|puja/.test(t)) subject = "Photorealistic interior render of an elegant Indian home mandir (puja unit) with an arched mehrab, carved MDF jali sides, marble-look back panel, brass bells, warm devotional lighting";
+  else if (/wall.?panel|cladding/.test(t)) subject = "Photorealistic interior render of a decorative WPC fluted wall panel feature wall with a marble accent, a back-lit LED display niche and a floating shelf in a contemporary living room";
+  else if (/bed/.test(t)) subject = "Photorealistic interior render of a modern upholstered bed with a designer back panel and side storage in a contemporary bedroom";
+  else if (/shoe/.test(t)) subject = "Photorealistic interior render of a modern shoe rack / foyer storage unit with louvered shutters and a bench in an entryway";
+  else subject = "Photorealistic interior render of modern Indian modular " + (t || "furniture") + " in a contemporary well-lit room";
+  return subject + base;
+}
+app.post("/api/render/photoreal-auto", async (c) => {
+  try {
+    const key = loadAIKeys().stability;
+    if (!key) return c.json({ error: "no-key", message: "Add a Stability AI key to ai-keys.json to render a photoreal view." }, 400);
+    const body = await c.req.json().catch(() => ({} as any));
+    const prompt = (typeof body.prompt === "string" && body.prompt.trim()) ? body.prompt.trim() : autoPhotoPrompt(String(body.designType || ""), String(body.finish || ""), String(body.dims || ""));
+    const aspect = ["1:1", "3:2", "16:9", "4:3", "2:3", "9:16"].includes(String(body.aspect)) ? String(body.aspect) : "3:2";
+    const img = await stabilityGenerate(prompt, aspect, key);
+    if (!img) return c.json({ error: "render-failed", message: "Stability AI returned no image (check the key / quota)." }, 502);
+    return c.json({ data: { image: img } });
+  } catch (err) { console.error(err); return c.json({ error: "render-failed", message: String((err as any) && (err as any).message || err).slice(0, 160) }, 500); }
+});
+
 // POST /api/designs/edit-validate — validate a manually-edited elevation against
 // the mandatory rules (6.4) and log conflicts/adjustments to the dashboard audit.
 app.post("/api/designs/edit-validate", async (c) => {
@@ -5878,6 +5913,18 @@ const frontendHTML = `<!DOCTYPE html>
       const r = await fetch("/api/designs/" + result.id + "/spec-sheet.svg?inline=1", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!r.ok) throw new Error("HTTP " + r.status);
       return await r.text();
+    };
+    // Universal one-click photoreal: generate a type-aware Stability render from the
+    // design spec, stash it as the hero (window.__adsPR) — the spec sheet then uses it.
+    const runAutoPhotoreal = async (result, type) => {
+      let dims = "";
+      try { const w = (result.walls || []).map((x) => x.length).filter(Boolean); if (w.length) dims = w.join("×") + " mm"; else if (result.length) dims = result.length + " mm run"; } catch (e) {}
+      let finish = ""; try { finish = window.__adsFinish || ""; } catch (e) {}
+      const r = await fetch("/api/render/photoreal-auto", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ designType: type, finish, dims }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !(j.data && j.data.image)) throw new Error((j && j.message) || ("HTTP " + r.status));
+      try { window.__adsPR = j.data.image; } catch (e) {}
+      return j.data.image;
     };
     const exportSpecSheetPdf = async (result, type) => {
       const jsPDF = window.jspdf && window.jspdf.jsPDF;
@@ -9549,6 +9596,9 @@ const frontendHTML = `<!DOCTYPE html>
                     className="px-3 py-1.5 text-xs font-medium bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200 text-slate-800">⬇ Export DXF (mm)</a>
                   <button onClick={async () => { setPdfBusy(true); try { await exportDesignPdf(result, type); } catch (e) { console.error(e); } setPdfBusy(false); }} disabled={pdfBusy}
                     className="px-3 py-1.5 text-xs font-medium bg-rose-600 hover:bg-rose-500 text-white rounded-lg disabled:opacity-50">{pdfBusy ? "Building PDF…" : "⬇ Export PDF"}</button>
+                  <button onClick={async () => { setSpecBusy(true); try { await runAutoPhotoreal(result, type); await openSpecSheet(result); } catch (e) { alert("Photoreal render failed: " + ((e && e.message) || e)); } setSpecBusy(false); }} disabled={specBusy}
+                    title="AI-render a photoreal presentation view of this design, then build the spec sheet with it as the hero"
+                    className="px-3 py-1.5 text-xs font-medium bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white rounded-lg disabled:opacity-50 shadow-sm">{specBusy ? "✨ Rendering…" : "✨ Photoreal Sheet"}</button>
                   <button onClick={() => openSpecSheet(result)} disabled={specBusy}
                     className="px-3 py-1.5 text-xs font-medium bg-amber-700 hover:bg-amber-600 text-white rounded-lg disabled:opacity-50">{specBusy ? "Building…" : "📄 Spec Sheet"}</button>
                   <button onClick={async () => { setSpecBusy(true); try { await exportSpecSheetPdf(result, type); } catch (e) { console.error(e); } setSpecBusy(false); }} disabled={specBusy}
