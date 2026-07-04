@@ -332,7 +332,8 @@ const UPLOAD_EXT: Record<string, string> = {
 
 const DESIGN_TYPES = [
   "Straight Kitchen", "L-Shape Kitchen", "U-Shape Kitchen", "G-Shape Kitchen", "Parallel Kitchen",
-  "Island Kitchen", "Peninsula Kitchen", "Wardrobe", "Vanity Unit", "LCD/TV Panel", "Crockery Unit",
+  "Island Kitchen", "Peninsula Kitchen", "Open Kitchen", "Compact Kitchen", "Utility Kitchen",
+  "Wardrobe", "Vanity Unit", "LCD/TV Panel", "Crockery Unit",
   "Mandir", "Wall Panel",
   "Office Furniture", "Study Table", "Bed Back Panel", "Reception Counter",
 ];
@@ -1554,6 +1555,22 @@ function buildKitchenLayout(type: string, dims: { wall: number; wallB?: number; 
     ];
     applied.push("Peninsula: main cooking wall (chimney + sink + GTPT) + a peninsula prep run joined at one corner; open far end (optional seating), no wall cabinets above the peninsula.");
     applied.push("Corner solution hierarchy: LeMans > Magic Corner > Blind Corner > Carousel (dead corner avoided); walkway ≥1000 mm around the open end.");
+  } else if (t.includes("open")) {
+    // Open kitchen — a cooking wall opening onto the living area via a freestanding
+    // island / breakfast counter; wall cabinets kept minimal for an airy look.
+    const La = dims.wall, Li = dims.wallB ?? Math.round(La * 0.5);
+    const island: RunLayout = { name: "Island — Breakfast Counter", length: Li, base: makeBaseRow(Li, {}), wallCabs: [], sockets: [], hasChimney: false, hasSink: false };
+    runs = [buildCookingRun("Main Wall — Cooking", La, { sink: true }), island];
+    applied.push("Open kitchen: main cooking wall (chimney + sink + tall storage) opening to the living area, plus a freestanding island / breakfast counter; wall cabinets kept minimal for an airy, open-plan feel.");
+    applied.push("Keep a ≥1000 mm walkway around the island; the island doubles as casual seating / serving toward the living room.");
+  } else if (t.includes("compact")) {
+    // Compact kitchen — single-wall for a small space; base + wall storage, no tall tower.
+    runs = [buildCookingRun(type, dims.wall, { sink: true })];
+    applied.push("Compact kitchen: efficient single-wall layout for a small space — base + wall storage prioritised, hob + sink + fridge in a tight work line; skip the tall tower to save floor area.");
+  } else if (t.includes("utility")) {
+    // Utility kitchen — a service run (sink / washing / bulk storage) supporting the main kitchen.
+    runs = [buildCookingRun(type, dims.wall, { sink: true })];
+    applied.push("Utility kitchen: a service run with the sink, a washing-machine bay and bulk / tall storage — supports the main kitchen and keeps wet + rough work out of it.");
   } else {
     // Straight kitchen → single combined cooking + sink run (mandatory rule).
     runs = [buildCookingRun(type, dims.wall, { sink: true })];
@@ -3364,6 +3381,7 @@ function renderPlan(type: string, runs: RunLayout[], dims: { wall: number; wallB
   if (t.includes("g-shape")) return renderPlanG(runs[0], runs[1], runs[2], runs[3], dims.wall, dims.wallB ?? 2400, dims.wallC ?? 2400, (runs[3] && runs[3].length) || Math.round(dims.wall * 0.5));
   if (t.includes("u-shape")) return renderPlanU(runs[0], runs[1], runs[2], dims.wall, dims.wallB ?? 2400, dims.wallC ?? 2400);
   if (t.includes("parallel")) return renderPlanParallel(runs[0], runs[1], dims.wall, dims.wallB ?? dims.wall);
+  if (t.includes("open")) return renderPlanIsland(runs[0], runs[1], dims.wall, runs[1].length);
   if (t.includes("island")) return renderPlanIsland(runs[0], runs[1], dims.wall, runs[1].length);
   return renderPlanStraight(type, runs[0]);
 }
@@ -7122,7 +7140,7 @@ const frontendHTML = `<!DOCTYPE html>
       if (t.includes("g-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }, { o: [Lb, Lb], a: [-1, 0], n: [0, -1] }][i];
       if (t.includes("u-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }][i];
       if (t.includes("parallel")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * STD_C.baseDepth], a: [1, 0], n: [0, -1] }][i];
-      if (t.includes("island")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * STD_C.baseDepth], a: [1, 0], n: [0, 1] }][i];
+      if (t.includes("island") || t.includes("open")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * STD_C.baseDepth], a: [1, 0], n: [0, 1] }][i];
       return [{ o: [0, 0], a: [1, 0], n: [0, 1] }][i];
     }
     function LivePlan2D({ runs, type, dims }) {
@@ -7922,7 +7940,7 @@ const frontendHTML = `<!DOCTYPE html>
           if (t.includes("g-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }, { o: [Lb, Lc], a: [-1, 0], n: [0, -1] }][i];
           if (t.includes("u-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }][i];
           if (t.includes("parallel")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * D], a: [1, 0], n: [0, -1] }][i];
-          if (t.includes("island")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [(La - (dims.wallB || La * 0.55)) / 2, 1000 + 2 * D], a: [1, 0], n: [0, 1] }][i];
+          if (t.includes("island") || t.includes("open")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [(La - (dims.wallB || La * 0.55)) / 2, 1000 + 2 * D], a: [1, 0], n: [0, 1] }][i];
           return [{ o: [0, 0], a: [1, 0], n: [0, 1] }][i];
         };
         const fill = (k) => k === "sink" ? 0xcdeef5 : (k === "hob" || k === "drawer3") ? 0xffe3c2 : k === "drawer-atta" ? 0xfdeccb : k === "dishwasher" ? 0xdbe9ff : (k === "fridge" || k === "tall-fridge") ? 0xe8e0ff : k === "tall-pantry" ? 0xe7f6e3 : k === "tall-hiunit" ? 0xffe8d6 : k === "tall-utility" ? 0xd7f0ee : k === "corner" ? 0xdbe4f0 : (k === "glass-wall" || k === "gtpt" || k === "display") ? 0xa9b499 : 0xeaf1fb;
@@ -9490,14 +9508,15 @@ const frontendHTML = `<!DOCTYPE html>
       const isG = type.indexOf("G-Shape") === 0;
       const isParallel = type.indexOf("Parallel") === 0;
       const isIsland = type.indexOf("Island") === 0;
+      const isOpen = type.indexOf("Open") === 0;
       const isPeninsula = type.indexOf("Peninsula") === 0;
       const isFurniture = type.indexOf("Kitchen") < 0;
       const isKitchen = !isFurniture;
-      const needsB = isL || isU || isG || isParallel || isIsland || isPeninsula || isFurniture;
+      const needsB = isL || isU || isG || isParallel || isIsland || isOpen || isPeninsula || isFurniture;
       const wallLabel = isFurniture ? "Width (mm)" : (isU || isG) ? "Back wall (mm)" : isL ? "Cooking wall — Run A (mm)"
-        : isParallel ? "Run A — Cooking (mm)" : isIsland ? "Main wall (mm)" : isPeninsula ? "Main wall (mm)" : "Wall / Run length (mm)";
+        : isParallel ? "Run A — Cooking (mm)" : (isIsland || isOpen) ? "Main wall (mm)" : isPeninsula ? "Main wall (mm)" : "Wall / Run length (mm)";
       const wallBLabel = isFurniture ? "Height (mm)" : (isU || isG) ? "Left wall (mm)" : isL ? "Sink wall — Run B (mm)"
-        : isParallel ? "Run B — facing wall (mm)" : isPeninsula ? "Peninsula length (mm)" : "Island length (mm)";
+        : isParallel ? "Run B — facing wall (mm)" : isPeninsula ? "Peninsula length (mm)" : isOpen ? "Island / counter length (mm)" : "Island length (mm)";
 
       // 6.14 AI validation gate: room dimensions + wall/structure/point sanity before generation.
       const validateRoom = () => {
@@ -11455,6 +11474,7 @@ const frontendHTML = `<!DOCTYPE html>
         </div>
         <div className="text-[10px] text-slate-400 mb-1">click a shelf / drawer / rack & drag ↕ to resize · right-click for edit menu · drag empty space to orbit</div>
         <div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} />
+        {(opt.shape === "l" || opt.shape === "u") && <div style={{ position: "absolute", left: 8, bottom: 8, zIndex: 10 }} className="text-[10px] bg-white/85 border border-teal-200 text-teal-700 rounded px-2 py-1">◱ {opt.shape === "u" ? "U-shape" : "L-shape"} shown unfolded (all wings in a row) — see the <b>Top</b> view for the folded L/U plan with corner units.</div>}
         {menu3d && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu3d(null)} onContextMenu={(e) => { e.preventDefault(); setMenu3d(null); }} />
           <div style={{ position: "fixed", left: Math.min(menu3d.x, window.innerWidth - 190), top: Math.min(menu3d.y, window.innerHeight - 300), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1">
