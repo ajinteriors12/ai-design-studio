@@ -10592,8 +10592,16 @@ const frontendHTML = `<!DOCTYPE html>
 
     // Interactive drag-editor for a wardrobe option's front elevation: drag the horizontal
     // divider between two stacked cells to transfer height between them (resize a band).
+    const WARD_CONVERTS = [
+      { kind: "longHang", label: "Long Hanging", color: "#3b82f6" }, { kind: "shortHang", label: "Short Hanging", color: "#8b5cf6" },
+      { kind: "pantRack", label: "Trouser Rack", color: "#7c3aed" }, { kind: "shelf", label: "Shelf", color: "#22c55e" },
+      { kind: "drawer", label: "Drawer", color: "#ec4899" }, { kind: "shoe", label: "Shoe Rack", color: "#d4a574" },
+      { kind: "safe", label: "Safe Locker", color: "#ef4444" },
+    ];
     function WardrobeDrawEditor({ opt, onCommit }) {
       const [secs, setSecs] = useState(() => JSON.parse(JSON.stringify(opt.sections || [])));
+      const [menu, setMenu] = useState(null);   // {x,y,si,ci,k} right-click context menu
+      const [tip, setTip] = useState(null);      // live drag dimension tooltip
       React.useEffect(() => { setSecs(JSON.parse(JSON.stringify(opt.sections || []))); }, [opt]);
       const dragRef = React.useRef(null);
       const padL = 26, padR = 18, padT = 40, padB = 28;
@@ -10601,38 +10609,78 @@ const frontendHTML = `<!DOCTYPE html>
       const wpx = opt.width * scale, hpx = opt.height * scale, W = Math.round(wpx + padL + padR), H = Math.round(hpx + padT + padB);
       const x0 = padL, y0 = padT, xOf = (mm) => x0 + mm * scale;
       const loftPx = opt.hasLoft ? opt.loftH * scale : 0, plinthPx = (opt.plinth || 100) * scale, floorY = y0 + hpx - plinthPx, usableTopY = y0 + loftPx;
+      const reflowX = (sec) => { let x = sec.x; for (const c of sec.columns) { c.x = x; x += c.w; } };
       const onMove = (e) => {
         const d = dragRef.current; if (!d) return;
+        if (d.kind === "col") {
+          const dx = Math.round((e.clientX - d.x) / scale / 5) * 5; if (!dx) return;
+          setSecs((prev) => { const n = JSON.parse(JSON.stringify(prev)); const sec = n[d.si], L = sec.columns[d.ci], R = sec.columns[d.ci + 1]; if (!L || !R || L.w + dx < 250 || R.w - dx < 250) return prev; L.w += dx; R.w -= dx; reflowX(sec); setTip({ x: e.clientX, y: e.clientY, text: L.w + " / " + R.w + " mm" }); return n; });
+          d.x = e.clientX; return;
+        }
         const delta = Math.round((e.clientY - d.y) / scale / 5) * 5; if (!delta) return;
-        setSecs((prev) => {
-          const n = JSON.parse(JSON.stringify(prev)); const cells = n[d.si].columns[d.ci].cells;
-          const below = cells[d.k], above = cells[d.k + 1]; if (!below || !above) return prev;
-          if (below.hMM - delta < 60 || above.hMM + delta < 60) return prev;
-          below.hMM -= delta; above.hMM += delta; return n;
-        });
+        setSecs((prev) => { const n = JSON.parse(JSON.stringify(prev)); const cells = n[d.si].columns[d.ci].cells, below = cells[d.k], above = cells[d.k + 1]; if (!below || !above || below.hMM - delta < 60 || above.hMM + delta < 60) return prev; below.hMM -= delta; above.hMM += delta; setTip({ x: e.clientX, y: e.clientY, text: below.hMM + " / " + above.hMM + " mm" }); return n; });
         d.y = e.clientY;
       };
-      const endDrag = () => { const d = dragRef.current; dragRef.current = null; if (d) onCommit(secs); };
-      const startCell = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { si, ci, k, y: e.clientY }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
+      const endDrag = () => { const d = dragRef.current; dragRef.current = null; setTip(null); if (d) onCommit(secs); };
+      const startCell = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "cell", si, ci, k, y: e.clientY }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
+      const startCol = (e, si, ci) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "col", si, ci, x: e.clientX }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
+      const op = (kind, arg) => {
+        if (!menu) return;
+        const n = JSON.parse(JSON.stringify(secs)); const sec = n[menu.si], col = sec.columns[menu.ci], cells = col.cells, k = menu.k;
+        if (kind === "convert") { const cv = WARD_CONVERTS.find((c) => c.kind === arg); if (cv) { cells[k].kind = cv.kind; cells[k].label = cv.label; cells[k].color = cv.color; } }
+        else if (kind === "add") { const isD = arg === "drawer"; const take = Math.min(cells[k].hMM - 60, isD ? 200 : 300); if (take < 60) { setMenu(null); return; } cells[k].hMM -= take; cells.splice(k + 1, 0, { kind: isD ? "drawer" : "shelf", label: isD ? "Drawer" : "Shelf", color: isD ? "#ec4899" : "#22c55e", hMM: take }); }
+        else if (kind === "delete") { if (cells.length < 2) { setMenu(null); return; } const h = cells[k].hMM; cells.splice(k, 1); cells[Math.min(k, cells.length - 1)].hMM += h; }
+        else if (kind === "inc" || kind === "dec") { const dv = kind === "inc" ? 50 : -50, nb = cells[k + 1] || cells[k - 1]; if (!nb || cells[k].hMM + dv < 60 || nb.hMM - dv < 60) { setMenu(null); return; } cells[k].hMM += dv; nb.hMM -= dv; }
+        else if (kind === "equal") { const tot = cells.reduce((a, c) => a + c.hMM, 0), ev = Math.round(tot / cells.length); cells.forEach((c) => c.hMM = ev); }
+        else if (kind === "split") { const nw = Math.round(col.w / 2); if (nw < 250) { setMenu(null); return; } const newCol = JSON.parse(JSON.stringify(col)); col.w = nw; newCol.w = nw; sec.columns.splice(menu.ci + 1, 0, newCol); reflowX(sec); }
+        else if (kind === "merge") { const ri = sec.columns[menu.ci + 1] ? menu.ci + 1 : menu.ci - 1; const r = sec.columns[ri]; if (!r) { setMenu(null); return; } col.w += r.w; sec.columns.splice(ri, 1); reflowX(sec); }
+        setSecs(n); onCommit(n); setMenu(null);
+      };
+      const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, si, ci, k }); };
       const els = [];
       secs.forEach((sec, si) => { const sx = xOf(sec.x), sw = sec.width * scale; const tint = sec.kind === "male" ? "#eff6ff" : sec.kind === "female" ? "#fdf2f8" : "#fefce8"; const hc = sec.kind === "male" ? "#2563eb" : sec.kind === "female" ? "#db2777" : "#ca8a04"; els.push(<rect key={"st" + si} x={sx} y={y0} width={sw} height={hpx} fill={tint} />); els.push(<text key={"sh" + si} x={sx + sw / 2} y={y0 - 8} fill={hc} fontSize="11" fontWeight="700" textAnchor="middle">{sec.label}</text>); });
       if (opt.hasLoft) { els.push(<rect key="loft" x={x0} y={y0} width={wpx} height={loftPx} fill="#fcd34d55" stroke="#a16207" strokeWidth="0.8" />); els.push(<text key="loftt" x={x0 + wpx / 2} y={y0 + loftPx / 2 + 3} fill="#a16207" fontSize="9" fontWeight="600" textAnchor="middle">{"LOFT " + opt.loftH + " mm"}</text>); }
-      secs.forEach((sec, si) => sec.columns.forEach((col, ci) => {
-        const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
-        col.cells.forEach((cell, k) => {
-          const ch = cell.hMM * scale, yt = yb - ch;
-          els.push(<rect key={"c" + si + "-" + ci + "-" + k} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={(cell.color || "#cbd5e1") + "33"} stroke={cell.color || "#cbd5e1"} strokeWidth="0.7" />);
-          if (ch > 12) els.push(<text key={"cl" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle">{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
-          if (ch > 22) els.push(<text key={"cd" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle">{cell.hMM + " mm"}</text>);
-          if (k < col.cells.length - 1) { els.push(<line key={"hl" + si + "-" + ci + "-" + k} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" />); els.push(<rect key={"hh" + si + "-" + ci + "-" + k} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
-          yb = yt;
+      secs.forEach((sec, si) => {
+        sec.columns.forEach((col, ci) => {
+          const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
+          col.cells.forEach((cell, k) => {
+            const ch = cell.hMM * scale, yt = yb - ch;
+            els.push(<rect key={"c" + si + "-" + ci + "-" + k} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={(cell.color || "#cbd5e1") + "33"} stroke={cell.color || "#cbd5e1"} strokeWidth="0.7" style={{ cursor: "context-menu" }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
+            if (ch > 12) els.push(<text key={"cl" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
+            if (ch > 22) els.push(<text key={"cd" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.hMM + " mm"}</text>);
+            if (k < col.cells.length - 1) { els.push(<line key={"hl" + si + "-" + ci + "-" + k} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" style={{ pointerEvents: "none" }} />); els.push(<rect key={"hh" + si + "-" + ci + "-" + k} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
+            yb = yt;
+          });
+          els.push(<line key={"cp" + si + "-" + ci} x1={cx} y1={usableTopY} x2={cx} y2={floorY} stroke="#94a3b8" strokeWidth="0.7" style={{ pointerEvents: "none" }} />);
         });
-        els.push(<line key={"cp" + si + "-" + ci} x1={cx} y1={usableTopY} x2={cx} y2={floorY} stroke="#94a3b8" strokeWidth="0.7" />);
-      }));
-      els.push(<rect key="pl" x={x0} y={floorY} width={wpx} height={plinthPx} fill="#e2e8f0" stroke="#94a3b8" strokeWidth="0.6" />);
-      els.push(<rect key="fr" x={x0} y={y0} width={wpx} height={hpx} fill="none" stroke="#334155" strokeWidth="1.4" />);
-      for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" />); }
-      return (<svg width={W} height={H} viewBox={"0 0 " + W + " " + H} style={{ maxWidth: "100%", touchAction: "none", userSelect: "none" }} onPointerMove={onMove} onPointerUp={endDrag} onPointerLeave={endDrag}>{els}</svg>);
+        for (let ci = 0; ci < sec.columns.length - 1; ci++) { const bx = xOf(sec.columns[ci + 1].x); els.push(<rect key={"vh" + si + "-" + ci} x={bx - 4} y={usableTopY} width={8} height={floorY - usableTopY} fill="rgba(59,130,246,0.001)" style={{ cursor: "ew-resize" }} onPointerDown={(e) => startCol(e, si, ci)} />); }
+      });
+      els.push(<rect key="pl" x={x0} y={floorY} width={wpx} height={plinthPx} fill="#e2e8f0" stroke="#94a3b8" strokeWidth="0.6" style={{ pointerEvents: "none" }} />);
+      els.push(<rect key="fr" x={x0} y={y0} width={wpx} height={hpx} fill="none" stroke="#334155" strokeWidth="1.4" style={{ pointerEvents: "none" }} />);
+      for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); }
+      const mi = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
+      return (<div style={{ position: "relative" }}>
+        <svg width={W} height={H} viewBox={"0 0 " + W + " " + H} style={{ maxWidth: "100%", touchAction: "none", userSelect: "none" }} onPointerMove={onMove} onPointerUp={endDrag} onPointerLeave={endDrag}>{els}</svg>
+        {menu && (<React.Fragment>
+          <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
+          <div style={{ position: "fixed", left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 340), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1" >
+            {mi("+ Add shelf", () => op("add", "shelf"))}
+            {mi("+ Add drawer", () => op("add", "drawer"))}
+            {mi("🗑 Delete section", () => op("delete"))}
+            <div className="border-t border-slate-100 my-1" />
+            <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
+            {WARD_CONVERTS.map((c) => mi("• " + c.label, () => op("convert", c.kind)))}
+            <div className="border-t border-slate-100 my-1" />
+            {mi("▲ Increase height (+50)", () => op("inc"))}
+            {mi("▼ Decrease height (−50)", () => op("dec"))}
+            {mi("≡ Equal-divide column", () => op("equal"))}
+            <div className="border-t border-slate-100 my-1" />
+            {mi("⊟ Split column", () => op("split"))}
+            {mi("⊞ Merge with next", () => op("merge"))}
+          </div>
+        </React.Fragment>)}
+        {tip && <div style={{ position: "fixed", left: tip.x + 12, top: tip.y - 10, zIndex: 50, pointerEvents: "none" }} className="bg-slate-800 text-white text-[10px] px-1.5 py-0.5 rounded">{tip.text}</div>}
+      </div>);
     }
 
     // ── Wardrobe AI Designer — lifestyle-driven 3-option wardrobe generator (§2-§12) ──
@@ -10820,7 +10868,7 @@ const frontendHTML = `<!DOCTYPE html>
 
         {sel && (<div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-slate-700">✏️ Edit — <span className="text-indigo-600">Option {selIdx + 1} · {sel.label}</span> <span className="text-xs font-normal text-slate-400">· drag a horizontal divider to resize the band above/below</span></h3>
+            <h3 className="text-sm font-semibold text-slate-700">✏️ Edit — <span className="text-indigo-600">Option {selIdx + 1} · {sel.label}</span> <span className="text-xs font-normal text-slate-400">· drag dividers (↕ bands · ↔ partitions) · right-click a section for add / delete / convert</span></h3>
             {edited && <button onClick={() => setEdited(null)} className="text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Reset edits</button>}
           </div>
           <div className="overflow-auto"><WardrobeDrawEditor opt={sel} onCommit={commitEdit} /></div>
