@@ -11161,7 +11161,7 @@ const frontendHTML = `<!DOCTYPE html>
 
     function Fabrik() {
       const blankCab = () => ({ code: "", name: "New Cabinet", w: 600, h: 720, d: 560, material: "18mm BWR Plywood", finish: "Laminate", shutters: "", drawerCount: 0, shutterless: false });
-      const [proj, setProj] = useState({ name: "Kitchen Project", client: "", unitType: "kitchen", material: "18mm BWR Plywood", sheet: "8x4", finish: "Laminate" });
+      const [proj, setProj] = useState({ name: "Kitchen Project", client: "", unitType: "kitchen", material: "18mm BWR Plywood", sheet: "8x4", finish: "Laminate", drawerHardware: "hettich-softclose", drawerType: "kitchen" });
       const [cabs, setCabs] = useState([{ code: "C-001", name: "Base Unit", w: 800, h: 720, d: 560, material: "18mm BWR Plywood", finish: "Laminate", shutters: "", drawerCount: 0, shutterless: false }]);
       const [pkg, setPkg] = useState(null);
       const [overrides, setOverrides] = useState({});   // freeform per-panel size overrides {panelCode:{w,h,thk,qty}}
@@ -11184,12 +11184,13 @@ const frontendHTML = `<!DOCTYPE html>
 
       const buildSpecFrom = (cabsArr, projObj, ov) => ({
         project: { name: projObj.name, client: projObj.client }, unitType: projObj.unitType,
-        defaults: { material: projObj.material, sheet: projObj.sheet, shutterFinish: projObj.finish },
+        defaults: { material: projObj.material, sheet: projObj.sheet, shutterFinish: projObj.finish, drawerHardware: projObj.drawerHardware, drawerType: projObj.drawerType },
         overrides: ov || overrides,
         cabinets: cabsArr.map((c, i) => ({
           code: c.code || ("C-" + String(i + 1).padStart(3, "0")), name: c.name, w: +c.w || 0, h: +c.h || 0, d: +c.d || 0,
           material: c.material, shutterFinish: c.finish, shutters: c.shutters ? +c.shutters : undefined,
           shutterless: !!c.shutterless, drawers: +c.drawerCount > 0 ? Array.from({ length: +c.drawerCount }, () => ({})) : [],
+          drawerHardware: c.drawerHardware || undefined, drawerType: c.drawerType || undefined,
         })),
       });
       const buildSpec = () => buildSpecFrom(cabs, proj, overrides);
@@ -11316,6 +11317,21 @@ const frontendHTML = `<!DOCTYPE html>
               <label className="text-xs text-slate-500 mt-2 block">Default shutter finish</label>
               <select className={inp} value={proj.finish} onChange={e => setProj({ ...proj, finish: e.target.value })}>{meta.finishes.map(f => <option key={f} value={f}>{f}</option>)}</select>
             </div>
+            {/* §14 Drawer hardware — drives box W/D/H, clearances, drilling, load */}
+            <div className="md:col-span-3 grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-slate-100">
+              <div className="sm:col-span-3 text-xs font-semibold text-violet-700">🛠 Drawer hardware <span className="text-slate-400 font-normal">— every drawer is auto-sized to the selected brand/model &amp; clearance (kitchens, wardrobes, all furniture)</span></div>
+              <div>
+                <label className="text-xs text-slate-500">Drawer type (default)</label>
+                <select className={inp} value={proj.drawerType} onChange={e => { const dt = e.target.value; const t = (meta.drawerTypes || []).find(x => x.key === dt); setProj({ ...proj, drawerType: dt, drawerHardware: (t && t.defaultHw) || proj.drawerHardware }); }}>{(meta.drawerTypes || []).map(t => <option key={t.key} value={t.key}>{t.label} ({t.weight})</option>)}</select>
+              </div>
+              <div>
+                <label className="text-xs text-slate-500">Hardware system / model</label>
+                <select className={inp} value={proj.drawerHardware} onChange={e => setProj({ ...proj, drawerHardware: e.target.value })}>{(meta.drawerHardware || []).map(h => <option key={h.id} value={h.id}>{h.brand} · {h.model} — {h.load}kg{h.softClose ? " · soft-close" : h.pushOpen ? " · push-open" : ""}</option>)}</select>
+              </div>
+              <div className="text-[11px] text-slate-500 flex items-end pb-1">
+                {(() => { const h = (meta.drawerHardware || []).find(x => x.id === proj.drawerHardware); return h ? (<span>{h.category} · {h.mount === "under" ? "undermount" : "side-mount"}{h.metalSide ? " · metal gallery" : " · wooden box"} · depths {h.depths[0]}–{h.depths[h.depths.length - 1]}mm · {h.price} · {(h.use || []).slice(0, 3).join(", ")}</span>) : null; })()}
+              </div>
+            </div>
             <div className="md:col-span-3 flex items-center gap-2 flex-wrap pt-1 border-t border-slate-100">
               <input ref={fileRef} type="file" accept=".jpg,.jpeg,.png,.webp,.gif,.pdf,.dxf,.svg" style={{ display: "none" }} onChange={onFile} />
               <button onClick={() => fileRef.current && fileRef.current.click()} className="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg">📤 Upload drawing (AI read)</button>
@@ -11437,12 +11453,33 @@ const frontendHTML = `<!DOCTYPE html>
               )}
 
               {view === "Drawers" && (
-                <table className="w-full text-xs"><thead><tr>{["Drawer", "Component", "W", "H/Depth", "Thk", "Qty", "Material", "Channel"].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
-                  <tbody>{pkg.cabinets.flatMap(cb => cb.drawerComponents.map(comp => ({ comp, dr: cb.drawers.find(d => d.code === comp.drawer) }))).map(({ comp, dr }, i) => (
-                    <tr key={i}><td className={td + " font-mono"}>{comp.drawer}</td><td className={td}>{comp.panel}</td><td className={td}>{comp.w}</td><td className={td}>{comp.h}</td><td className={td}>{comp.thk}</td><td className={td}>{comp.qty}</td><td className={td}>{comp.material}</td><td className={td}>{dr ? dr.channel + "mm " + dr.channelType + " (" + dr.load + "kg)" : ""}</td></tr>
-                  ))}</tbody>
-                  {pkg.cabinets.every(cb => cb.drawerComponents.length === 0) && <tbody><tr><td className={td} colSpan={8}>No drawers in this project.</td></tr></tbody>}
-                </table>
+                <div>
+                  {pkg.hardwareSummary && pkg.hardwareSummary.systems.length > 0 && (
+                    <div className="mb-3 flex flex-wrap gap-2 items-center">
+                      <span className="text-xs font-semibold text-violet-700">🛠 Hardware:</span>
+                      {pkg.hardwareSummary.systems.map((s, i) => <span key={i} className="text-[11px] bg-violet-50 border border-violet-200 text-violet-700 rounded px-2 py-0.5">{s.brand} {s.model} · {s.load}kg × {s.count}</span>)}
+                      {pkg.hardwareSummary.warnings > 0 && <span className="text-[11px] bg-amber-100 border border-amber-300 text-amber-800 rounded px-2 py-0.5">⚠ {pkg.hardwareSummary.warnings} suitability warning(s)</span>}
+                    </div>
+                  )}
+                  {/* Per-drawer auto-sized boxes (hardware-exact) */}
+                  {pkg.cabinets.some(cb => (cb.drawers || []).length > 0) && (
+                    <table className="w-full text-xs mb-4"><thead><tr>{["Drawer", "Type", "Hardware", "Box W×H", "Runner depth", "Mount", "Load", "Soft/Push", "Drills", "Notes"].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                      <tbody>{pkg.cabinets.flatMap(cb => cb.drawers || []).map((d, i) => (
+                        <React.Fragment key={i}>
+                          <tr><td className={td + " font-mono"}>{d.code}</td><td className={td}>{d.typeLabel}</td><td className={td}>{d.hardware.brand} {d.hardware.model}</td><td className={td}>{d.boxW}×{d.boxH}{d.profileNote ? " ✦" : ""}</td><td className={td}>{d.depth}mm</td><td className={td}>{d.mount === "under" ? "under" : "side"}{d.metalSide ? " · metal" : " · wood"}</td><td className={td}>{d.load}kg</td><td className={td}>{d.softClose ? "soft-close" : d.pushOpen ? "push-open" : "std"}</td><td className={td}>{(d.drills || []).length}×2</td><td className={td + " text-slate-400"}>{d.profileNote || ""}</td></tr>
+                          {(d.warnings || []).map((w, k) => <tr key={"w" + k}><td className={td}></td><td className={td + " text-amber-700"} colSpan={9}>⚠ {w}</td></tr>)}
+                        </React.Fragment>
+                      ))}</tbody>
+                    </table>
+                  )}
+                  <div className="text-sm font-semibold text-slate-700 mb-1">Drawer components <span className="text-slate-400 font-normal">— cut sizes per box</span></div>
+                  <table className="w-full text-xs"><thead><tr>{["Drawer", "Component", "W", "H/Depth", "Thk", "Qty", "Material", "Remarks"].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                    <tbody>{pkg.cabinets.flatMap(cb => cb.drawerComponents.map(comp => ({ comp }))).map(({ comp }, i) => (
+                      <tr key={i}><td className={td + " font-mono"}>{comp.drawer}</td><td className={td}>{comp.panel}</td><td className={td}>{comp.w}</td><td className={td}>{comp.h}</td><td className={td}>{comp.thk}</td><td className={td}>{comp.qty}</td><td className={td}>{comp.material}</td><td className={td + " text-slate-400"}>{comp.remarks}</td></tr>
+                    ))}</tbody>
+                    {pkg.cabinets.every(cb => cb.drawerComponents.length === 0) && <tbody><tr><td className={td} colSpan={8}>No drawers in this project — set a Drawers count on a cabinet.</td></tr></tbody>}
+                  </table>
+                </div>
               )}
 
               {view === "Edge Banding" && (
@@ -11619,6 +11656,154 @@ function fabRound(n: number): number { return Math.round(n); }
 function sqft(areaMm2: number): number { return +(areaMm2 / 92903).toFixed(2); }     // mm² → ft²
 function rmeter(lenMm: number): number { return +(lenMm / 1000).toFixed(2); }         // mm → running m
 
+// ── §14 HARDWARE-BASED DRAWER AUTO-SIZING ────────────────────────────────────
+// Brand/model drawer-runner library with the real fitting rules used in Indian
+// modular factories. Every entry drives drawer box W/D/H, front, clearances,
+// runner drilling and load — so a drawer is NEVER generic; it is sized to the
+// exact hardware selected. Applies to kitchens, wardrobes and ALL furniture.
+//  sideClear   = total width removed for the runner (both sides), wooden box width = innerW − sideClear
+//  metalSide   = the runner IS the drawer side (Tandembox/Innotech/Legrabox/Quadro) → no wooden sides
+//  backDeduct  = innerW − back-panel width for metal-side systems
+//  mount       = "side" | "under" (undermount runs at box bottom)
+//  heightProfiles = fixed metal gallery heights (mm); wooden systems use boxHeightDeduct instead
+const FAB_DRAWER_HARDWARE: any[] = [
+  // ── Telescopic ball-bearing (side mount, wooden box) ──
+  { id: "ebco-telescopic", brand: "Ebco", category: "Telescopic Channel", model: "Ball Bearing Slide", mount: "side", metalSide: false, boxSideThk: 12,
+    depths: [250, 300, 350, 400, 450, 500, 550], sideClear: 26, backDeduct: 26, boxHeightDeduct: 40, heightProfiles: null,
+    load: 35, softClose: false, pushOpen: false, minW: 200, maxW: 1200, minFrontH: 100, maxFrontH: 350, rearClear: 12,
+    price: "Economy", availability: "In stock", use: ["Kitchen", "Wardrobe", "Office", "TV Unit"] },
+  { id: "godrej-telescopic", brand: "Godrej", category: "Telescopic Channel", model: "Zinc Telescopic", mount: "side", metalSide: false, boxSideThk: 12,
+    depths: [300, 350, 400, 450, 500], sideClear: 26, backDeduct: 26, boxHeightDeduct: 40, heightProfiles: null,
+    load: 30, softClose: false, pushOpen: false, minW: 200, maxW: 1100, minFrontH: 100, maxFrontH: 320, rearClear: 12,
+    price: "Economy", availability: "In stock", use: ["Kitchen", "Office"] },
+  // ── Soft-close telescopic (side mount, wooden box) ──
+  { id: "hettich-softclose", brand: "Hettich", category: "Soft-close Channel", model: "KA 5532 Soft-close", mount: "side", metalSide: false, boxSideThk: 12,
+    depths: [300, 350, 400, 450, 500, 550], sideClear: 26, backDeduct: 26, boxHeightDeduct: 40, heightProfiles: null,
+    load: 40, softClose: true, pushOpen: false, minW: 250, maxW: 1200, minFrontH: 120, maxFrontH: 350, rearClear: 12,
+    price: "Standard", availability: "In stock", use: ["Kitchen", "Wardrobe", "Vanity", "Crockery"] },
+  { id: "hafele-softclose", brand: "Hafele", category: "Soft-close Channel", model: "Accuride Soft-close", mount: "side", metalSide: false, boxSideThk: 12,
+    depths: [350, 400, 450, 500, 550, 600], sideClear: 26, backDeduct: 26, boxHeightDeduct: 40, heightProfiles: null,
+    load: 45, softClose: true, pushOpen: false, minW: 250, maxW: 1200, minFrontH: 120, maxFrontH: 380, rearClear: 12,
+    price: "Standard", availability: "In stock", use: ["Kitchen", "Wardrobe", "Office"] },
+  // ── Push-to-open (side mount, handleless) ──
+  { id: "hettich-pushopen", brand: "Hettich", category: "Push-to-open Channel", model: "Push-to-open Silent", mount: "side", metalSide: false, boxSideThk: 12,
+    depths: [350, 400, 450, 500], sideClear: 26, backDeduct: 26, boxHeightDeduct: 40, heightProfiles: null,
+    load: 35, softClose: false, pushOpen: true, minW: 300, maxW: 900, minFrontH: 120, maxFrontH: 350, rearClear: 14,
+    price: "Standard", availability: "In stock", use: ["Kitchen", "TV Unit", "Wardrobe (handleless)"] },
+  // ── Tandem box (metal double-wall, under mount) ──
+  { id: "blum-tandembox", brand: "Blum", category: "Tandem Box", model: "TANDEMBOX antaro", mount: "under", metalSide: true, boxSideThk: 0,
+    depths: [270, 300, 350, 400, 450, 500, 550, 600], sideClear: 0, backDeduct: 84, boxHeightDeduct: 0, heightProfiles: [83, 101, 115, 178, 224],
+    load: 50, softClose: true, pushOpen: false, minW: 300, maxW: 1200, minFrontH: 100, maxFrontH: 320, rearClear: 10,
+    price: "Premium", availability: "Import / dealer", use: ["Kitchen", "Vanity", "Crockery", "Pantry"] },
+  { id: "ebco-tandembox", brand: "Ebco", category: "Tandem Box", model: "Motion Tandem Box", mount: "under", metalSide: true, boxSideThk: 0,
+    depths: [300, 400, 450, 500], sideClear: 0, backDeduct: 84, boxHeightDeduct: 0, heightProfiles: [86, 118, 180],
+    load: 40, softClose: true, pushOpen: false, minW: 300, maxW: 1000, minFrontH: 100, maxFrontH: 250, rearClear: 10,
+    price: "Standard", availability: "In stock", use: ["Kitchen", "Crockery"] },
+  // ── Quadro undermount (Hettich) ──
+  { id: "hettich-quadro", brand: "Hettich", category: "Quadro Channel", model: "Quadro V6 Undermount", mount: "under", metalSide: false, boxSideThk: 16,
+    depths: [270, 300, 350, 400, 450, 500, 550, 620], sideClear: 42, backDeduct: 42, boxHeightDeduct: 30, heightProfiles: null,
+    load: 40, softClose: true, pushOpen: false, minW: 270, maxW: 1200, minFrontH: 120, maxFrontH: 400, rearClear: 12,
+    price: "Premium", availability: "Dealer", use: ["Kitchen", "Wardrobe", "Vanity"] },
+  // ── Innotech double-wall (Hettich Atira) ──
+  { id: "hettich-innotech", brand: "Hettich", category: "Innotech System", model: "InnoTech Atira", mount: "under", metalSide: true, boxSideThk: 0,
+    depths: [270, 300, 350, 400, 450, 470, 520, 620], sideClear: 0, backDeduct: 90, boxHeightDeduct: 0, heightProfiles: [70, 144, 176, 218],
+    load: 50, softClose: true, pushOpen: true, minW: 300, maxW: 1200, minFrontH: 100, maxFrontH: 300, rearClear: 10,
+    price: "Premium", availability: "Dealer", use: ["Kitchen", "Wardrobe", "Crockery", "Pantry"] },
+  // ── Slim / gallery drawer (Blum Legrabox / Hettich AvanTech) ──
+  { id: "blum-legrabox", brand: "Blum", category: "Slim Drawer System", model: "LEGRABOX pure", mount: "under", metalSide: true, boxSideThk: 0,
+    depths: [270, 300, 350, 400, 450, 500, 550, 600], sideClear: 0, backDeduct: 72, boxHeightDeduct: 0, heightProfiles: [70, 90, 128, 177, 240],
+    load: 40, softClose: true, pushOpen: true, minW: 300, maxW: 1200, minFrontH: 90, maxFrontH: 300, rearClear: 10,
+    price: "Premium", availability: "Import / dealer", use: ["Kitchen", "Vanity", "Wardrobe"] },
+  // ── Wooden drawer with channel (traditional) ──
+  { id: "wooden-channel", brand: "Generic", category: "Wooden Drawer + Channel", model: "18mm Wooden Box + Telescopic", mount: "side", metalSide: false, boxSideThk: 18,
+    depths: [300, 350, 400, 450, 500], sideClear: 26, backDeduct: 26, boxHeightDeduct: 30, heightProfiles: null,
+    load: 30, softClose: false, pushOpen: false, minW: 250, maxW: 1000, minFrontH: 120, maxFrontH: 400, rearClear: 12,
+    price: "Economy", availability: "In stock", use: ["Wardrobe", "TV Unit", "Traditional"] },
+  // ── Slim runner (Ozone / Dorset light drawers) ──
+  { id: "ozone-slim", brand: "Ozone", category: "Slim Drawer System", model: "Slim Steel Gallery", mount: "side", metalSide: true, boxSideThk: 0,
+    depths: [300, 350, 400, 450, 500], sideClear: 0, backDeduct: 62, boxHeightDeduct: 0, heightProfiles: [88, 116, 172],
+    load: 30, softClose: true, pushOpen: false, minW: 250, maxW: 900, minFrontH: 90, maxFrontH: 200, rearClear: 12,
+    price: "Standard", availability: "In stock", use: ["Wardrobe", "Vanity", "Office"] },
+  // ── Heavy-duty (utensil / thali / pantry) ──
+  { id: "ebco-heavyduty", brand: "Ebco", category: "Heavy-duty Channel", model: "Heavy Duty 45kg Slide", mount: "side", metalSide: false, boxSideThk: 18,
+    depths: [400, 450, 500, 550, 600], sideClear: 30, backDeduct: 30, boxHeightDeduct: 35, heightProfiles: null,
+    load: 45, softClose: false, pushOpen: false, minW: 300, maxW: 1200, minFrontH: 150, maxFrontH: 450, rearClear: 14,
+    price: "Standard", availability: "In stock", use: ["Heavy Utensil", "Thali", "Pantry", "Kitchen"] },
+  { id: "hafele-heavyduty", brand: "Hafele", category: "Heavy-duty Channel", model: "Heavy Duty 80kg Slide", mount: "side", metalSide: false, boxSideThk: 18,
+    depths: [450, 500, 550, 600], sideClear: 32, backDeduct: 32, boxHeightDeduct: 35, heightProfiles: null,
+    load: 80, softClose: true, pushOpen: false, minW: 350, maxW: 1400, minFrontH: 180, maxFrontH: 500, rearClear: 14,
+    price: "Premium", availability: "Dealer", use: ["Heavy Utensil", "Thali", "Pantry"] },
+];
+// Drawer TYPE profiles (weight class + the runner recommended for it) — used across all furniture.
+const FAB_DRAWER_TYPES: Record<string, any> = {
+  kitchen:      { label: "Kitchen Drawer",       weight: "medium", defaultHw: "hettich-softclose" },
+  wardrobe:     { label: "Wardrobe Drawer",      weight: "light",  defaultHw: "hettich-softclose" },
+  tallUnit:     { label: "Tall Unit Drawer",     weight: "medium", defaultHw: "hettich-innotech" },
+  vanity:       { label: "Vanity Drawer",        weight: "light",  defaultHw: "hettich-softclose" },
+  crockery:     { label: "Crockery Unit Drawer", weight: "medium", defaultHw: "blum-tandembox" },
+  tv:           { label: "TV Unit Drawer",       weight: "light",  defaultHw: "hettich-pushopen" },
+  office:       { label: "Office Storage Drawer", weight: "medium", defaultHw: "hettich-softclose" },
+  heavyUtensil: { label: "Heavy Utensil Drawer", weight: "heavy",  defaultHw: "ebco-heavyduty" },
+  cutlery:      { label: "Cutlery Drawer",       weight: "light",  defaultHw: "blum-tandembox" },
+  thali:        { label: "Thali Drawer",         weight: "heavy",  defaultHw: "hafele-heavyduty" },
+  pantry:       { label: "Pantry Pull-out",      weight: "heavy",  defaultHw: "hettich-innotech" },
+};
+const FAB_WEIGHT_MIN: Record<string, number> = { light: 20, medium: 30, heavy: 45 };
+function fabHardwareById(id: string): any { return FAB_DRAWER_HARDWARE.find((h) => h.id === id) || null; }
+function fabDefaultHardwareFor(dType: string): string { return (FAB_DRAWER_TYPES[dType] && FAB_DRAWER_TYPES[dType].defaultHw) || "hettich-softclose"; }
+function fabDrawerTypeFor(unitType: string): string {
+  const u = String(unitType || "").toLowerCase();
+  if (/wardrobe/.test(u)) return "wardrobe";
+  if (/vanity/.test(u)) return "vanity";
+  if (/crockery/.test(u)) return "crockery";
+  if (/tv/.test(u)) return "tv";
+  if (/office|study|table/.test(u)) return "office";
+  if (/tall|pantry/.test(u)) return "tallUnit";
+  return "kitchen";
+}
+// The core engine: given the cabinet geometry, the chosen hardware and the drawer
+// type, return the fully-clearanced drawer box, front, bottom, runner drilling and
+// any suitability warnings. This is what makes drawer sizes hardware-exact.
+function fabDrawerSizing(geo: any, hw: any, dType: string, frontH: number) {
+  const gap = FAB.shutterGap;
+  const innerW = geo.innerW;
+  const usableDepth = geo.D - (hw.rearClear || 12);
+  const depthOpts = (hw.depths || [450]).slice().sort((a: number, b: number) => a - b);
+  let depth = depthOpts.filter((d: number) => d <= usableDepth).pop();
+  const tooShallow = depth === undefined;
+  if (depth === undefined) depth = depthOpts[0];
+  const backW = hw.metalSide ? Math.max(100, innerW - (hw.backDeduct || 84)) : Math.max(100, innerW - (hw.sideClear || 26));
+  const boxW = backW;                                   // wooden box outer width (= back width)
+  const boxSideThk = hw.metalSide ? 0 : (hw.boxSideThk || 12);
+  let boxH: number, profileNote = "";
+  if (hw.heightProfiles && hw.heightProfiles.length) {
+    const fit = hw.heightProfiles.slice().sort((a: number, b: number) => a - b).filter((p: number) => p <= frontH - 20).pop();
+    boxH = fit || hw.heightProfiles[0];
+    profileNote = "gallery height " + boxH + "mm";
+  } else {
+    boxH = Math.max(80, fabRound(frontH - (hw.boxHeightDeduct || 40)));
+  }
+  const frontW = fabRound(geo.W - 2 * gap);
+  const bottomW = backW;
+  const bottomD = fabRound(depth - (hw.bottomInset || 10));
+  const usableDepthIn = fabRound(depth - (hw.metalSide ? 20 : boxSideThk + 8));
+  // runner drilling — side-mount runs at mid box height, undermount at the box floor
+  const runnerZ = hw.mount === "under" ? 0 : fabRound(boxH / 2);
+  const stops = [37, fabRound(depth / 2), Math.max(37, depth - 37)];
+  const drills = stops.map((y, i) => ({ ref: i === 0 ? "front fix" : i === stops.length - 1 ? "rear fix" : "mid fix", fromFront: y, fromBottom: runnerZ, dia: 4 }));
+  // suitability warnings
+  const warnings: string[] = [];
+  if (tooShallow) warnings.push("Usable depth " + fabRound(usableDepth) + "mm (cabinet " + geo.D + "mm − rear clearance) is below the shortest " + hw.model + " runner (" + depthOpts[0] + "mm) — box shortened, verify fit.");
+  if (frontW < hw.minW) warnings.push("Drawer front " + frontW + "mm is narrower than " + hw.model + " min (" + hw.minW + "mm).");
+  if (frontW > hw.maxW) warnings.push("Drawer front " + frontW + "mm exceeds " + hw.model + " max width (" + hw.maxW + "mm) — use a wider/heavier system.");
+  if (frontH < hw.minFrontH) warnings.push("Drawer front height " + frontH + "mm is below " + hw.model + " minimum (" + hw.minFrontH + "mm).");
+  if (frontH > hw.maxFrontH) warnings.push("Drawer front height " + frontH + "mm exceeds " + hw.model + " gallery max (" + hw.maxFrontH + "mm).");
+  const need = FAB_WEIGHT_MIN[(FAB_DRAWER_TYPES[dType] && FAB_DRAWER_TYPES[dType].weight) || "medium"] || 30;
+  if (hw.load < need) warnings.push((FAB_DRAWER_TYPES[dType] ? FAB_DRAWER_TYPES[dType].label : "This drawer") + " needs ≥" + need + "kg; " + hw.model + " is rated " + hw.load + "kg.");
+  if (frontW > 900 && hw.load < 40) warnings.push("Wide drawer (" + frontW + "mm) on a " + hw.load + "kg runner may sag — consider a 40kg+ system.");
+  return { depth, boxW, backW, boxH, boxSideThk, frontW, frontH, bottomW, bottomD, usableDepthIn, runnerZ, drills, profileNote, warnings, tooShallow };
+}
+
 // ── Panel cutting list for ONE cabinet (bottom-between-sides carcass) ─────────
 // Returns panels with grain direction + which 4 edges get banded (T/B/L/R).
 function fabCabinetPanels(cab: any) {
@@ -11670,23 +11855,34 @@ function fabCabinetShutters(cab: any, geo: any) {
   return out;
 }
 
-// ── Drawer components for ONE cabinet ────────────────────────────────────────
-function fabCabinetDrawers(cab: any, geo: any) {
+// ── Drawer components for ONE cabinet (§14 hardware-driven auto-sizing) ───────
+function fabCabinetDrawers(cab: any, geo: any, defaults?: any) {
   if (!geo.isDrawerUnit) return { drawers: [], components: [] };
   const gap = FAB.shutterGap;
-  const innerW = geo.innerW;
-  const boxW = innerW - 26;                                   // 13 mm channel clearance per side
-  const channel = FAB.channelSizes.filter((s) => s <= geo.D - 30).pop() || 450;
+  const defType = cab.drawerType || (defaults && defaults.drawerType) || fabDrawerTypeFor(cab.unitType || (defaults && defaults.unitType));
   const drawers: any[] = [], components: any[] = [];
   geo.drawers.forEach((dr: any, i: number) => {
     const frontH = fabRound(dr.height || (geo.H - gap * (geo.drawers.length + 1)) / geo.drawers.length);
-    const boxH = Math.max(80, frontH - 40);
+    const dType = dr.type || defType;
+    const hwId = dr.hardware || cab.drawerHardware || (defaults && defaults.drawerHardware) || fabDefaultHardwareFor(dType);
+    const hw = fabHardwareById(hwId) || fabHardwareById(fabDefaultHardwareFor(dType));
+    const s = fabDrawerSizing(geo, hw, dType, frontH);
     const code = (cab.code || "C") + "-D" + (i + 1);
-    drawers.push({ code, frontH, boxH, channel, channelType: "Tandem Box / Telescopic", load: channel >= 500 ? 30 : 20 });
-    components.push({ code: code + "-F", drawer: code, panel: "Drawer Front", w: fabRound(geo.W - 2 * gap), h: frontH, thk: 18, qty: 1, material: cab.material || "18mm BWR Plywood", grain: "Horizontal", remarks: "matches shutter finish" });
-    components.push({ code: code + "-B", drawer: code, panel: "Drawer Back",  w: boxW, h: boxH, thk: 12, qty: 1, material: "12mm Plywood", grain: "Horizontal", remarks: "" });
-    components.push({ code: code + "-S", drawer: code, panel: "Drawer Side",  w: channel, h: boxH, thk: 12, qty: 2, material: "12mm Plywood", grain: "Horizontal", remarks: "L+R" });
-    components.push({ code: code + "-BT", drawer: code, panel: "Drawer Bottom", w: boxW, h: channel - 10, thk: 6, qty: 1, material: "6mm Back Panel", grain: "Horizontal", remarks: "grooved in" });
+    const mat = cab.material || "18mm BWR Plywood";
+    drawers.push({
+      code, type: dType, typeLabel: (FAB_DRAWER_TYPES[dType] && FAB_DRAWER_TYPES[dType].label) || dType,
+      frontH, boxW: s.boxW, boxH: s.boxH, backW: s.backW, depth: s.depth, usableDepth: s.usableDepthIn,
+      channel: s.depth, channelType: hw.category, mount: hw.mount, metalSide: hw.metalSide,
+      load: hw.load, softClose: hw.softClose, pushOpen: hw.pushOpen, profileNote: s.profileNote,
+      hardware: { id: hw.id, brand: hw.brand, model: hw.model, category: hw.category, load: hw.load, softClose: hw.softClose, pushOpen: hw.pushOpen },
+      drills: s.drills, warnings: s.warnings,
+    });
+    // Front (always wood). Metal-side systems have no wooden sides — only Front/Back/Bottom.
+    const handleClause = hw.pushOpen ? "push-to-open · no handle" : "handle centred · " + (cab.shutterFinish || "matches shutter");
+    components.push({ code: code + "-F", drawer: code, panel: "Drawer Front", w: s.frontW, h: frontH, thk: 18, qty: 1, material: mat, grain: "Horizontal", remarks: handleClause });
+    components.push({ code: code + "-B", drawer: code, panel: "Drawer Back", w: s.backW, h: s.boxH, thk: hw.metalSide ? 16 : 12, qty: 1, material: hw.metalSide ? "16mm BWR Plywood" : "12mm Plywood", grain: "Horizontal", remarks: hw.metalSide ? "sits between metal gallery sides" : "" });
+    if (!hw.metalSide) components.push({ code: code + "-S", drawer: code, panel: "Drawer Side", w: s.depth, h: s.boxH, thk: s.boxSideThk, qty: 2, material: s.boxSideThk >= 18 ? mat : "12mm Plywood", grain: "Horizontal", remarks: "L+R · runner-drilled" });
+    components.push({ code: code + "-BT", drawer: code, panel: "Drawer Bottom", w: s.bottomW, h: s.bottomD, thk: 6, qty: 1, material: "6mm Back Panel", grain: "Horizontal", remarks: "grooved in 10mm" });
   });
   return { drawers, components };
 }
@@ -11797,12 +11993,19 @@ function fabBom(cabs: any[], allPanels: any[], allShutters: any[], drawerData: a
   const material = nest.map((g) => ({ material: g.material, sheets: g.count, areaSqft: g.areaSqft, wastePct: +(100 - g.avgUtil).toFixed(1), sheetSize: (FAB.sheets as any)[g.sheetKey].label }));
   // hinges
   let hinges = 0; for (const s of allShutters) hinges += s.hinges;
-  let drawerPairs = 0; for (const d of drawerData) drawerPairs += d.drawers.length;
   let handles = allShutters.length; let legs = 0;
   for (const c of cabs) if ((c.h || 0) > 1000) legs += 4; else legs += 2;
+  // §14: drawer runners itemised by the ACTUAL selected model/depth/load (one pair per drawer)
+  const runnerMap = new Map<string, any>();
+  for (const d of drawerData) for (const dr of d.drawers) {
+    const key = dr.hardware.brand + "|" + dr.hardware.model + "|" + dr.depth;
+    const row = runnerMap.get(key) || { item: dr.hardware.model + (dr.softClose ? " (soft-close)" : dr.pushOpen ? " (push-open)" : ""), size: dr.depth + "mm · " + dr.load + "kg", qty: 0, brand: dr.hardware.brand };
+    row.qty += 1; runnerMap.set(key, row);
+  }
+  const runnerRows = [...runnerMap.values()].map((r) => ({ ...r, qty: r.qty + " pairs" }));
   const hardware = [
     { item: "Soft-close Hinges (Clip-on)", size: "35mm cup", qty: hinges, brand: "Blum / Hettich" },
-    { item: "Drawer Channels", size: "Tandem / Telescopic", qty: drawerPairs + " pairs", brand: "Hettich / Ebco" },
+    ...runnerRows,
     { item: "Cabinet Handles / Profiles", size: "128mm", qty: handles, brand: "Hafele" },
     { item: "Adjustable Legs", size: "100mm", qty: legs, brand: "Ebco" },
     { item: "Shelf Pins", size: "5mm", qty: allPanels.filter((p) => /Shelf/.test(p.panel)).reduce((s, p) => s + p.qty * 4, 0), brand: "Generic" },
@@ -11864,12 +12067,13 @@ function fabrikGenerate(spec: any) {
     return { ...p, w: num(o.w, p.w), h: num(o.h, p.h), thk: num(o.thk, p.thk), qty: Math.max(1, Math.round(num(o.qty, p.qty))), overridden: true, orig: { w: p.w, h: p.h, thk: p.thk, qty: p.qty } };
   };
 
+  const drawerDefaults = { drawerHardware: defaults.drawerHardware || "", drawerType: defaults.drawerType || "", unitType: spec.unitType || "" };
   const cabinets: any[] = [], geos: any[] = [], allPanels: any[] = [], allShutters: any[] = [], drawerData: any[] = [];
   for (const c of cabs) {
     const geo = fabCabinetPanels(c);
     geos.push(geo);
     const shutters = fabCabinetShutters(c, geo).map(applyOv);
-    const dr = fabCabinetDrawers(c, geo);
+    const dr = fabCabinetDrawers(c, geo, drawerDefaults);
     const drComps = dr.components.map((x: any) => applyOv({ ...x, edges: { top: false, bottom: false, left: false, right: false } }));
     const carcass = geo.panels.map(applyOv);
     const panels = carcass.concat(drComps);
@@ -11887,6 +12091,16 @@ function fabrikGenerate(spec: any) {
   const bom = fabBom(cabs, allPanels, allShutters, drawerData, nest);
   const cnc = allPanels.filter((p) => !/Drawer/.test(p.panel)).slice(0, 60).map(fabCncForPanel);
   const verify = fabVerify(cabs, geos);
+  // §14: surface drawer-hardware suitability warnings into the verify/error stream
+  const hwWarnings: any[] = [];
+  cabinets.forEach((cab) => (cab.drawers || []).forEach((dr: any) => (dr.warnings || []).forEach((w: string) => hwWarnings.push({ level: "warn", cabinet: cab.code, msg: dr.code + " · " + w }))));
+  verify.errors = verify.errors.concat(hwWarnings);
+  verify.checks.push({ cabinet: "—", label: "Drawer hardware suitability", ok: hwWarnings.length === 0, detail: hwWarnings.length ? hwWarnings.length + " warning(s)" : "all drawers within hardware limits" });
+  verify.total = verify.checks.length; verify.passed = verify.checks.filter((c: any) => c.ok).length;
+  // §14: project-level hardware summary (which runner models, totals, load range)
+  const usedHw = new Map<string, any>();
+  cabinets.forEach((cab) => (cab.drawers || []).forEach((dr: any) => { const h = usedHw.get(dr.hardware.id) || { ...dr.hardware, count: 0 }; h.count += 1; usedHw.set(dr.hardware.id, h); }));
+  const hardwareSummary = { systems: [...usedHw.values()], totalDrawers: drawerData.reduce((s, d) => s + d.drawers.length, 0), warnings: hwWarnings.length };
   const totalSheets = nest.reduce((s, g) => s + g.count, 0);
   return {
     project: spec.project || { name: "Untitled", client: "" },
@@ -11896,13 +12110,20 @@ function fabrikGenerate(spec: any) {
       drawers: drawerData.reduce((s, d) => s + d.drawers.length, 0), sheets: totalSheets,
       edgeBandM: edgeBanding.totalRunningM, verifyPass: verify.passed + "/" + verify.total, overrides: overrideCount,
     },
-    cabinets, edgeBanding, nest, bom, cnc, verify, sheetKey,
+    cabinets, edgeBanding, nest, bom, cnc, verify, sheetKey, hardwareSummary,
     standards: { thickness: FAB.carcassThk + "mm carcass / " + FAB.backThk + "mm back", system: "32mm", gap: FAB.shutterGap + "mm full-overlay", note: "Indian modular-furniture standards" },
   };
 }
 
 // ── ROUTES ────────────────────────────────────────────────────────────────────
-app.get("/api/fabrik/meta", (c) => c.json({ data: { materials: FAB_MATERIALS, sheets: Object.entries(FAB.sheets).map(([k, v]: any) => ({ key: k, label: v.label })), finishes: ["Laminate", "Acrylic", "PU Paint", "Veneer", "Membrane", "Glass", "Rattan", "Fluted"], std: FAB.ergonomics } }));
+app.get("/api/fabrik/meta", (c) => c.json({ data: {
+  materials: FAB_MATERIALS,
+  sheets: Object.entries(FAB.sheets).map(([k, v]: any) => ({ key: k, label: v.label })),
+  finishes: ["Laminate", "Acrylic", "PU Paint", "Veneer", "Membrane", "Glass", "Rattan", "Fluted"],
+  std: FAB.ergonomics,
+  drawerHardware: FAB_DRAWER_HARDWARE.map((h) => ({ id: h.id, brand: h.brand, category: h.category, model: h.model, depths: h.depths, load: h.load, softClose: h.softClose, pushOpen: h.pushOpen, mount: h.mount, metalSide: h.metalSide, price: h.price, availability: h.availability, use: h.use, minW: h.minW, maxW: h.maxW })),
+  drawerTypes: Object.entries(FAB_DRAWER_TYPES).map(([k, v]: any) => ({ key: k, label: v.label, weight: v.weight, defaultHw: v.defaultHw })),
+} }));
 
 // Interpret an uploaded drawing → a draft editable cabinet spec (uses the vision reader).
 app.post("/api/fabrik/interpret", async (c) => {

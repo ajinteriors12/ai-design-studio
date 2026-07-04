@@ -76,3 +76,5 @@ dbg-*
 # editor/OS
 .DS_Store
 Thumbs.db
+
+!verify-fab14-ui.mjs
