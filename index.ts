@@ -10540,7 +10540,7 @@ const frontendHTML = `<!DOCTYPE html>
 
     // 3D preview — reconstruct a wardrobe option as real panel meshes (carcass, partitions,
     // shelves, drawers, hanging rods, loft, plinth, optional shutters) in Three.js r128.
-    function Wardrobe3D({ opt, onEdit }) {
+    function Wardrobe3D({ opt, onEdit, onSnap }) {
       const ref = React.useRef(null);
       const [shutters, setShutters] = useState(false);
       const [selInfo, setSelInfo] = useState(null);   // {label, mm} of the picked/dragged cell
@@ -10704,6 +10704,7 @@ const frontendHTML = `<!DOCTYPE html>
           <button onClick={() => setShutters((s) => !s)} className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button>
           <span className="text-slate-400">Export</span>
           {["obj", "gltf", "stl"].map((f) => <button key={f} onClick={() => exportRef.current && exportRef.current(f)} className="px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 uppercase">{f === "gltf" ? "GLB" : f}</button>)}
+          {onSnap && <button onClick={() => { const cnv = ref.current && ref.current.querySelector("canvas"); if (cnv) onSnap(cnv.toDataURL("image/png")); }} className="px-2 py-1 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 font-medium" title="Use this 3D view as the presentation-board hero">🖼 To Board</button>}
           {selInfo && <span className="text-indigo-600 font-medium">{selInfo.label}: {selInfo.mm} mm</span>}
         </div>
         <div className="text-[10px] text-slate-400 mb-1">click a shelf / drawer / rack & drag ↕ to resize · right-click for edit menu · drag empty space to orbit</div>
@@ -10871,6 +10872,9 @@ const frontendHTML = `<!DOCTYPE html>
       const [finScope, setFinScope] = useState("all");   // §14 catalog finish application
       const [finQ, setFinQ] = useState("");
       const [finRes, setFinRes] = useState([]);
+      const [boardSvg, setBoardSvg] = useState("");       // presentation-board composite SVG
+      const [boardBusy, setBoardBusy] = useState(false);
+      const [boardHero, setBoardHero] = useState(null);   // captured 3D snapshot used as the board hero
       const reTimer = React.useRef(null);
       const firstSig = React.useRef(true);
       const suppressGen = React.useRef(false);       // skip auto-regen when restoring a saved design
@@ -10900,6 +10904,17 @@ const frontendHTML = `<!DOCTYPE html>
       const clearFinish = (scope) => setInput((p) => { const f = Object.assign({}, p.finishes || {}); delete f[scope]; return Object.assign({}, p, { finishes: f }); });
       const loadSaved = () => fetch("/api/wardrobe/saved").then((r) => r.json()).then((j) => setSaved(j.data || [])).catch(() => {});
       React.useEffect(() => { loadSaved(); }, []);
+      // Presentation board: (re)compose whenever the Board tab is active / selection / hero changes.
+      React.useEffect(() => {
+        if (repTab !== "Board") return;
+        const o = edited || (data && data.options && data.options[selIdx]); if (!o) return;
+        setBoardBusy(true);
+        const id = setTimeout(() => {
+          fetch("/api/wardrobe/presentation-board", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option: o, input, hero: boardHero }) })
+            .then((r) => r.json()).then((j) => { setBoardSvg((j.data && j.data.svg) || ""); setBoardBusy(false); }).catch(() => setBoardBusy(false));
+        }, 120);
+        return () => clearTimeout(id);
+      }, [repTab, selIdx, edited, boardHero, data, input]);
       const saveToGallery = () => {
         if (!data || !data.options) return;
         fetch("/api/wardrobe/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data, input, selIdx }) })
@@ -10965,6 +10980,16 @@ const frontendHTML = `<!DOCTYPE html>
       const opts = (data && data.options) || [];
       const sel = edited || opts[selIdx];   // reports + editor reflect drag-edits; the grid keeps the 3 AI proposals
       const best = data && data.recommendation ? data.recommendation.bestIndex : 0;
+      const exportBoardPdf = async () => {
+        const jsPDF = window.jspdf && window.jspdf.jsPDF; if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
+        if (!boardSvg) { alert("Open the Board tab first."); return; }
+        let png; try { png = await svgToPng(boardSvg, 2); } catch (e) { alert("Board render failed."); return; }
+        const P = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+        const PW = P.internal.pageSize.getWidth(), PH = P.internal.pageSize.getHeight(), M = 18;
+        const aw = png.w || 1536, ah = png.h || 1024; let iw = PW - 2 * M, ih = iw * ah / aw; if (ih > PH - 2 * M) { ih = PH - 2 * M; iw = ih * aw / ah; }
+        P.addImage(png.dataUrl, "PNG", (PW - iw) / 2, (PH - ih) / 2, iw, ih);
+        saveBlobAs(P.output("blob"), "wardrobe-board-" + wardSlug((sel || {}).label) + ".pdf");
+      };
       const LEVELS = [["low", "Low"], ["medium", "Medium"], ["high", "High"]];
       const levelSel = (k, label) => (<label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">{label}</span><select value={input[k]} onChange={(e) => set(k, e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs bg-white">{LEVELS.map(([v, t]) => <option key={v} value={v}>{t}</option>)}</select></label>);
       const countSel = (k, label, max) => (<label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">{label}</span><select value={input[k]} onChange={(e) => set(k, +e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs bg-white">{Array.from({ length: max + 1 }, (_, i) => <option key={i} value={i}>{i}</option>)}</select></label>);
@@ -11077,7 +11102,7 @@ const frontendHTML = `<!DOCTYPE html>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
-            {["Legend", "Reports", "Cutting List", "Hardware", "BOQ", "CNC", "3D"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700")}>{t}</button>))}
+            {["Legend", "Reports", "Cutting List", "Hardware", "BOQ", "CNC", "3D", "Board"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700") + (t === "Board" ? " ml-0.5" : "")}>{t === "Board" ? "🖼 Board" : t}</button>))}
             <span className="ml-auto text-[11px] text-slate-400">{sel ? "Option " + (selIdx + 1) + " · " + sel.label : ""}</span>
           </div>
           {repTab === "Legend" && (<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1.5">
@@ -11104,7 +11129,17 @@ const frontendHTML = `<!DOCTYPE html>
             </tbody></table></div>
             <div className="text-[10px] text-slate-400 mt-1">Drilling schedule for LINE-32 boring — export to the CNC as a drill map per panel.</div>
           </div>)}
-          {repTab === "3D" && sel && <Wardrobe3D opt={sel} onEdit={commitEdit} />}
+          {repTab === "3D" && sel && <Wardrobe3D opt={sel} onEdit={commitEdit} onSnap={(d) => { setBoardHero(d); setRepTab("Board"); }} />}
+          {repTab === "Board" && sel && (<div>
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <button onClick={exportBoardPdf} disabled={!boardSvg} className="px-2.5 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 text-xs font-medium disabled:opacity-50">⬇ Board PDF</button>
+              <a href={"/api/wardrobe/presentation-board?inline=1"} onClick={(e) => { e.preventDefault(); if (boardSvg) saveBlobAs(new Blob([boardSvg], { type: "image/svg+xml" }), "wardrobe-board-" + wardSlug((sel || {}).label) + ".svg"); }} className="px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium cursor-pointer">⬇ SVG</a>
+              {boardHero && <button onClick={() => setBoardHero(null)} className="px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs">↻ Use drawing hero</button>}
+              <span className="text-[11px] text-slate-400">{boardHero ? "Hero = your captured 3D render" : "Tip: open the 3D tab → 🖼 To Board to drop a live 3D render into the hero"}</span>
+              {boardBusy && <span className="text-[11px] text-indigo-500">rendering…</span>}
+            </div>
+            <div className="rounded-lg border border-slate-200 overflow-auto bg-slate-100 p-2" style={{ maxHeight: 620 }} dangerouslySetInnerHTML={{ __html: boardSvg }} />
+          </div>)}
         </div>
         <div className="text-[11px] text-slate-400 px-1">Learns from your uploaded references in the <span className="font-medium text-slate-500">Library</span> tab (vision-read wardrobes drive the Generator). This module applies Indian standard arrangements to your lifestyle inputs.</div>
       </div>);
@@ -12380,6 +12415,106 @@ function renderWardrobeLoftSvg(opt: any): string {
   p.push(`</svg>`);
   return p.join("");
 }
+// ── Wardrobe PRESENTATION BOARD ──────────────────────────────────────────────
+// One polished, customer-facing landscape sheet (à la a studio render board):
+// a big 3D/open-wardrobe hero + angle + inside thumbnails, an overlaid PROJECT
+// INFO card, MALE/FEMALE section pills, then a bottom strip of dimensioned
+// Top/Side/Front views + a MATERIAL & FINISH swatch card. Deterministic from the
+// wardrobe's own vector views; if the client posts captured 3D snapshots
+// (hero/angle/inside data-URLs) those fill the photo slots for a real 3D look.
+const WARD_IMG_RE = /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/]+=*$/;
+function wardrobePresentationBoard(opt: any, input: any, images?: any): string {
+  const esc = (t: any) => String(t == null ? "" : t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const imgOk = (s: any) => typeof s === "string" && s.length < 5_000_000 && WARD_IMG_RE.test(s);
+  const fin = opt.finishes || {};
+  const finOf = (scope: string) => fin[scope] || fin.all || null;
+  const hexOf = (m: any, fallback: string) => { if (!m) return fallback; const raw = String(m.hex || m.colorCode || ""); return /^#?[0-9a-fA-F]{6}$/.test(raw) ? (raw[0] === "#" ? raw : "#" + raw) : fallback; };
+  // nest a wardrobe view SVG (keeps its own viewBox) into a positioned sub-box
+  const embed = (svg: string, x: number, y: number, w: number, h: number) => {
+    const vb = (svg.match(/viewBox="([^"]+)"/) || [])[1];
+    const inner = svg.replace(/^[\s\S]*?<svg[^>]*>/, "").replace(/<\/svg>\s*$/, "");
+    return `<svg x="${x}" y="${y}" width="${w}" height="${h}"${vb ? ` viewBox="${vb}"` : ""} preserveAspectRatio="xMidYMid meet">${inner}</svg>`;
+  };
+  const photo = (dataUrl: any, fallbackSvg: string, x: number, y: number, w: number, h: number) =>
+    imgOk(dataUrl) ? `<image x="${x}" y="${y}" width="${w}" height="${h}" href="${dataUrl}" preserveAspectRatio="xMidYMid slice"/>` : embed(fallbackSvg, x, y, w, h);
+  const imgs = images || {};
+  const V = opt.views || {};
+  const W = 1536, H = 1024;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Inter,Segoe UI,Arial,sans-serif">`);
+  p.push(`<rect width="${W}" height="${H}" fill="#e7ebf1"/>`);
+  const card = (x: number, y: number, w: number, h: number, tag: string, tagW = 0) => { p.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="#ffffff" stroke="#d5dbe4" stroke-width="1"/>`); if (tag) { const tw = tagW || (tag.length * 8.4 + 22); p.push(`<rect x="${x + 12}" y="${y + 12}" width="${tw}" height="26" rx="6" fill="#1e293b"/><text x="${x + 12 + tw / 2}" y="${y + 29}" fill="#ffffff" font-size="12" font-weight="700" letter-spacing="0.5" text-anchor="middle">${esc(tag)}</text>`); } };
+  // ── hero (left) ──
+  const hx = 20, hy = 20, hw = 1012, hh = 690;
+  card(hx, hy, hw, hh, "3D PREVIEW — WARDROBE", 230);
+  p.push(`<clipPath id="heroClip"><rect x="${hx + 8}" y="${hy + 48}" width="${hw - 16}" height="${hh - 56}" rx="8"/></clipPath><g clip-path="url(#heroClip)">`);
+  p.push(photo(imgs.hero, V.Internal || opt.svg || "", hx + 8, hy + 48, hw - 16, hh - 56));
+  p.push(`</g>`);
+  // project-info card overlay
+  const px = hx + 24, py = hy + 66, pw = 250;
+  const info: [string, string][] = [
+    ["Type", esc(input && input.wardType) || "Hinged Wardrobe"],
+    ["Style", (input && input.style) || "Modern"],
+    ["Finish", esc((finOf("all") && (finOf("all").colorName || finOf("all").brand)) || "Matte Laminate")],
+    ["Height", opt.height + " mm"],
+    ["Width", opt.width + " mm"],
+    ["Depth", opt.depth + " mm"],
+    ["Loft Height", opt.hasLoft ? opt.loftH + " mm" : "—"],
+    ["Overall Height", opt.height + " mm"],
+  ];
+  const ph = 34 + info.length * 22;
+  p.push(`<rect x="${px}" y="${py}" width="${pw}" height="${ph}" rx="9" fill="#ffffffee" stroke="#cbd5e1" stroke-width="1"/>`);
+  p.push(`<text x="${px + 16}" y="${py + 24}" fill="#0f172a" font-size="13" font-weight="800" letter-spacing="0.4">PROJECT INFO</text>`);
+  info.forEach(([k, v], i) => { const yy = py + 46 + i * 22; p.push(`<text x="${px + 16}" y="${yy}" fill="#64748b" font-size="11">${esc(k)}</text><text x="${px + pw - 16}" y="${yy}" fill="#0f172a" font-size="11" font-weight="600" text-anchor="end">${esc(v)}</text>`); });
+  // section pills along the hero bottom
+  const secs = opt.sections || [];
+  secs.forEach((s: any) => { if (!s.width) return; const cxFrac = (s.x + s.width / 2) / opt.width; const cx = hx + 8 + cxFrac * (hw - 16); const lbl = (s.label || s.kind).toUpperCase() + " SECTION"; const pw2 = lbl.length * 7.2 + 20; const col = s.kind === "male" ? "#2563eb" : s.kind === "female" ? "#db2777" : "#ca8a04"; p.push(`<rect x="${(cx - pw2 / 2).toFixed(1)}" y="${hy + hh - 40}" width="${pw2.toFixed(1)}" height="26" rx="13" fill="${col}"/><text x="${cx.toFixed(1)}" y="${hy + hh - 22}" fill="#ffffff" font-size="11.5" font-weight="700" text-anchor="middle">${esc(lbl)}</text>`); });
+  // ── right column: angle + inside ──
+  const rx = 1048, rw = 468;
+  card(rx, 20, rw, 336, "3D VIEW — ANGLE", 150);
+  p.push(`<clipPath id="angClip"><rect x="${rx + 8}" y="68" width="${rw - 16}" height="280" rx="8"/></clipPath><g clip-path="url(#angClip)">`);
+  p.push(photo(imgs.angle, V.Front || opt.svg || "", rx + 8, 68, rw - 16, 280));
+  p.push(`</g>`);
+  card(rx, 374, rw, 336, "3D VIEW — INSIDE", 150);
+  p.push(`<clipPath id="insClip"><rect x="${rx + 8}" y="422" width="${rw - 16}" height="280" rx="8"/></clipPath><g clip-path="url(#insClip)">`);
+  p.push(photo(imgs.inside, V.Internal || opt.svg || "", rx + 8, 422, rw - 16, 280));
+  p.push(`</g>`);
+  // ── bottom strip: Top / Side / Front / Material ──
+  const by = 726, bh = 278, gap = 12, bx0 = 20, cw = (W - 40 - 3 * gap) / 4;
+  const cardX = (i: number) => bx0 + i * (cw + gap);
+  card(cardX(0), by, cw, bh, "TOP VIEW (PLAN)", 150);
+  p.push(embed(V.Top || "", cardX(0) + 8, by + 46, cw - 16, bh - 56));
+  card(cardX(1), by, cw, bh, "SIDE VIEW", 100);
+  p.push(embed(V.Side || "", cardX(1) + 8, by + 46, cw - 16, bh - 56));
+  card(cardX(2), by, cw, bh, "FRONT ELEVATION", 150);
+  p.push(embed(V.Front || "", cardX(2) + 8, by + 46, cw - 16, bh - 56));
+  // material & finish
+  const mxb = cardX(3);
+  card(mxb, by, cw, bh, "MATERIAL & FINISH", 165);
+  const body = finOf("all"), shutter = finOf("male") || finOf("female") || finOf("all");
+  const sw = [
+    { name: "BODY LAMINATE", brand: (body && body.brand) || "Asian Paints", code: (body && body.code) || "8872", fintxt: "Matte", hex: hexOf(body, "#cfc3ad") },
+    { name: "SHUTTER LAMINATE", brand: (shutter && shutter.brand) || "Merino", code: (shutter && shutter.code) || "3117 WX", fintxt: (shutter && shutter.finishType) || "Matte", hex: hexOf(shutter, "#8a7a63") },
+    { name: "HANDLE", brand: "Godrej", code: "Arc", fintxt: "Rose Gold", hex: "#b76e79" },
+  ];
+  sw.forEach((m, i) => { const swy = by + 54 + i * 72; p.push(`<rect x="${mxb + 16}" y="${swy}" width="72" height="52" rx="6" fill="${m.hex}" stroke="#cbd5e1" stroke-width="1"/>`); p.push(`<text x="${mxb + 100}" y="${swy + 14}" fill="#0f172a" font-size="11.5" font-weight="800" letter-spacing="0.3">${esc(m.name)}</text>`); p.push(`<text x="${mxb + 100}" y="${swy + 30}" fill="#475569" font-size="10.5">${esc(m.brand)}</text>`); p.push(`<text x="${mxb + 100}" y="${swy + 44}" fill="#64748b" font-size="10">Code: ${esc(m.code)} · ${esc(m.fintxt)}</text>`); });
+  // footer
+  p.push(`<text x="${W - 24}" y="${H - 10}" fill="#94a3b8" font-size="10" text-anchor="end">AI Design Studio · ${esc(opt.label)} · ${opt.width}×${opt.height}×${opt.depth} mm</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+app.post("/api/wardrobe/presentation-board", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as any));
+    let opt = body.option || body.opt;
+    if (!opt || !Array.isArray(opt.sections)) return c.json({ error: "no wardrobe option supplied" }, 400);
+    // ensure the derived views exist (a freshly drag-edited option may only carry sections)
+    if (!opt.views || !opt.views.Front) { opt.views = { Front: renderWardrobeElevationSvg(opt, "front"), Internal: renderWardrobeElevationSvg(opt, "internal"), Top: renderWardrobeTopSvg(opt), Side: renderWardrobeSideSvg(opt), Loft: renderWardrobeLoftSvg(opt) }; }
+    const svg = wardrobePresentationBoard(opt, body.input || {}, body.images || { hero: body.hero, angle: body.angle, inside: body.inside });
+    if (c.req.query("inline")) { c.header("Content-Type", "image/svg+xml"); return c.body(svg); }
+    return c.json({ data: { svg } });
+  } catch (err) { console.error(err); return c.json({ error: "Presentation board failed" }, 500); }
+});
 function wardrobeOptions(input: any): any {
   const options = ["maxHanging", "balanced", "maxFolding"].map((st) => {
     const o = buildWardrobeOption(st, input);
