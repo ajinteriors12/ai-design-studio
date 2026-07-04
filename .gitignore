@@ -78,3 +78,5 @@ dbg-*
 Thumbs.db
 
 !verify-fab14-ui.mjs
+
+!verify-advisor-ui.mjs

@@ -2418,6 +2418,48 @@ function buildScorecard(layout: any, dims: any): any {
   };
 }
 
+// ── Module 4: AI LAYOUT ADVISOR (the "experienced modular designer" brain) ────
+// Turns the deterministic scorecard + geometry into a ranked list of professional,
+// plain-English findings with concrete fixes (§3 collision, §6 analysis, §8 live
+// suggestions). Works for kitchens, wardrobes and all furniture.
+function layoutAdvisor(layout: any, dims: any, type: string): any {
+  const sc = scoreLayout(layout, dims);
+  const runs = (layout && layout.runs) || [];
+  const isKitchen = /kitchen/i.test(String(type || layout.type || "")) && !layout.furniture;
+  const F: any[] = [];
+  const sev = (s: number) => s < 4 ? "critical" : s < 6 ? "warning" : "tip";
+  const add = (score: number, category: string, title: string, detail: string, fix: string, metric?: string) => F.push({ severity: sev(score), score: Math.round(score * 10) / 10, category, title, detail, recommendation: fix, metric: metric || "" });
+  // appliance global-x + work-triangle legs for specific messaging
+  let off = 0; const gx: Record<string, number> = {};
+  for (const r of runs) { for (const c of (r.base || [])) { const cx = off + (c.x || 0) + (c.w || 0) / 2; if (c.kind === "sink" && gx.sink == null) gx.sink = cx; if (c.kind === "hob" && gx.hob == null) gx.hob = cx; if ((c.kind === "tall-fridge" || c.kind === "fridge") && gx.fridge == null) gx.fridge = cx; } off += (r.length || 0); }
+  if (isKitchen) {
+    if (sc.doorFit < 6.5) add(sc.doorFit, "collision", "Door swing conflict", "A cabinet, tall unit or appliance overlaps a door opening / its swing arc.", "Shift the affected run away from the door, shorten the unit beside it, or add a filler so the door clears fully.", "doorFit " + sc.doorFit + "/10");
+    if (sc.windowFit < 6.5) add(sc.windowFit, "collision", "Cabinet over a window", "A wall cabinet or tall unit sits over or in front of a window — blocks light/ventilation.", "Remove the wall cabinet on that span or drop it to a counter-level open unit; keep tall units clear of the window.", "windowFit " + sc.windowFit + "/10");
+    if (sc.beamFit < 6.5) add(sc.beamFit, "collision", "Beam / soffit clash", "A ceiling beam clashes with tall or wall units at full height.", "Lower the units under the beam to the soffit height and split the loft to clear the beam.", "beamFit " + sc.beamFit + "/10");
+    if (sc.workTriangle < 6.5) { const legs = (gx.sink != null && gx.hob != null && gx.fridge != null) ? "sink↔hob " + Math.abs(gx.sink - gx.hob) + "mm · hob↔fridge " + Math.abs(gx.hob - gx.fridge) + "mm · sink↔fridge " + Math.abs(gx.sink - gx.fridge) + "mm" : "one vertex missing"; add(sc.workTriangle, "ergonomics", "Work triangle out of band", "The sink–hob–fridge triangle is outside the comfortable 1200–7000 mm per-leg band (" + legs + ").", "Bring the sink, hob and fridge closer / rebalance across the runs so each leg sits in 1.2–2.7 m and none is blocked.", "workTriangle " + sc.workTriangle + "/10"); }
+    if (sc.sink < 6) add(sc.sink, "function", "Sink placement", sc.sink === 0 ? "No sink detected in the layout." : "Sink + GTPT relationship is not ideal.", "Place a sink base near a corner with the GTPT wall unit directly above it; keep it close to the plumbing wall.", "sink " + sc.sink + "/10");
+    if (sc.chimney < 6) add(sc.chimney, "function", "Chimney not centred", "The chimney is missing or not centred over the hob.", "Centre the chimney wall unit over the hob (3-drawer) run; reserve appliance width + ventilation gap.", "chimney " + sc.chimney + "/10");
+    if (sc.applianceAccessibility < 6.5) add(sc.applianceAccessibility, "ergonomics", "Tight appliance access", "Appliance service / opening clearance is tight.", "Add the appliance install + ventilation clearance, or relocate the appliance so its door/drawer opens freely.", "access " + sc.applianceAccessibility + "/10");
+  } else {
+    // furniture / wardrobe advice
+    if (sc.storage < 6) add(sc.storage, "storage", "Low storage density", "The storage mix is below optimal for this unit.", "Add more drawers / pull-outs / a tall section; convert some open shelves to drawers for daily-use items.", "storage " + sc.storage + "/10");
+    if (sc.symmetry < 6) add(sc.symmetry, "aesthetics", "Uneven column widths", "Column widths are visibly uneven, hurting the elevation balance.", "Even out the column widths or use a deliberate feature column so the front reads as intentional.", "symmetry " + sc.symmetry + "/10");
+    if (sc.applianceAccessibility < 6.5) add(sc.applianceAccessibility, "ergonomics", "Reach / access", "Some sections may be hard to reach.", "Keep daily-use hanging + drawers at 400–1800 mm; push loft/rare-use storage above.", "access " + sc.applianceAccessibility + "/10");
+  }
+  // universal
+  if (sc.storage < 6 && isKitchen) add(sc.storage, "storage", "Storage below optimal", "Usable storage is lower than a well-planned unit of this size.", "Add drawers/pull-outs to base units, a tall unit for groceries, and loft cabinets above wall units.", "storage " + sc.storage + "/10");
+  if (sc.symmetry < 6 && isKitchen) add(sc.symmetry, "aesthetics", "Elevation asymmetry", "The elevation is visibly unbalanced.", "Balance unit widths around the hob/chimney feature and align wall-cabinet bottoms.", "symmetry " + sc.symmetry + "/10");
+  if (sc.manufacturing < 6) add(sc.manufacturing, "manufacturing", "Manufacturing check failing", "One or more panel/clearance checks are failing.", "Open the manufacturing checks and resolve the flagged panel sizes / clearances before production.", "mfg " + sc.manufacturing + "/10");
+  if (sc.installation < 6) add(sc.installation, "manufacturing", "Installation risk", "Installation feasibility is marginal.", "Verify wall scribe allowances, filler widths and service gaps for a clean site fit.", "install " + sc.installation + "/10");
+  const order: Record<string, number> = { critical: 0, warning: 1, tip: 2 };
+  F.sort((a, b) => (order[a.severity] - order[b.severity]) || (a.score - b.score));
+  const total = consensusTotal(sc);
+  const grade = total >= 85 ? "A" : total >= 72 ? "B" : total >= 60 ? "C" : "D";
+  const counts = { critical: F.filter((f) => f.severity === "critical").length, warning: F.filter((f) => f.severity === "warning").length, tip: F.filter((f) => f.severity === "tip").length };
+  const summary = F.length === 0 ? "No issues found — this layout follows professional Indian modular standards." : counts.critical > 0 ? counts.critical + " critical issue(s) to fix before production." : counts.warning > 0 ? counts.warning + " improvement(s) recommended." : "Minor polish suggestions only.";
+  return { total, grade, summary, counts, findings: F.slice(0, 24), scores: sc };
+}
+
 // ── 15.pdf Stage 3: optional EXTERNAL multi-AI review (ChatGPT + DeepSeek) ──
 // Keys come from env (OPENAI_API_KEY / DEEPSEEK_API_KEY) or a local ai-keys.json (never the source).
 // Each provider gets the Master Design Brief and returns STRUCTURED parameters; OUR parametric engine
@@ -5050,6 +5092,18 @@ app.post("/api/render/photoreal-auto", async (c) => {
     if (!img) return c.json({ error: "render-failed", message: "Stability AI returned no image (check the key / quota)." }, 502);
     return c.json({ data: { image: img } });
   } catch (err) { console.error(err); return c.json({ error: "render-failed", message: String((err as any) && (err as any).message || err).slice(0, 160) }, 500); }
+});
+
+// Module 4: AI Layout Advisor — professional review of a generated design.
+app.post("/api/advisor", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as any));
+    const layout = body.layout || body.result;
+    if (!layout || (!Array.isArray(layout.runs) && !layout.furniture && !layout.units)) return c.json({ error: "no layout supplied" }, 400);
+    const dims = body.dims || body.input || {};
+    const type = String(body.type || layout.type || dims.designType || "");
+    return c.json({ data: layoutAdvisor(layout, dims, type) });
+  } catch (err) { console.error(err); return c.json({ error: "advisor failed" }, 500); }
 });
 
 // POST /api/designs/edit-validate — validate a manually-edited elevation against
@@ -8699,6 +8753,17 @@ const frontendHTML = `<!DOCTYPE html>
       const [result, setResult] = useState(null);
       const [liveRuns, setLiveRuns] = useState(null);   // §7.9 shared room model (edits lifted from elevations)
       const [teachMsg, setTeachMsg] = useState("");     // §14 correction-learning feedback
+      const [advisor, setAdvisor] = useState(null);     // Module 4: AI Layout Advisor findings
+      const [advBusy, setAdvBusy] = useState(false);
+      const runAdvisor = async (res) => {
+        setAdvBusy(true);
+        try {
+          const dims = { type, wall: Number(wall), wallB: Number(wallB), wallC: Number(wallC) };
+          const j = await fetch("/api/advisor", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ layout: res, dims, type }) }).then((r) => r.json());
+          if (j.data) setAdvisor(j.data); else alert((j && j.error) || "Advisor failed");
+        } catch (e) { alert("Advisor failed"); }
+        setAdvBusy(false);
+      };
       const learnCorrection = async () => {
         if (!result || !result.id) return;
         setTeachMsg("Teaching AI…");
@@ -8973,7 +9038,7 @@ const frontendHTML = `<!DOCTYPE html>
         const bad = validateRoom();   // 6.14: block generation on an incomplete/invalid room (keep the planner visible)
         if (bad) { setRoomWarn("Room definition incomplete — " + bad + "."); return; }
         setRoomWarn(null);
-        setLoading(true); setResult(null); setReasoning(""); setConsensus(null);
+        setLoading(true); setResult(null); setReasoning(""); setConsensus(null); setAdvisor(null);
         try {
           const body = { designType: type, wall: Number(wall) };
           if (needsB) body.wallB = Number(wallB);
@@ -9810,6 +9875,36 @@ const frontendHTML = `<!DOCTYPE html>
                     </div>
                   </div>
                 )}
+                {/* Module 4: AI Layout Advisor — professional designer suggestions + fixes */}
+                <div className="mt-3 bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200 rounded-lg p-3">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    <h3 className="text-sm font-semibold text-violet-800">🧠 AI Layout Advisor</h3>
+                    <button onClick={() => runAdvisor(result)} disabled={advBusy} className="px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium disabled:opacity-50">{advBusy ? "Analysing…" : advisor ? "↻ Re-analyse" : "Analyse design"}</button>
+                    {advisor && <span className={"text-xs font-bold px-2 py-0.5 rounded " + (advisor.grade === "A" ? "bg-emerald-100 text-emerald-700" : advisor.grade === "B" ? "bg-sky-100 text-sky-700" : advisor.grade === "C" ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700")}>Grade {advisor.grade} · {advisor.total}/100</span>}
+                    {advisor && <span className="text-xs text-slate-500">{advisor.counts.critical} critical · {advisor.counts.warning} warning · {advisor.counts.tip} tip</span>}
+                  </div>
+                  {!advisor && !advBusy && <div className="text-[11px] text-slate-500">Runs a professional review — work triangle, door/window/beam collisions, appliance clearance, storage, symmetry and manufacturing — with concrete fixes.</div>}
+                  {advisor && <div className="text-[11px] text-slate-600 mb-2">{advisor.summary}</div>}
+                  {advisor && advisor.findings.length > 0 && (
+                    <div className="space-y-1.5">
+                      {advisor.findings.map((f, i) => {
+                        const col = f.severity === "critical" ? "border-rose-300 bg-rose-50" : f.severity === "warning" ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-white";
+                        const ico = f.severity === "critical" ? "⛔" : f.severity === "warning" ? "⚠️" : "💡";
+                        return (
+                          <div key={i} className={"rounded border px-2.5 py-1.5 " + col}>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-semibold text-slate-800">{ico} {f.title}</span>
+                              <span className="text-[10px] text-slate-400 uppercase tracking-wide">{f.category}{f.metric ? " · " + f.metric : ""}</span>
+                            </div>
+                            <div className="text-[11px] text-slate-600 mt-0.5">{f.detail}</div>
+                            <div className="text-[11px] text-violet-700 mt-0.5"><span className="font-semibold">Fix:</span> {f.recommendation}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {advisor && advisor.findings.length === 0 && <div className="text-[11px] text-emerald-700 font-medium">✓ No issues found — this layout follows professional Indian modular standards.</div>}
+                </div>
                 {result.id && (
                   <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 flex flex-wrap items-center gap-2">
                     <button onClick={learnCorrection} className="text-xs px-3 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 transition-colors">✓ Approve &amp; teach AI from this design</button>
