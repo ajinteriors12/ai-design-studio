@@ -11603,7 +11603,7 @@ const frontendHTML = `<!DOCTYPE html>
 
     // ── Wardrobe AI Designer — lifestyle-driven 3-option wardrobe generator (§2-§12) ──
     function WardrobeAI() {
-      const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300, beamOn: false, beamProj: 200, beamSoffit: 2100, beamPos: 600, beamWidth: 900 });
+      const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300, beamOn: false, beamProj: 200, beamSoffit: 2100, beamPos: 600, beamWidth: 900, shape: "straight", wingB: 1800, wingC: 1800, corner: "lemans" });
       const [data, setData] = useState(null);
       const [meta, setMeta] = useState(null);
       const [busy, setBusy] = useState(false);
@@ -11789,7 +11789,21 @@ const frontendHTML = `<!DOCTYPE html>
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
             {countSel("maleUsers", "👨 Male", 3)}{countSel("femaleUsers", "👩 Female", 3)}{countSel("children", "🧒 Children", 3)}{countSel("professionals", "👔 Professionals", 2)}
             {levelSel("traditional", "🥻 Traditional")}{levelSel("western", "👗 Western")}{levelSel("winter", "🧣 Winter")}{levelSel("luxury", "💎 Luxury")}
-            {numIn("width", "📐 Width (mm)", 1200, 4800, 100)}{numIn("height", "📐 Height (mm)", 1800, 3000, 100)}{numIn("depth", "📐 Depth (mm)", 450, 900, 50)}
+            {numIn(input.shape === "u" ? "width" : "width", input.shape === "straight" ? "📐 Width (mm)" : input.shape === "u" ? "📐 Back wall (mm)" : "📐 Wall A (mm)", 1200, 4800, 100)}{numIn("height", "📐 Height (mm)", 1800, 3000, 100)}{numIn("depth", "📐 Depth (mm)", 450, 900, 50)}
+          </div>
+          {/* §20 L/U-shape + corner solution */}
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 bg-teal-50/60 border border-teal-100 rounded-lg p-2">
+            <label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">🔲 Shape</span>
+              <select value={input.shape} onChange={(e) => set("shape", e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs bg-white">
+                {((meta && meta.shapes) || [{ key: "straight", label: "Straight" }, { key: "l", label: "L-Shape" }, { key: "u", label: "U-Shape" }]).map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+              </select></label>
+            {input.shape !== "straight" && numIn("wingB", input.shape === "u" ? "📐 Left wing (mm)" : "📐 Wall B (mm)", 600, 4800, 100)}
+            {input.shape === "u" && numIn("wingC", "📐 Right wing (mm)", 600, 4800, 100)}
+            {input.shape !== "straight" && <label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">◱ Corner solution</span>
+              <select value={input.corner} onChange={(e) => set("corner", e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-xs bg-white">
+                {((meta && meta.corners) || [{ key: "lemans", label: "LeMans II" }, { key: "carousel", label: "Carousel" }, { key: "diagonal", label: "Diagonal" }, { key: "blind", label: "Blind corner" }]).map((cc) => <option key={cc.key} value={cc.key}>{cc.label}</option>)}
+              </select></label>}
+            {input.shape !== "straight" && sel && sel.cornerNote && <div className="col-span-2 sm:col-span-4 text-[10px] text-teal-700">◱ {sel.cornerNote}</div>}
           </div>
           <div className="mt-3">
             <div className="text-[11px] text-slate-500 mb-1">Templates</div>
@@ -13319,6 +13333,7 @@ const WARD_COLORS: Record<string, string> = {
   salwar: "#f9a8d4", jewellery: "#fcd34d", cosmetics: "#fca5a5", handbag: "#a78bfa",
   dupatta: "#f472b6", seasonal: "#78716c", winter: "#78716c",
   kidsHang: "#60a5fa", kidsShelf: "#34d399", mirror: "#94a3b8", filler: "#e2e8f0",
+  cornerLemans: "#14b8a6", cornerCarousel: "#0d9488", cornerHang: "#0ea5e9", cornerShelf: "#5eead4",
 };
 const WARD_LEGEND: [string, string][] = [
   ["longHang", "Long Hanging — shirts/coat/blazer"], ["shortHang", "Short Hanging — shirts/tees"],
@@ -13327,7 +13342,15 @@ const WARD_LEGEND: [string, string][] = [
   ["saree", "Saree Hanging"], ["sareeShelf", "Saree (folded)"], ["dress", "Dress Hanging"], ["lehenga", "Lehenga"],
   ["jewellery", "Jewellery Drawer"], ["cosmetics", "Cosmetics Drawer"], ["handbag", "Handbag Shelf"],
   ["dupatta", "Dupatta"], ["loft", "Loft Area"], ["mirror", "Mirror"],
+  ["cornerLemans", "LeMans corner pull-out"], ["cornerCarousel", "Carousel (360°)"], ["cornerHang", "Diagonal corner hanging"], ["cornerShelf", "Blind-corner shelf"],
 ];
+// L/U-shape corner solutions (Module 2 §20) — each has a real hardware + panel signature.
+const WARD_CORNERS: Record<string, { label: string; hardware: string; rate: number; note: string }> = {
+  lemans: { label: "LeMans II pull-out", hardware: "LeMans II corner set (2 trays)", rate: 8500, note: "Two kidney trays swing out fully — best access, no dead corner." },
+  carousel: { label: "Carousel (360°)", hardware: "Full-round carousel unit", rate: 6500, note: "360° rotating shelves — good for a square blind corner." },
+  diagonal: { label: "Diagonal corner unit", hardware: "Corner hinge + diagonal shutter", rate: 2200, note: "Angled 45° face with a diagonal hanging rail + shelf; simplest joinery." },
+  blind: { label: "Blind corner (deep shelves)", hardware: "Blind-corner pull-out (optional)", rate: 1400, note: "Deep fixed shelves reached from one side — cheapest, partial access." },
+};
 const WARD_TEMPLATES: Record<string, any> = {
   couple: { maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, width: 2400, height: 2400, depth: 600, label: "Husband & Wife" },
   bachelor: { maleUsers: 1, femaleUsers: 0, children: 0, professionals: 1, width: 1800, height: 2100, depth: 600, label: "Bachelor" },
@@ -13367,6 +13390,55 @@ function wardColumn(recipe: string, usableH: number): WCell[] {
   if (Math.abs(sum - usableH) > 1) { const f = usableH / sum; cells.forEach(c => c.hMM = Math.round(c.hMM * f)); }
   return cells;
 }
+// Corner-unit column (L/U-shape §20) — cells for the chosen corner solution.
+function wardCornerColumn(solution: string, usableH: number): WCell[] {
+  const S = WARDROBE_STD, cells: WCell[] = [];
+  const push = (kind: string, label: string, hMM: number) => cells.push({ kind, label, hMM: Math.round(Math.max(60, hMM)) });
+  switch (solution) {
+    case "carousel": push("cornerCarousel", "Carousel 360°", usableH); break;
+    case "diagonal": push("drawer", "Corner drawer", S.drawerH); push("cornerShelf", "Corner shelf", S.shelfGap); push("cornerHang", "Diagonal hanging", usableH - S.drawerH - S.shelfGap); break;
+    case "blind": { const n = Math.max(3, Math.round(usableH / S.shelfGap)); for (let i = 0; i < n; i++) push("cornerShelf", "Blind-corner shelf", usableH / n); break; }
+    default: push("drawer", "Corner drawer", S.drawerH); push("cornerLemans", "LeMans pull-out", (usableH - S.drawerH) / 2); push("cornerLemans", "LeMans pull-out", (usableH - S.drawerH) / 2);   // lemans
+  }
+  const sum = cells.reduce((a, c) => a + c.hMM, 0) || 1;
+  if (Math.abs(sum - usableH) > 1) { const f = usableH / sum; cells.forEach(c => c.hMM = Math.round(c.hMM * f)); }
+  return cells;
+}
+// Fold an unfolded (straight-tiled) section list into an L/U shape: split columns into wings
+// at wing-width boundaries and insert a corner unit between wings. Reflows x; returns metadata.
+function foldWardrobeIntoShape(baseSections: any[], shape: string, wingWidths: number[], cornerSol: string, depth: number, ctx: { usableH: number; height: number; loftH: number }): any {
+  const flat: any[] = [];
+  for (const s of baseSections) for (const c of (s.columns || [])) flat.push({ ...c, secKind: s.kind, secLabel: s.label });
+  const cornerW = depth;
+  const wingLabels = shape === "u" ? ["Left Wing", "Back Wing", "Right Wing"] : ["Wing A", "Wing B"];
+  const newSections: any[] = [], wings: any[] = [], corners: any[] = [];
+  let ci = 0, xOff = 0;
+  for (let wi = 0; wi < wingWidths.length; wi++) {
+    const budget = wingWidths[wi], last = wi === wingWidths.length - 1;
+    const wingCols: any[] = []; let acc = 0;
+    while (ci < flat.length && (last || acc + flat[ci].w / 2 <= budget)) { wingCols.push(flat[ci]); acc += flat[ci].w; ci++; }
+    if (!wingCols.length && ci < flat.length) { wingCols.push(flat[ci]); ci++; }   // guarantee ≥1 col/wing
+    const wingStart = xOff;
+    let gi = 0;
+    while (gi < wingCols.length) {
+      const kind = wingCols[gi].secKind, label = wingCols[gi].secLabel, grp: any[] = [];
+      while (gi < wingCols.length && wingCols[gi].secKind === kind) { grp.push(wingCols[gi]); gi++; }
+      let gx = xOff; const cols = grp.map((c) => { const col: any = { ...c, x: Math.round(gx), w: Math.round(c.w) }; delete col.secKind; delete col.secLabel; gx += c.w; return col; });
+      const gw = cols.reduce((a: number, c: any) => a + c.w, 0);
+      newSections.push({ kind, label, x: Math.round(xOff), width: Math.round(gw), columns: cols, wing: wi });
+      xOff += gw;
+    }
+    wings.push({ index: wi, label: wingLabels[wi], x0: Math.round(wingStart), x1: Math.round(xOff), lengthMM: Math.round(xOff - wingStart) });
+    if (!last) {
+      const cornerCells = wardCornerColumn(cornerSol, ctx.usableH).map((c) => ({ ...c, color: WARD_COLORS[c.kind] || "#cbd5e1" }));
+      const cornerCol = { x: Math.round(xOff), w: cornerW, recipe: "corner-" + cornerSol, top: ctx.height, loftH: ctx.loftH, underBeam: false, corner: true, cells: cornerCells };
+      newSections.push({ kind: "corner", label: "Corner (" + (WARD_CORNERS[cornerSol] || WARD_CORNERS.lemans).label + ")", x: Math.round(xOff), width: cornerW, columns: [cornerCol], corner: true, wing: -1 });
+      corners.push({ index: corners.length, solution: cornerSol, x: Math.round(xOff), widthMM: cornerW, depthMM: depth, between: [wi, wi + 1] });
+      xOff += cornerW;
+    }
+  }
+  return { sections: newSections, wings, corners, totalWidth: xOff };
+}
 // ordered column recipes for a section given strategy + lifestyle
 function wardSectionRecipes(sec: string, n: number, strategy: string, L: any): string[] {
   const out: string[] = [], prof = +L.professionals > 0;
@@ -13395,7 +13467,16 @@ function wardSectionRecipes(sec: string, n: number, strategy: string, L: any): s
 }
 function buildWardrobeOption(strategy: string, input: any): any {
   const S = WARDROBE_STD;
-  const width = wardClamp(Math.round(+input.width || 2400), 1200, 4800);
+  const mainWidth = wardClamp(Math.round(+input.width || 2400), 1200, 4800);
+  // §20 L/U-shape: the lifestyle sections tile across the UNFOLDED total (all wings); the option
+  // is then folded into wings with corner units between them. Straight = unchanged.
+  const shape = /^(l|u)$/i.test(String(input.shape || "")) ? String(input.shape).toLowerCase() : "straight";
+  const cornerSol = WARD_CORNERS[String(input.corner || "").toLowerCase()] ? String(input.corner).toLowerCase() : "lemans";
+  const wingB = wardClamp(Math.round(+input.wingB || 1800), 600, 4800);
+  const wingC = wardClamp(Math.round(+input.wingC || 1800), 600, 4800);
+  const wingWidths = shape === "u" ? [wingB, mainWidth, wingC] : shape === "l" ? [mainWidth, wingB] : [mainWidth];
+  const tileWidth = wardClamp(wingWidths.reduce((a, b) => a + b, 0), 1200, 12000);
+  let width = tileWidth;   // final unfolded width (folding adds corner widths below)
   const height = wardClamp(Math.round(+input.height || 2400), 1800, 3000);
   const depth = wardClamp(Math.round(+input.depth || 600), 450, 900);
   const male = wardClamp(+input.maleUsers || 0, 0, 3), female = wardClamp(+input.femaleUsers || 0, 0, 3), kids = wardClamp(+input.children || 0, 0, 3);
@@ -13432,6 +13513,14 @@ function buildWardrobeOption(strategy: string, input: any): any {
     sections.push({ kind: sec.kind, label: sec.label, x: Math.round(x), width: secW, columns });
     x += secW;
   }
+  // §20 fold the unfolded lifestyle sections into L/U wings + corner units.
+  let shapeMeta: any = null;
+  if (shape !== "straight") {
+    const folded = foldWardrobeIntoShape(sections, shape, wingWidths, cornerSol, depth, { usableH, height, loftH });
+    sections.length = 0; for (const s of folded.sections) sections.push(s);
+    width = folded.totalWidth;
+    shapeMeta = { shape, wings: folded.wings, corners: folded.corners, wallWidths: wingWidths, cornerSolution: cornerSol };
+  }
   const beamCols = sections.reduce((a: number, s: any) => a + s.columns.filter((c: any) => c.underBeam).length, 0);
   const beamNote = beam.on ? "Beam " + beam.proj + " mm proj · soffit " + beam.soffit + " mm · " + beam.pos + "–" + (beam.pos + beam.width) + " mm: " + beamCols + " column(s) lowered to the soffit · loft split to clear the beam · beam-boxed with a filler above." : null;
   const allCells = sections.flatMap((s: any) => s.columns.flatMap((c: any) => c.cells));
@@ -13445,7 +13534,9 @@ function buildWardrobeOption(strategy: string, input: any): any {
   };
   const label = strategy === "maxHanging" ? "Max Hanging" : strategy === "maxFolding" ? "Max Folding" : "Balanced";
   const finishes = (input.finishes && typeof input.finishes === "object") ? input.finishes : {};
-  return { id: strategy, label, strategy, width, height, depth, plinth: S.plinth, hasLoft, loftH, loftDepth: S.loftDepth, usableH, sections, stats, beam, beamNote, finishes };
+  const corners = shapeMeta ? shapeMeta.corners.length : 0;
+  const cornerNote = shapeMeta ? (shapeMeta.shape === "u" ? "U-shape" : "L-shape") + " · " + corners + " corner unit(s) — " + (WARD_CORNERS[cornerSol] || WARD_CORNERS.lemans).label + " (" + (WARD_CORNERS[cornerSol] || WARD_CORNERS.lemans).note + ")" : null;
+  return { id: strategy, label, strategy, shape: shapeMeta ? shape : "straight", width, mainWidth, height, depth, plinth: S.plinth, hasLoft, loftH, loftDepth: S.loftDepth, usableH, sections, stats, beam, beamNote, finishes, wings: shapeMeta ? shapeMeta.wings : null, corners: shapeMeta ? shapeMeta.corners : null, wallWidths: shapeMeta ? shapeMeta.wallWidths : null, cornerSolution: shapeMeta ? cornerSol : null, cornerNote };
 }
 // §14 resolve a section/scope's applied catalog finish (falls back to the whole-project "all").
 function wardFinishFor(finishes: any, scope: string): any { return (finishes && (finishes[scope] || finishes.all)) || null; }
@@ -13484,6 +13575,7 @@ function wardReports(opt: any): any {
     { item: "Safe locker with key", qty: opt.stats.accessories > 0 ? 1 : 0 },
     { item: "LED sensor strip (m)", qty: 2 },
     { item: "Mirror (full-height)", qty: 1 },
+    { item: (WARD_CORNERS[opt.cornerSolution] || WARD_CORNERS.lemans).hardware, qty: (opt.corners || []).length },
   ].filter(h => h.qty > 0);
   const material = { carcass: S.carcass, back: S.back, shutter: "18mm ply / MDF / laminate", edgeBand: S.edgeBand, drawer: S.drawerBox, hinge: S.hinge, handle: S.handle };
   const cost = Math.round((boardSqft * 190 + backSqft * 70 + drawerFronts * 850 + shutters * 3 * 55 + hangRods * 160) / 500) * 500;
@@ -13564,6 +13656,9 @@ function wardBOQ(opt: any): any {
   if (opt.stats.accessories > 0) hw += line("Safe locker + key", 1, "no", R.lock);
   hw += line("LED sensor strip", 2, "m", R.led);
   hw += line("Mirror (full-height)", 1, "no", R.mirror);
+  // §20 corner-solution hardware (LeMans / carousel / diagonal / blind)
+  const nCorners = (opt.corners || []).length;
+  if (nCorners > 0) { const cs = WARD_CORNERS[opt.cornerSolution] || WARD_CORNERS.lemans; hw += line(cs.hardware, nCorners, "set", cs.rate); }
   const subtotal = mat + hw, labour = Math.round(subtotal * R.labourPct), taxable = subtotal + labour, gst = Math.round(taxable * R.gstPct);
   return { lines, sheets18: nest.sheets, utilPct: nest.utilPct, backSheets, edgeBandM: Math.round(ebM * 10) / 10, material: mat, hardware: hw, subtotal, labour, taxable, gst, grandTotal: taxable + gst };
 }
@@ -13667,7 +13762,46 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
 }
 const renderWardrobeOptionSvg = (opt: any): string => renderWardrobeElevationSvg(opt, "front");
 // Top View (plan) — width × depth, section splits, per-column shutter door-swing arcs, dims.
+// §20 folded L/U-shape plan (top view) — wings on perpendicular walls + corner units, dimensioned.
+function renderWardrobePlanShaped(opt: any): string {
+  const d = opt.depth, wings = opt.wings || [], sol = WARD_CORNERS[opt.cornerSolution] || WARD_CORNERS.lemans;
+  const L = (i: number) => (wings[i] && wings[i].lengthMM) || 1000;
+  // build footprint rects [{x,y,w,h,kind,label,len}] in mm, kind = wing | corner
+  const rects: any[] = [];
+  if (opt.shape === "u") {
+    const Ll = L(0), Lb = L(1), Lr = L(2);
+    rects.push({ x: 0, y: 0, w: d, h: d, kind: "corner", label: "Corner" });
+    rects.push({ x: d, y: 0, w: Lb, h: d, kind: "wing", label: "Back Wing", len: Lb });
+    rects.push({ x: d + Lb, y: 0, w: d, h: d, kind: "corner", label: "Corner" });
+    rects.push({ x: 0, y: d, w: d, h: Ll, kind: "wing", label: "Left Wing", len: Ll, vert: true });
+    rects.push({ x: d + Lb, y: d, w: d, h: Lr, kind: "wing", label: "Right Wing", len: Lr, vert: true });
+  } else {
+    const La = L(0), Lb = L(1);
+    rects.push({ x: 0, y: 0, w: La, h: d, kind: "wing", label: "Wing A", len: La });
+    rects.push({ x: La, y: 0, w: d, h: d, kind: "corner", label: "Corner" });
+    rects.push({ x: La, y: d, w: d, h: Lb, kind: "wing", label: "Wing B", len: Lb, vert: true });
+  }
+  const bw = Math.max(...rects.map((r) => r.x + r.w)), bh = Math.max(...rects.map((r) => r.y + r.h));
+  const padL = 40, padR = 30, padT = 46, padB = 40;
+  const scale = Math.max(0.03, Math.min((520 - padL - padR) / bw, (380 - padT - padB) / bh));
+  const W = Math.round(bw * scale + padL + padR), Hh = Math.round(bh * scale + padT + padB);
+  const x0 = padL, y0 = padT, xf = (mm: number) => x0 + mm * scale, yf = (mm: number) => y0 + mm * scale;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif"><rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
+  p.push(`<text x="${x0}" y="20" fill="#0f172a" font-size="12" font-weight="700">${opt.shape === "u" ? "U-Shape" : "L-Shape"} Wardrobe — Plan</text><text x="${W - padR}" y="20" fill="#64748b" font-size="9" text-anchor="end">depth ${d} mm · corner: ${wardEsc(sol.label)}</text>`);
+  for (const r of rects) {
+    const fill = r.kind === "corner" ? "#ccfbf1" : "#eef2ff", stroke = r.kind === "corner" ? "#0d9488" : "#475569";
+    p.push(`<rect x="${xf(r.x).toFixed(1)}" y="${yf(r.y).toFixed(1)}" width="${(r.w * scale).toFixed(1)}" height="${(r.h * scale).toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="1.4"/>`);
+    const cx = xf(r.x + r.w / 2), cy = yf(r.y + r.h / 2);
+    if (r.kind === "corner") p.push(`<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" fill="#0f766e" font-size="7" text-anchor="middle">◱ ${wardEsc(opt.cornerSolution || "lemans")}</text>`);
+    else { const tr = r.vert ? ` transform="rotate(-90 ${cx.toFixed(1)} ${cy.toFixed(1)})"` : ""; p.push(`<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" fill="#3730a3" font-size="8" font-weight="700" text-anchor="middle"${tr}>${wardEsc(r.label)} · ${r.len} mm</text>`); }
+  }
+  p.push(`<text x="${x0}" y="${Hh - 8}" fill="#64748b" font-size="8">Green ◱ = corner solution (${wardEsc(sol.label)}) — ${wardEsc(sol.note)}</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
 function renderWardrobeTopSvg(opt: any): string {
+  if (opt.shape === "l" || opt.shape === "u") return renderWardrobePlanShaped(opt);
   const padL = 56, padR = 26, padT = 44, padB = 20;
   const scale = Math.max(0.05, Math.min((560 - padL - padR) / opt.width, 150 / opt.depth));
   const wpx = opt.width * scale, dpx = opt.depth * scale, x0 = padL, y0 = padT;
@@ -13925,6 +14059,8 @@ app.get("/api/wardrobe/meta", (c) => c.json({
     templates: Object.entries(WARD_TEMPLATES).map(([k, v]) => ({ key: k, ...v })),
     legend: WARD_LEGEND.map(([k, l]) => ({ kind: k, color: WARD_COLORS[k], label: l })),
     finishes: WARDROBE_STD.finishes, std: WARDROBE_STD,
+    shapes: [{ key: "straight", label: "Straight" }, { key: "l", label: "L-Shape" }, { key: "u", label: "U-Shape" }],
+    corners: Object.entries(WARD_CORNERS).map(([k, v]) => ({ key: k, label: v.label, note: v.note, hardware: v.hardware })),
   },
 }));
 app.post("/api/wardrobe/options", async (c) => {
@@ -13939,7 +14075,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
     const o = (body && body.option) || body;
     if (!o || !Array.isArray(o.sections)) return c.json({ error: "bad option" }, 400);
     o.id = String(o.id || "custom"); o.label = String(o.label || "Custom");
-    o.width = wardClamp(Math.round(+o.width || 2400), 1200, 4800);
+    o.width = wardClamp(Math.round(+o.width || 2400), 1200, (o.shape === "l" || o.shape === "u") ? 14000 : 4800);
     o.height = wardClamp(Math.round(+o.height || 2400), 1800, 3000);
     o.depth = wardClamp(Math.round(+o.depth || 600), 450, 900);
     o.plinth = WARDROBE_STD.plinth; o.loftDepth = WARDROBE_STD.loftDepth;
