@@ -2484,6 +2484,208 @@ function layoutAdvisor(layout: any, dims: any, type: string): any {
   return { total, grade, summary, counts, findings: F.slice(0, 24), scores: sc };
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// Module 6 — MATHEMATICAL DESIGN ENGINE
+// Engineering mathematics instead of fixed templates: beam-theory structural
+// checks (shelf deflection / safe span / load), centre of gravity, hardware
+// load, optimisation metrics and a full constraint solver. Furniture-agnostic
+// (kitchens, wardrobes, TV/crockery/vanity/office). Consumed by /api/math-engine.
+const MAT_MODULUS: Record<string, number> = {   // elastic modulus E in N/mm² (MPa) — Indian boards
+  hdhmr: 4500, block: 6200, mdf: 3700, particle: 2800, ply: 7500, generic: 6000,
+};
+function matPhysics(matStr: string): { E: number; name: string; densityKgM2: number } {
+  const s = String(matStr || "").toLowerCase();
+  // densityKgM2 = areal density of an 18 mm sheet (kg/m²)
+  if (/hdhmr|hdf/.test(s)) return { E: MAT_MODULUS.hdhmr, name: "HDHMR", densityKgM2: 15 };
+  if (/block/.test(s)) return { E: MAT_MODULUS.block, name: "Block board", densityKgM2: 10.5 };
+  if (/mdf/.test(s)) return { E: MAT_MODULUS.mdf, name: "MDF", densityKgM2: 13.5 };
+  if (/particle|prelam|mfc/.test(s)) return { E: MAT_MODULUS.particle, name: "Particle board", densityKgM2: 11.5 };
+  if (/ply|bwp|bwr|marine|hardwood/.test(s)) return { E: MAT_MODULUS.ply, name: "Plywood (BWP)", densityKgM2: 12 };
+  return { E: MAT_MODULUS.generic, name: "18 mm board", densityKgM2: 12 };
+}
+const GACC = 9.80665;
+// Simply-supported shelf under a uniformly-distributed load. δ = 5·w·L⁴ / (384·E·I).
+// Returns deflection (mm), stiffness ratio L/δ, safe span at the L/200 limit + a verdict.
+function shelfBeam(spanMm: number, depthMm: number, thkMm: number, loadKgPerM: number, E: number) {
+  const L = Math.max(1, spanMm), b = Math.max(1, depthMm), h = Math.max(1, thkMm);
+  const I = (b * h * h * h) / 12;                          // second moment of area, mm⁴
+  const w = (loadKgPerM * GACC) / 1000;                   // line load N/mm (kg/m → N/mm)
+  const defl = (5 * w * L * L * L * L) / (384 * E * I);    // mid-span deflection, mm
+  const ratio = defl > 0.0001 ? Math.round(L / defl) : 9999;   // L/δ (≥200 good, ≥360 excellent, <200 sags)
+  const totalKg = Math.round((loadKgPerM * L) / 100) / 10;
+  const safeSpan = Math.round(Math.pow((384 * E * I) / (5 * Math.max(1e-6, w) * 200), 1 / 3));   // span at exactly L/200
+  return { defl: Math.round(defl * 100) / 100, ratio, totalKg, safeSpan, ok: ratio >= 200, marginal: ratio >= 150 && ratio < 200 };
+}
+// Design load per running metre by shelf role + unit type (Indian practice, kg/m).
+function shelfLoadKgPerM(kind: string, type: string): number {
+  const k = String(kind || "").toLowerCase(), t = String(type || "").toLowerCase();
+  if (/shoe/.test(k)) return 22;
+  if (/handbag|kids|tie|belt|jewel|cosmetic/.test(k)) return 12;
+  if (/book|study|library/.test(t) || /book/.test(k)) return 55;
+  if (/crockery|pantry/.test(t)) return 50;
+  if (/kitchen/.test(t)) return 40;
+  if (/tv|lcd|office/.test(t)) return 25;
+  return 18;   // wardrobe folded clothes / general
+}
+// Resolve the wardrobe option out of any input shape (Wardrobe-AI tab or a saved design).
+function mathWardrobeOpt(input: any): any {
+  if (input.wardrobe && Array.isArray(input.wardrobe.sections)) return input.wardrobe;
+  const w = input.layout && input.layout.wardrobe;
+  if (w && w.data && Array.isArray(w.data.options)) return w.data.options[w.selIdx || 0];
+  return null;
+}
+// Pull every load-bearing horizontal member (span/depth/thk/load) out of any layout.
+function mathEngineShelves(input: any): any[] {
+  const out: any[] = [];
+  const type = String(input.type || (input.layout && input.layout.type) || "");
+  const opt = mathWardrobeOpt(input);
+  if (opt && Array.isArray(opt.sections)) {
+    const depth = Math.max(250, (opt.depth || 600) - 40);
+    const loftDepth = Math.max(250, (opt.loftDepth || 550) - 30);
+    for (const sec of opt.sections) for (const col of (sec.columns || [])) {
+      const span = Math.max(200, (col.w || 500) - 36);
+      for (const cell of (col.cells || [])) {
+        if (/shelf|shoe|handbag|loft/i.test(cell.kind)) out.push({ span, depth, thk: 18, load: shelfLoadKgPerM(cell.kind, "wardrobe"), label: (sec.label || "") + " · " + (cell.label || cell.kind), mat: "18mm BWP ply" });
+      }
+      // loft shelf — full column-width top shelf carrying seasonal / luggage (heavier)
+      if ((col.loftH || 0) > 0 || (opt.hasLoft && col.underBeam === false)) out.push({ span, depth: loftDepth, thk: 18, load: 30, label: (sec.label || "") + " · Loft shelf", mat: "18mm BWP ply" });
+    }
+    return out;
+  }
+  const runs = (input.layout && input.layout.runs) || input.runs || [];
+  if (Array.isArray(runs) && runs.length) {
+    const SKIP = new Set(["filler", "sidepanel", "sink", "hob", "dishwasher", "fridge", "tall-fridge", "oven", "corner", "chimney"]);
+    for (const r of runs) {
+      for (const c of (r.base || [])) { if (SKIP.has(c.kind)) continue; out.push({ span: Math.max(200, (c.w || 500) - 36), depth: 532, thk: 18, load: shelfLoadKgPerM(c.kind, type || "kitchen"), label: "Base · " + (c.label || c.kind || "cabinet"), mat: "18mm BWP ply" }); }
+      for (const c of (r.wallCabs || [])) { if (SKIP.has(c.kind)) continue; out.push({ span: Math.max(200, (c.w || 500) - 36), depth: 282, thk: 18, load: shelfLoadKgPerM(c.kind, type || "kitchen"), label: "Wall · " + (c.label || c.kind || "cabinet"), mat: "18mm BWP ply" }); }
+    }
+    return out;
+  }
+  // generic furniture — estimate one representative shelf from the dims
+  const w = +((input.dims && (input.dims.wall || input.dims.width)) || (input.layout && input.layout.dims && input.layout.dims.wall) || 900);
+  out.push({ span: Math.max(200, Math.min(w, 900) - 36), depth: 300, thk: 18, load: shelfLoadKgPerM("shelf", type), label: "Representative shelf", mat: "18mm board" });
+  return out;
+}
+// §2 optimisation metrics: storage efficiency / dead space / movement / mfg / install.
+function mathOptimization(input: any, shelves: any[], opt: any, type: string): any {
+  if (input.layout && Array.isArray(input.layout.runs) && input.layout.runs.length) {
+    let sc: any = {}; try { sc = buildScorecard(input.layout, { ...(input.dims || input.layout.dims || {}), type }); } catch { sc = {}; }
+    return {
+      storageEfficiencyPct: sc.storageEfficiencyPct ?? 70,
+      deadSpacePct: sc.deadSpacePct ?? 8,
+      movementEfficiencyPct: Math.round((sc.workTriangleScore ?? 7) * 10),
+      manufacturingScore: sc.manufacturingScorePct ?? 80,
+      installationScore: Math.max(40, 100 - Math.round((sc.installationTimeHrs ?? 8) * 2)),
+      materialUtilizationPct: sc.materialUtilizationPct ?? 82,
+    };
+  }
+  if (opt && Array.isArray(opt.sections)) {
+    const usable = opt.height ? opt.usableH / opt.height : 0.8;
+    const colFrac = opt.width ? opt.sections.reduce((a: number, s: any) => a + s.columns.reduce((b: number, c: any) => b + (c.w || 0), 0), 0) / opt.width : 1;
+    const cols = (opt.stats && opt.stats.columns) || 1;
+    const items = (opt.stats && opt.stats.totalItems) || 0;
+    const density = Math.min(1, items / Math.max(1, cols * 6));
+    const storageEfficiencyPct = Math.round(Math.min(96, usable * colFrac * (0.7 + 0.3 * density) * 100));
+    const deadSpacePct = Math.max(0, Math.round((1 - usable) * 100) - (opt.hasLoft ? 0 : 4));
+    const movementEfficiencyPct = Math.round(Math.min(95, 100 - Math.max(0, cols - opt.width / 550) * 6));
+    const manufacturingScore = Math.round(Math.max(55, 95 - cols * 2 - shelves.filter((s) => !s.ok).length * 5));
+    const installationScore = Math.round(Math.max(45, 92 - (opt.height > 2400 ? 8 : 0) - (opt.sections.length - 1) * 4));
+    return { storageEfficiencyPct, deadSpacePct, movementEfficiencyPct, manufacturingScore, installationScore, materialUtilizationPct: Math.min(94, 74 + Math.round((1 - deadSpacePct / 100) * 18)) };
+  }
+  return { storageEfficiencyPct: 72, deadSpacePct: 8, movementEfficiencyPct: 80, manufacturingScore: 82, installationScore: 80, materialUtilizationPct: 82 };
+}
+// §4 constraint solver: room / door-window-beam / hardware / manufacturing / install / transport.
+function mathConstraints(input: any, shelves: any[], opt: any, type: string, floating: boolean, hardware: any[]): any[] {
+  const out: any[] = [];
+  const add = (name: string, ok: boolean, level: string, note: string, fix: string) => out.push({ name, ok, level: ok ? "ok" : level, note, fix: ok ? "" : fix });
+  const SHEET_L = 2440, SHEET_W = 1220;
+  const oversize = shelves.filter((s) => Math.max(s.span, s.depth) > SHEET_L || Math.min(s.span, s.depth) > SHEET_W);
+  add("Sheet-size constraint", oversize.length === 0, "warning", oversize.length ? oversize.length + " panel(s) exceed a 2440×1220 sheet." : "All panels nest within a standard 8×4 sheet.", "Split the oversized panel or joint two boards.");
+  const shipMax = Math.max(0, ...shelves.map((s) => s.span), opt ? (opt.height || 0) : 0);
+  add("Transportation constraint", shipMax <= 2400, "warning", shipMax <= 2400 ? "All members ≤ 2400 mm — ship & lift friendly." : "Longest member " + Math.round(shipMax) + " mm > 2400 mm.", "Make the tall unit knock-down (KD) or split the full-height panel for transport & the lift.");
+  if (opt) {
+    const sum = opt.sections.reduce((a: number, s: any) => a + s.columns.reduce((b: number, c: any) => b + (c.w || 0), 0), 0);
+    const closes = Math.abs(sum - opt.width) <= Math.max(12, opt.width * 0.02);
+    add("Geometry closure", closes, "error", closes ? "Columns sum to the carcass width (parts = whole)." : "Columns sum to " + Math.round(sum) + " vs carcass " + opt.width + " mm.", "Re-tile the columns so they exactly fill the carcass minus panel thicknesses.");
+  }
+  const hwBad = hardware.filter((h) => !h.ok);
+  add("Hardware load constraint", hwBad.length === 0, "error", hwBad.length ? hwBad.map((h) => h.item).join(", ") + " over rating." : "Hinges / channels" + (floating ? " / brackets" : "") + " within rated load.", "Upgrade to heavier hardware or add fixings.");
+  const strFail = shelves.filter((s) => !s.ok && !s.marginal).length;
+  add("Structural deflection", strFail === 0, "error", strFail ? strFail + " shelf(s) exceed the L/200 span limit." : "All shelves stiffer than L/200.", "Add a mid-partition, a thicker board, or a back stiffener to the failing shelves.");
+  if (input.layout && Array.isArray(input.layout.runs)) {
+    let s: any = {}; try { s = scoreLayout(input.layout, input.dims || input.layout.dims || {}); } catch { s = {}; }
+    add("Door / window / beam clearance", (s.doorFit ?? 9) >= 6.5 && (s.windowFit ?? 9) >= 6.5 && (s.beamFit ?? 9) >= 6.5, "warning", "Door " + (s.doorFit ?? "-") + " · window " + (s.windowFit ?? "-") + " · beam " + (s.beamFit ?? "-") + " /10.", "Shift the run / drop the wall cabinet / lower units under the beam to clear the opening.");
+  }
+  if (floating) { const wb = hardware.find((h) => /suspension/i.test(h.item)); add("Floating wall load (2× safety)", !!(wb && wb.ok), "error", wb ? wb.detail : "Wall fixing not evaluated.", "Add suspension brackets / a rail or reinforce the wall."); }
+  return out;
+}
+// Top-level engine: runs §1–§4 and returns a graded structural + optimisation report.
+function mathDesignEngine(input: any): any {
+  const type = String(input.type || (input.layout && input.layout.type) || (input.wardrobe && "Wardrobe") || "");
+  const opt = mathWardrobeOpt(input);
+  const floating = !!(input.floating || (input.dims && input.dims.floating) || (opt && opt.floating));
+
+  // ── 1. STRUCTURAL: shelf deflection / safe span / load (beam theory) ──
+  const raw = mathEngineShelves(input);
+  const shelves = raw.map((s) => { const ph = matPhysics(s.mat); const b = shelfBeam(s.span, s.depth, s.thk, s.load, ph.E); return { label: s.label, span: s.span, depth: s.depth, thk: s.thk, load: s.load, material: ph.name, ...b, verdict: b.ok ? "OK" : b.marginal ? "Marginal" : "Sags" }; });
+  const failed = shelves.filter((s) => !s.ok);
+  const worst = shelves.slice().sort((a, b) => a.ratio - b.ratio)[0] || null;
+  const structural = {
+    count: shelves.length, pass: shelves.filter((s) => s.ok).length, marginal: shelves.filter((s) => s.marginal && !s.ok).length, fail: shelves.filter((s) => !s.ok && !s.marginal).length,
+    shelves: shelves.slice(0, 40), worst,
+    summary: shelves.length === 0 ? "No load-bearing shelves in this unit." : failed.length === 0 ? shelves.length + " shelves — all within the L/200 deflection limit." : failed.length + " of " + shelves.length + " shelves exceed the safe span; add a mid support / thicker board / stiffener.",
+  };
+
+  // ── 2. CENTRE OF GRAVITY (tipping / floating safety) ──
+  let cog: any = { relevant: false, note: "Floor-standing unit — centre of gravity is not a tipping concern." };
+  if (opt && Array.isArray(opt.sections)) {
+    let mSum = 0, mx = 0;
+    for (const sec of opt.sections) for (const col of (sec.columns || [])) { const fill = (col.cells || []).length; const m = (col.w || 500) * (opt.height || 2400) * (0.6 + 0.05 * fill); const cx = (col.x || 0) + (col.w || 0) / 2; mSum += m; mx += m * cx; }
+    const xcog = mSum ? mx / mSum : (opt.width || 0) / 2;
+    const dev = opt.width ? Math.round(Math.abs(xcog - opt.width / 2) / opt.width * 100) : 0;
+    cog = { relevant: true, xMm: Math.round(xcog), widthMm: opt.width, deviationPct: dev, balanced: dev <= 12, note: dev <= 12 ? "Well balanced — CoG within 12% of centre." : "CoG " + dev + "% off-centre — even out the heavy sections" + (floating ? "; critical for a floating unit." : ".") };
+  }
+
+  // ── 3. HARDWARE LOAD (hinge / drawer / wall bracket) ──
+  const hardware: any[] = [];
+  let shutterH = 720, shutterW = 450;
+  if (opt) { const cols = opt.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0) || 1; shutterW = (opt.width || 2400) / cols; shutterH = opt.height || 2400; }
+  else { const runs = (input.layout && input.layout.runs) || []; for (const r of runs) for (const c of (r.base || [])) { if (["filler", "sidepanel"].includes(c.kind)) continue; if ((c.w || 0) > shutterW) { shutterW = c.w; shutterH = 720; } } }
+  const shPh = matPhysics("ply");
+  const maxShutterKg = Math.round((shutterW / 1000) * (shutterH / 1000) * (shPh.densityKgM2 + 3) * 10) / 10;   // +3 kg/m² for laminate both faces
+  const hingeCount = shutterH < 900 ? 2 : shutterH < 1600 ? 3 : shutterH < 2000 ? 4 : shutterH < 2400 ? 5 : 6;
+  const hingeCap = ({ 2: 9, 3: 13, 4: 18, 5: 22, 6: 26 } as any)[hingeCount] || 22;   // full-overlay soft-close capacity (kg)
+  hardware.push({ item: "Shutter hinges", detail: hingeCount + " hinges · shutter " + Math.round(shutterW) + "×" + Math.round(shutterH) + " mm ≈ " + maxShutterKg + " kg", loadKg: maxShutterKg, capKg: hingeCap, ok: maxShutterKg <= hingeCap, fix: "Add a hinge (or use a heavy-duty hinge) — the shutter exceeds the rated door weight." });
+  if ((opt && opt.stats && opt.stats.drawers) || (input.layout && input.layout.runs)) {
+    const drawerW = Math.min(900, shutterW);
+    const rating = drawerW > 900 ? 25 : 30;
+    const est = Math.round((drawerW / 1000) * 18);
+    hardware.push({ item: "Drawer channels", detail: "≈" + Math.round(drawerW) + " mm drawer · content ≈ " + est + " kg", loadKg: est, capKg: rating, ok: est <= rating, fix: "Use a heavy-duty (40 kg) runner for wide / heavily-loaded drawers." });
+  }
+  if (floating) {
+    const totalKg = Math.round(shelves.reduce((a, s) => a + s.totalKg, 0) + maxShutterKg * Math.max(1, shelves.length ? 2 : 1) + 40);
+    const brackets = Math.max(2, Math.ceil((opt ? opt.width : 900) / 600));
+    const capacity = brackets * 75;   // heavy suspension bracket ≈ 75 kg each
+    hardware.push({ item: "Wall suspension (floating)", detail: brackets + " brackets · unit ≈ " + totalKg + " kg loaded · 2× safety needs " + (totalKg * 2) + " kg", loadKg: totalKg * 2, capKg: capacity, ok: totalKg * 2 <= capacity, fix: "Add brackets / a suspension rail, or reinforce the wall — keep a 2× safety margin." });
+  }
+
+  // ── 4 + §2/§4 ──
+  const optimization = mathOptimization(input, shelves, opt, type);
+  const constraints = mathConstraints(input, shelves, opt, type, floating, hardware);
+
+  // ── verdict ──
+  const conCrit = constraints.filter((c: any) => !c.ok && c.level === "error").length;
+  const conWarn = constraints.filter((c: any) => !c.ok && c.level !== "error").length;
+  const hwFail = hardware.filter((h) => !h.ok).length;
+  let score = 100 - (structural.fail * 12 + structural.marginal * 5) - hwFail * 10 - (conCrit * 12 + conWarn * 4);
+  if (cog.relevant && !cog.balanced) score -= 6;
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  const grade = score >= 85 ? "A" : score >= 72 ? "B" : score >= 60 ? "C" : "D";
+  const crit = structural.fail + hwFail + conCrit, adv = structural.marginal + conWarn + (cog.relevant && !cog.balanced ? 1 : 0);
+  const summary = (crit + adv) === 0 ? "Mathematically sound — every shelf, hinge and constraint is within engineering limits." : crit + " critical + " + adv + " advisory issue(s) — see the structural, hardware and constraint checks.";
+  return { type, floating, structural, centerOfGravity: cog, hardware, hardwareOk: hwFail === 0, optimization, constraints, score, grade, summary };
+}
+
 // ── 15.pdf Stage 3: optional EXTERNAL multi-AI review (ChatGPT + DeepSeek) ──
 // Keys come from env (OPENAI_API_KEY / DEEPSEEK_API_KEY) or a local ai-keys.json (never the source).
 // Each provider gets the Master Design Brief and returns STRUCTURED parameters; OUR parametric engine
@@ -5128,6 +5330,16 @@ app.post("/api/advisor", async (c) => {
     const type = String(body.type || layout.type || dims.designType || "");
     return c.json({ data: layoutAdvisor(layout, dims, type) });
   } catch (err) { console.error(err); return c.json({ error: "advisor failed" }, 500); }
+});
+
+// Module 6: Mathematical Design Engine — structural (beam theory) + optimisation + constraint solver.
+app.post("/api/math-engine", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as any));
+    const input: any = { layout: body.layout || body.result, dims: body.dims || body.input || {}, type: body.type, wardrobe: body.wardrobe || body.opt, floating: body.floating };
+    if (!input.layout && !input.wardrobe) return c.json({ error: "no layout or wardrobe option supplied" }, 400);
+    return c.json({ data: mathDesignEngine(input) });
+  } catch (err) { console.error(err); return c.json({ error: "math-engine failed" }, 500); }
 });
 
 // POST /api/designs/edit-validate — validate a manually-edited elevation against
@@ -8866,6 +9078,17 @@ const frontendHTML = `<!DOCTYPE html>
         } catch (e) { alert("Advisor failed"); }
         setAdvBusy(false);
       };
+      const [mathEng, setMathEng] = useState(null);    // Module 6: Mathematical Design Engine report
+      const [mathBusy, setMathBusy] = useState(false);
+      const runMathEngine = async (res) => {
+        setMathBusy(true);
+        try {
+          const dims = { type, wall: Number(wall), wallB: Number(wallB), wallC: Number(wallC) };
+          const j = await fetch("/api/math-engine", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ layout: res, dims, type }) }).then((r) => r.json());
+          if (j.data) setMathEng(j.data); else alert((j && j.error) || "Math engine failed");
+        } catch (e) { alert("Math engine failed"); }
+        setMathBusy(false);
+      };
       const learnCorrection = async () => {
         if (!result || !result.id) return;
         setTeachMsg("Teaching AI…");
@@ -9178,7 +9401,7 @@ const frontendHTML = `<!DOCTYPE html>
         const bad = validateRoom();   // 6.14: block generation on an incomplete/invalid room (keep the planner visible)
         if (bad) { setRoomWarn("Room definition incomplete — " + bad + "."); return; }
         setRoomWarn(null);
-        setLoading(true); setResult(null); setReasoning(""); setConsensus(null); setAdvisor(null);
+        setLoading(true); setResult(null); setReasoning(""); setConsensus(null); setAdvisor(null); setMathEng(null);
         try {
           const body = { designType: type, wall: Number(wall) };
           if (needsB) body.wallB = Number(wallB);
@@ -10090,6 +10313,54 @@ const frontendHTML = `<!DOCTYPE html>
                     </div>
                   )}
                   {advisor && advisor.findings.length === 0 && <div className="text-[11px] text-emerald-700 font-medium">✓ No issues found — this layout follows professional Indian modular standards.</div>}
+                </div>
+                {/* Module 6: Mathematical Design Engine — structural, hardware-load, optimisation + constraint solver */}
+                <div className="mt-3 bg-gradient-to-br from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg p-3">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    <h3 className="text-sm font-semibold text-cyan-800">🔬 Mathematical Design Engine</h3>
+                    <button onClick={() => runMathEngine(result)} disabled={mathBusy} className="px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-700 text-white text-xs font-medium disabled:opacity-50">{mathBusy ? "Computing…" : mathEng ? "↻ Re-run" : "Run analysis"}</button>
+                    {mathEng && <span className={"text-xs font-bold px-2 py-0.5 rounded " + (mathEng.grade === "A" ? "bg-emerald-100 text-emerald-700" : mathEng.grade === "B" ? "bg-sky-100 text-sky-700" : mathEng.grade === "C" ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700")}>Grade {mathEng.grade} · {mathEng.score}/100</span>}
+                  </div>
+                  {!mathEng && !mathBusy && <div className="text-[11px] text-slate-500">Beam-theory structural check (shelf deflection / safe span / load), hinge &amp; drawer load, centre of gravity, storage/movement optimisation and a full room→transport constraint solver.</div>}
+                  {mathEng && <div className="text-[11px] text-slate-600 mb-2">{mathEng.summary}</div>}
+                  {mathEng && (
+                    <div className="space-y-2">
+                      {/* optimisation metric tiles */}
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {[["Storage", mathEng.optimization.storageEfficiencyPct + "%"], ["Dead space", mathEng.optimization.deadSpacePct + "%"], ["Movement", mathEng.optimization.movementEfficiencyPct + "%"], ["Manufacturing", mathEng.optimization.manufacturingScore + "%"], ["Installation", mathEng.optimization.installationScore + "%"], ["Material use", mathEng.optimization.materialUtilizationPct + "%"]].map((kv, i) => (
+                          <div key={i} className="rounded bg-white/70 border border-cyan-100 px-2 py-1 text-center">
+                            <div className="text-[9px] uppercase tracking-wide text-slate-400">{kv[0]}</div>
+                            <div className="text-xs font-bold text-cyan-800">{kv[1]}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {/* structural */}
+                      <div className="rounded border border-cyan-100 bg-white/70 px-2.5 py-1.5">
+                        <div className="text-[11px] font-semibold text-slate-700">🏗 Structural · {mathEng.structural.pass}/{mathEng.structural.count} shelves OK{mathEng.structural.marginal ? " · " + mathEng.structural.marginal + " marginal" : ""}{mathEng.structural.fail ? " · " + mathEng.structural.fail + " sag" : ""}</div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">{mathEng.structural.summary}</div>
+                        {mathEng.structural.worst && <div className="text-[10px] text-slate-600 mt-0.5">Worst: {mathEng.structural.worst.label} — span {mathEng.structural.worst.span}mm, δ {mathEng.structural.worst.defl}mm (L/{mathEng.structural.worst.ratio}), safe span {mathEng.structural.worst.safeSpan}mm</div>}
+                      </div>
+                      {/* hardware */}
+                      {mathEng.hardware.map((h, i) => (
+                        <div key={i} className={"rounded border px-2.5 py-1 " + (h.ok ? "border-slate-200 bg-white" : "border-rose-300 bg-rose-50")}>
+                          <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-semibold text-slate-700">{h.ok ? "✓" : "⛔"} {h.item}</span><span className="text-[10px] text-slate-400">{h.loadKg}kg / {h.capKg}kg</span></div>
+                          <div className="text-[10px] text-slate-500">{h.detail}</div>
+                          {!h.ok && <div className="text-[10px] text-rose-700">Fix: {h.fix}</div>}
+                        </div>
+                      ))}
+                      {mathEng.centerOfGravity.relevant && <div className={"text-[10px] rounded px-2 py-1 " + (mathEng.centerOfGravity.balanced ? "bg-white border border-slate-200 text-slate-600" : "bg-amber-50 border border-amber-300 text-amber-800")}>⚖ Centre of gravity: {mathEng.centerOfGravity.note}</div>}
+                      {/* constraint solver */}
+                      <div className="space-y-1">
+                        {mathEng.constraints.map((cn, i) => (
+                          <div key={i} className={"rounded border px-2.5 py-1 " + (cn.ok ? "border-slate-200 bg-white" : cn.level === "error" ? "border-rose-300 bg-rose-50" : "border-amber-300 bg-amber-50")}>
+                            <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-semibold text-slate-700">{cn.ok ? "✓" : cn.level === "error" ? "⛔" : "⚠️"} {cn.name}</span></div>
+                            <div className="text-[10px] text-slate-500">{cn.note}</div>
+                            {!cn.ok && <div className="text-[10px] text-cyan-700">Fix: {cn.fix}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 {result.id && (
                   <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 flex flex-wrap items-center gap-2">
@@ -11194,6 +11465,8 @@ const frontendHTML = `<!DOCTYPE html>
       const [busy, setBusy] = useState(false);
       const [selIdx, setSelIdx] = useState(0);
       const [repTab, setRepTab] = useState("Reports");
+      const [mathW, setMathW] = useState(null);       // Module 6: Mathematical Design Engine (wardrobe)
+      const [mathWBusy, setMathWBusy] = useState(false);
       const [view, setView] = useState("Front");
       const [tpl, setTpl] = useState("couple");
       const [edited, setEdited] = useState(null);   // drag-edited version of the selected option
@@ -11322,6 +11595,14 @@ const frontendHTML = `<!DOCTYPE html>
       const opts = (data && data.options) || [];
       const sel = edited || opts[selIdx];   // reports + editor reflect drag-edits; the grid keeps the 3 AI proposals
       const best = data && data.recommendation ? data.recommendation.bestIndex : 0;
+      const runMathW = async () => {
+        if (!sel) return; setMathWBusy(true);
+        try {
+          const j = await fetch("/api/math-engine", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wardrobe: sel, type: "Wardrobe" }) }).then((r) => r.json());
+          if (j.data) setMathW(j.data); else alert((j && j.error) || "Math engine failed");
+        } catch (e) { alert("Math engine failed"); }
+        setMathWBusy(false);
+      };
       const exportBoardPdf = async () => {
         const jsPDF = window.jspdf && window.jspdf.jsPDF; if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
         const useSvg = photoBoard || boardSvg;
@@ -11445,7 +11726,7 @@ const frontendHTML = `<!DOCTYPE html>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
-            {["Legend", "Reports", "Cutting List", "Hardware", "BOQ", "CNC", "3D", "Board"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700") + (t === "Board" ? " ml-0.5" : "")}>{t === "Board" ? "🖼 Board" : t}</button>))}
+            {["Legend", "Reports", "Cutting List", "Hardware", "BOQ", "CNC", "Math", "3D", "Board"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700") + (t === "Board" ? " ml-0.5" : "")}>{t === "Board" ? "🖼 Board" : t === "Math" ? "🔬 Math" : t}</button>))}
             <span className="ml-auto text-[11px] text-slate-400">{sel ? "Option " + (selIdx + 1) + " · " + sel.label : ""}</span>
           </div>
           {repTab === "Legend" && (<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1.5">
@@ -11471,6 +11752,28 @@ const frontendHTML = `<!DOCTYPE html>
               {sel.cnc.ops.map((r, i) => (<tr key={i} className="border-t border-slate-100"><td className="py-1 pr-3 text-slate-700">{r.panel}</td><td className="py-1 pr-3 text-slate-600">{r.op}</td><td className="py-1 pr-3 text-slate-800 font-medium">{r.count}</td><td className="py-1 text-slate-500">{r.note}</td></tr>))}
             </tbody></table></div>
             <div className="text-[10px] text-slate-400 mt-1">Drilling schedule for LINE-32 boring — export to the CNC as a drill map per panel.</div>
+          </div>)}
+          {repTab === "Math" && sel && (<div>
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <h3 className="text-sm font-semibold text-cyan-800">🔬 Mathematical Design Engine</h3>
+              <button onClick={runMathW} disabled={mathWBusy} className="px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-700 text-white text-xs font-medium disabled:opacity-50">{mathWBusy ? "Computing…" : mathW ? "↻ Re-run" : "Run analysis"}</button>
+              {mathW && <span className={"text-xs font-bold px-2 py-0.5 rounded " + (mathW.grade === "A" ? "bg-emerald-100 text-emerald-700" : mathW.grade === "B" ? "bg-sky-100 text-sky-700" : mathW.grade === "C" ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700")}>Grade {mathW.grade} · {mathW.score}/100</span>}
+            </div>
+            {!mathW && !mathWBusy && <div className="text-[11px] text-slate-500">Beam-theory shelf deflection &amp; safe span, loft-shelf load, hinge/drawer load, centre-of-gravity balance, storage optimisation and a manufacturing→transport constraint solver for this option.</div>}
+            {mathW && (<div className="space-y-2">
+              <div className="text-[11px] text-slate-600">{mathW.summary}</div>
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+                {[["Storage", mathW.optimization.storageEfficiencyPct + "%"], ["Dead space", mathW.optimization.deadSpacePct + "%"], ["Movement", mathW.optimization.movementEfficiencyPct + "%"], ["Manufacturing", mathW.optimization.manufacturingScore + "%"], ["Installation", mathW.optimization.installationScore + "%"], ["Material use", mathW.optimization.materialUtilizationPct + "%"]].map((kv, i) => (<div key={i} className="rounded bg-cyan-50 border border-cyan-100 px-2 py-1 text-center"><div className="text-[9px] uppercase tracking-wide text-slate-400">{kv[0]}</div><div className="text-xs font-bold text-cyan-800">{kv[1]}</div></div>))}
+              </div>
+              <div className="rounded border border-cyan-100 bg-white px-2.5 py-1.5">
+                <div className="text-[11px] font-semibold text-slate-700">🏗 Structural · {mathW.structural.pass}/{mathW.structural.count} shelves OK{mathW.structural.marginal ? " · " + mathW.structural.marginal + " marginal" : ""}{mathW.structural.fail ? " · " + mathW.structural.fail + " sag" : ""}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">{mathW.structural.summary}</div>
+                {mathW.structural.worst && <div className="text-[10px] text-slate-600 mt-0.5">Worst: {mathW.structural.worst.label} — span {mathW.structural.worst.span}mm, δ {mathW.structural.worst.defl}mm (L/{mathW.structural.worst.ratio}), safe span {mathW.structural.worst.safeSpan}mm</div>}
+              </div>
+              {mathW.centerOfGravity.relevant && <div className={"text-[10px] rounded px-2 py-1 " + (mathW.centerOfGravity.balanced ? "bg-white border border-slate-200 text-slate-600" : "bg-amber-50 border border-amber-300 text-amber-800")}>⚖ Centre of gravity: {mathW.centerOfGravity.note}</div>}
+              {mathW.hardware.map((h, i) => (<div key={i} className={"rounded border px-2.5 py-1 " + (h.ok ? "border-slate-200 bg-white" : "border-rose-300 bg-rose-50")}><div className="flex items-center justify-between gap-2"><span className="text-[11px] font-semibold text-slate-700">{h.ok ? "✓" : "⛔"} {h.item}</span><span className="text-[10px] text-slate-400">{h.loadKg}kg / {h.capKg}kg</span></div><div className="text-[10px] text-slate-500">{h.detail}</div>{!h.ok && <div className="text-[10px] text-rose-700">Fix: {h.fix}</div>}</div>))}
+              <div className="space-y-1">{mathW.constraints.map((cn, i) => (<div key={i} className={"rounded border px-2.5 py-1 " + (cn.ok ? "border-slate-200 bg-white" : cn.level === "error" ? "border-rose-300 bg-rose-50" : "border-amber-300 bg-amber-50")}><div className="text-[11px] font-semibold text-slate-700">{cn.ok ? "✓" : cn.level === "error" ? "⛔" : "⚠️"} {cn.name}</div><div className="text-[10px] text-slate-500">{cn.note}</div>{!cn.ok && <div className="text-[10px] text-cyan-700">Fix: {cn.fix}</div>}</div>))}</div>
+            </div>)}
           </div>)}
           {repTab === "3D" && sel && <Wardrobe3D opt={sel} onEdit={commitEdit} onSnap={(d) => { setBoardHero(d); setRepTab("Board"); }} />}
           {repTab === "Board" && sel && (<div>
