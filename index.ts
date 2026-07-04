@@ -10646,8 +10646,12 @@ const frontendHTML = `<!DOCTYPE html>
       const [view, setView] = useState("Front");
       const [tpl, setTpl] = useState("couple");
       const [edited, setEdited] = useState(null);   // drag-edited version of the selected option
+      const [saved, setSaved] = useState([]);        // saved wardrobe designs (gallery)
+      const [showSaved, setShowSaved] = useState(false);
+      const [saveMsg, setSaveMsg] = useState("");
       const reTimer = React.useRef(null);
       const firstSig = React.useRef(true);
+      const suppressGen = React.useRef(false);       // skip auto-regen when restoring a saved design
       const set = (k, v) => setInput((p) => { const n = Object.assign({}, p); n[k] = v; return n; });
       React.useEffect(() => { fetch("/api/wardrobe/meta").then((r) => r.json()).then((j) => setMeta(j.data)).catch(() => {}); }, []);
       const generate = (ov) => {
@@ -10667,7 +10671,18 @@ const frontendHTML = `<!DOCTYPE html>
       };
       React.useEffect(() => { generate(); }, []);
       const sig = JSON.stringify(input);
-      React.useEffect(() => { if (firstSig.current) { firstSig.current = false; return; } const id = setTimeout(() => generate(), 400); return () => clearTimeout(id); }, [sig]);
+      React.useEffect(() => { if (firstSig.current) { firstSig.current = false; return; } if (suppressGen.current) { suppressGen.current = false; return; } const id = setTimeout(() => generate(), 400); return () => clearTimeout(id); }, [sig]);
+      const loadSaved = () => fetch("/api/wardrobe/saved").then((r) => r.json()).then((j) => setSaved(j.data || [])).catch(() => {});
+      React.useEffect(() => { loadSaved(); }, []);
+      const saveToGallery = () => {
+        if (!data || !data.options) return;
+        fetch("/api/wardrobe/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data, input, selIdx }) })
+          .then((r) => r.json()).then((j) => { if (j.data) { setSaveMsg("✓ Saved to gallery"); setTimeout(() => setSaveMsg(""), 2500); loadSaved(); } }).catch(() => {});
+      };
+      const reopenSaved = (id) => {
+        fetch("/api/designs/" + id).then((r) => r.json()).then((j) => { const w = j.data && j.data.wardrobe; if (!w) return; suppressGen.current = true; setInput(w.input || input); setData(w.data); setSelIdx(w.selIdx || 0); setEdited(null); setShowSaved(false); }).catch(() => {});
+      };
+      const deleteSaved = (id, e) => { if (e) e.stopPropagation(); fetch("/api/designs/" + id, { method: "DELETE" }).then(() => loadSaved()).catch(() => {}); };
       const applyTemplate = (t) => {
         setTpl(t.key);
         const ov = { maleUsers: t.maleUsers, femaleUsers: t.femaleUsers, children: t.children, professionals: t.professionals, width: t.width, height: t.height, depth: t.depth };
@@ -10734,11 +10749,23 @@ const frontendHTML = `<!DOCTYPE html>
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <h2 className="text-base font-semibold text-slate-800">🚪 Wardrobe AI Designer <span className="text-xs font-normal text-slate-400">· lifestyle → 3 optimised options · Indian standards</span></h2>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              {saveMsg && <span className="text-[11px] text-emerald-600 font-medium">{saveMsg}</span>}
+              <button onClick={() => { setShowSaved((s) => !s); loadSaved(); }} className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium">📂 My Wardrobes{saved.length ? " (" + saved.length + ")" : ""}</button>
+              {sel && <button onClick={saveToGallery} className="px-2.5 py-1.5 rounded-lg border border-indigo-300 text-indigo-600 hover:bg-indigo-50 text-xs font-medium" title="Save this design into the shared designs gallery">💾 Save</button>}
               {sel && <button onClick={() => exportWardrobePdf(sel)} className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium" title="Proposal PDF — drawings + cutting list + BOQ + hardware">⬇ PDF</button>}
               {sel && <button onClick={() => exportWardrobeCsv(sel)} className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium" title="Cutting list + BOQ + hardware + CNC as CSV">⬇ CSV</button>}
               <button onClick={() => generate()} disabled={busy} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">{busy ? "Generating…" : "✨ Generate Options"}</button>
             </div>
+            {showSaved && (<div className="w-full mt-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
+              <div className="text-[11px] font-semibold text-slate-500 mb-1">Saved wardrobe designs {saved.length ? "" : "— none yet; click 💾 Save"}</div>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
+                {saved.map((s) => (<div key={s.id} onClick={() => reopenSaved(s.id)} className="flex items-center justify-between gap-2 bg-white rounded border border-slate-200 px-2 py-1.5 cursor-pointer hover:border-indigo-300">
+                  <div className="min-w-0"><div className="text-[12px] font-medium text-slate-800 truncate">{s.label}</div><div className="text-[10px] text-slate-400">{s.dims} · ₹{(s.cost || 0).toLocaleString("en-IN")}</div></div>
+                  <button onClick={(e) => deleteSaved(s.id, e)} className="text-slate-300 hover:text-red-500 text-sm shrink-0" title="Delete">🗑</button>
+                </div>))}
+              </div>
+            </div>)}
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
             {countSel("maleUsers", "👨 Male", 3)}{countSel("femaleUsers", "👩 Female", 3)}{countSel("children", "🧒 Children", 3)}{countSel("professionals", "👔 Professionals", 2)}
@@ -12114,6 +12141,40 @@ app.post("/api/wardrobe/rerender", async (c) => {
     o.svg = o.views.Front;
     return c.json({ data: o });
   } catch (err) { console.error(err); return c.json({ error: "Wardrobe rerender failed" }, 500); }
+});
+
+// Persist a wardrobe generation into the shared designs gallery: a real designs row whose
+// layout carries the Front elevation (so it previews in "My Designs" too) + the full restore
+// payload (input + all options + selected index) under layout.wardrobe.
+app.post("/api/wardrobe/save", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as any));
+    const wdata = body.data, input = body.input || {}, selIdx = Math.max(0, +body.selIdx || 0);
+    if (!wdata || !Array.isArray(wdata.options) || !wdata.options.length) return c.json({ error: "no wardrobe data to save" }, 400);
+    const sel = wdata.options[Math.min(selIdx, wdata.options.length - 1)] || wdata.options[0];
+    const id = randomUUID();
+    const layout: any = {
+      type: "Wardrobe (AI)",
+      dims: { wall: sel.width, wallB: sel.height, wallC: sel.depth },
+      runs: [],
+      appliedRules: ["Wardrobe AI · " + sel.label + " · " + sel.width + "×" + sel.height + "×" + sel.depth + " mm · " + (input.maleUsers || 0) + "M/" + (input.femaleUsers || 0) + "F"],
+      planSvg: sel.views.Front,
+      elevations: [{ name: "Front", svg: sel.views.Front }, { name: "Internal", svg: sel.views.Internal }],
+      sections: [{ name: "Top", svg: sel.views.Top }, { name: "Side", svg: sel.views.Side }].concat(sel.hasLoft ? [{ name: "Loft", svg: sel.views.Loft }] : []),
+      wardrobe: { input, data: wdata, selIdx },
+    };
+    db.insert(designs).values({ id, designType: "Wardrobe (AI)", params: JSON.stringify(Object.assign({}, input, { label: sel.label })), layout: JSON.stringify(layout), createdAt: new Date() }).run();
+    return c.json({ data: { id, label: sel.label } });
+  } catch (err) { console.error(err); return c.json({ error: "Wardrobe save failed" }, 500); }
+});
+app.get("/api/wardrobe/saved", (c) => {
+  const rows = db.select().from(designs).where(eq(designs.designType, "Wardrobe (AI)")).orderBy(desc(designs.createdAt)).all();
+  const list = rows.slice(0, 50).map((r: any) => {
+    let label = "Wardrobe", dims = "", cost = 0, n = 0;
+    try { const ly = JSON.parse(r.layout), w = ly.wardrobe || {}, o = (w.data && w.data.options) || []; n = o.length; const s = o[w.selIdx || 0] || o[0] || {}; label = s.label || "Wardrobe"; dims = (s.width || "") + "×" + (s.height || "") + "×" + (s.depth || "") + " mm"; cost = (s.boq && s.boq.grandTotal) || 0; } catch { }
+    return { id: r.id, label, dims, cost, options: n, createdAt: r.createdAt };
+  });
+  return c.json({ data: list });
 });
 
 app.get("/mkw-logo.jpg", (c) => { try { const buf = fsRead("mkw-logo.jpg"); c.header("Content-Type", "image/jpeg"); c.header("Cache-Control", "public, max-age=86400"); return c.body(buf); } catch { return c.json({ error: "logo not found" }, 404); } });
