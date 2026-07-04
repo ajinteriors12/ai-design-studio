@@ -10538,9 +10538,10 @@ const frontendHTML = `<!DOCTYPE html>
 
     // 3D preview — reconstruct a wardrobe option as real panel meshes (carcass, partitions,
     // shelves, drawers, hanging rods, loft, plinth, optional shutters) in Three.js r128.
-    function Wardrobe3D({ opt }) {
+    function Wardrobe3D({ opt, onEdit }) {
       const ref = React.useRef(null);
       const [shutters, setShutters] = useState(false);
+      const [selInfo, setSelInfo] = useState(null);   // {label, mm} of the picked/dragged cell
       React.useEffect(() => {
         const THREE = window.THREE; if (!THREE || !ref.current || !opt) return;
         const host = ref.current, Wv = host.clientWidth || 640, Hv = 440;
@@ -10553,45 +10554,58 @@ const frontendHTML = `<!DOCTYPE html>
         const cam = new THREE.PerspectiveCamera(45, Wv / Hv, 10, 60000);
         scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.05));
         const dl = new THREE.DirectionalLight(0xffffff, 0.7); dl.position.set(1, 2, 1.5); scene.add(dl);
-        const g = new THREE.Group();
-        const Wd = opt.width, H = opt.height, D = opt.depth, plinth = opt.plinth || 100, loftH = opt.hasLoft ? opt.loftH : 0, loftD = opt.loftDepth || 550, usableH = opt.usableH, T = 18;
-        const box = (w, h, d, x, y, z, col, opac) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac })); m.position.set(x, y, z); g.add(m); const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: 0x94a3b8 })); e.position.copy(m.position); g.add(e); return m; };
+        const g = new THREE.Group(); scene.add(g);
+        const Wd = opt.width, H = opt.height, D = opt.depth, plinth = opt.plinth || 100, loftH = opt.hasLoft ? opt.loftH : 0, loftD = opt.loftDepth || 550, T = 18;
         const WOOD = 0xd8c4a4, SHELF = 0xc9b391;
-        // §14 applied catalog finish → colour the shutters / drawer fronts by scope
         const fin = opt.finishes || {};
         const finHex = (scope) => { const m = fin[scope] || fin.all; if (!m) return null; const raw = String(m.hex || m.colorCode || ""); return /^#?[0-9a-fA-F]{6}$/.test(raw) ? parseInt(raw.replace("#", ""), 16) : null; };
-        box(Wd, T, D, Wd / 2, plinth + T / 2, 0, WOOD);
-        box(Wd, T, D, Wd / 2, H - T / 2, 0, WOOD);
-        box(T, H, D, T / 2, H / 2, 0, WOOD);
-        box(T, H, D, Wd - T / 2, H / 2, 0, WOOD);
-        box(Wd, H, 6, Wd / 2, H / 2, -D / 2 + 3, 0xb7a488);
-        box(Wd, plinth, D - 40, Wd / 2, plinth / 2, 0, 0x8a7b63);
-        if (loftH > 0) box(Wd, T, loftD, Wd / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
-        if (opt.beam && opt.beam.on) { const bh = H - opt.beam.soffit; if (bh > 20) box(opt.beam.width, bh, D + 40, opt.beam.pos + opt.beam.width / 2, opt.beam.soffit + bh / 2, 0, 0xf97316, 0.6); }
-        for (const sec of opt.sections) for (const col of sec.columns) {
-          const cw = col.w, cxMid = col.x + cw / 2;
-          if (col.x > 0) box(T, usableH, D, col.x, plinth + usableH / 2, 0, WOOD);
-          let yb = plinth;
-          for (const cell of col.cells) {
-            const ch = cell.hMM, yt = yb + ch, k = cell.kind, colColor = parseInt((cell.color || "#cbd5e1").slice(1), 16) || 0xcbd5e1;
-            if (k === "shelf" || k === "handbag" || k === "shoe" || k === "kidsShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, SHELF);
-            else if (k === "drawer" || k === "jewellery" || k === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, finHex("drawers") || finHex(sec.kind) || colColor); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
-            else if (k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: 0x9aa3af, metalness: 0.6, roughness: 0.4 })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); g.add(rod); }
-            else if (k === "safe" || k === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, colColor, 0.85);
-            yb = yt;
-          }
-        }
-        if (shutters) for (const sec of opt.sections) for (const col of sec.columns) { const fh = finHex(sec.kind); box(col.w - 4, H - 20, T, col.x + col.w / 2, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }
-        g.position.set(-Wd / 2, -H / 2, 0); scene.add(g);
+        const work = JSON.parse(JSON.stringify(opt.sections));   // mutable working copy for 3D drag
+        let selKey = null;
+        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac })); m.position.set(x, y, z); if (ud) m.userData = ud; g.add(m); if (!(opac != null && opac < 0.02)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8 })); e.position.copy(m.position); g.add(e); } return m; };
+        const buildGroup = (secsData) => {
+          while (g.children.length) { const chd = g.children.pop(); if (chd.geometry) chd.geometry.dispose(); if (chd.material) chd.material.dispose(); }
+          const usableH = H - plinth - loftH;
+          box(Wd, T, D, Wd / 2, plinth + T / 2, 0, WOOD); box(Wd, T, D, Wd / 2, H - T / 2, 0, WOOD);
+          box(T, H, D, T / 2, H / 2, 0, WOOD); box(T, H, D, Wd - T / 2, H / 2, 0, WOOD);
+          box(Wd, H, 6, Wd / 2, H / 2, -D / 2 + 3, 0xb7a488); box(Wd, plinth, D - 40, Wd / 2, plinth / 2, 0, 0x8a7b63);
+          if (loftH > 0) box(Wd, T, loftD, Wd / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
+          if (opt.beam && opt.beam.on) { const bh = H - opt.beam.soffit; if (bh > 20) box(opt.beam.width, bh, D + 40, opt.beam.pos + opt.beam.width / 2, opt.beam.soffit + bh / 2, 0, 0xf97316, 0.6); }
+          secsData.forEach((sec, si) => sec.columns.forEach((col, ci) => {
+            const cw = col.w, cxMid = col.x + cw / 2;
+            if (col.x > 0) box(T, usableH, D, col.x, plinth + usableH / 2, 0, WOOD);
+            let yb = plinth;
+            col.cells.forEach((cell, k) => {
+              const ch = cell.hMM, yt = yb + ch, kind = cell.kind, colColor = parseInt((cell.color || "#cbd5e1").slice(1), 16) || 0xcbd5e1;
+              const key = si + "-" + ci + "-" + k, ud = { cell: true, si, ci, k, key }, hl = key === selKey;
+              if (kind === "shelf" || kind === "handbag" || kind === "shoe" || kind === "kidsShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
+              else if (kind === "drawer" || kind === "jewellery" || kind === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, hl ? 0x818cf8 : (finHex("drawers") || finHex(sec.kind) || colColor), null, ud); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
+              else if (kind.toLowerCase().indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4 })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = ud; g.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
+              else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
+              yb = yt;
+            });
+          }));
+          if (shutters) secsData.forEach((sec) => sec.columns.forEach((col) => { const fh = finHex(sec.kind); box(col.w - 4, H - 20, T, col.x + col.w / 2, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }));
+          g.position.set(-Wd / 2, -H / 2, 0);
+        };
+        buildGroup(work);
         const span = Math.max(Wd, H, D);
         cam.position.set(span * 0.9, span * 0.32, span * 1.28);
         const controls = new THREE.OrbitControls(cam, renderer.domElement); controls.target.set(0, 0, 0); controls.update();
-        let raf; const loop = () => { raf = requestAnimationFrame(loop); controls.update(); renderer.render(scene, cam); }; loop();
+        const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+        let drag = null, dirty = false;
+        const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, cam); const hits = ray.intersectObjects(g.children, false); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
+        const worldPerPx = () => 2 * cam.position.distanceTo(controls.target) * Math.tan((45 * Math.PI / 180) / 2) / (host.clientHeight || Hv);
+        const onDown = (e) => { if (e.button !== 0) return; const u = pick(e); if (!u) return; e.preventDefault(); controls.enabled = false; drag = { si: u.si, ci: u.ci, k: u.k, y: e.clientY, wpp: worldPerPx(), moved: false }; selKey = u.key; const c0 = work[u.si].columns[u.ci].cells[u.k]; setSelInfo({ label: c0.label, mm: c0.hMM }); dirty = true; };
+        const onMove = (e) => { if (!drag) return; const dMM = Math.round(-(e.clientY - drag.y) * drag.wpp / 5) * 5; if (!dMM) return; const cells = work[drag.si].columns[drag.ci].cells, cur = cells[drag.k], nb = cells[drag.k + 1] || cells[drag.k - 1]; if (!nb || cur.hMM + dMM < 60 || nb.hMM - dMM < 60) return; cur.hMM += dMM; nb.hMM -= dMM; drag.y = e.clientY; drag.moved = true; dirty = true; setSelInfo({ label: cur.label, mm: cur.hMM }); };
+        const onUp = () => { if (!drag) return; const moved = drag.moved; controls.enabled = true; drag = null; if (moved && onEdit) onEdit(JSON.parse(JSON.stringify(work))); };
+        renderer.domElement.addEventListener("pointerdown", onDown);
+        window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp);
+        let raf; const loop = () => { raf = requestAnimationFrame(loop); if (dirty) { buildGroup(work); dirty = false; } controls.update(); renderer.render(scene, cam); }; loop();
         const onResize = () => { const w2 = host.clientWidth || Wv; cam.aspect = w2 / Hv; cam.updateProjectionMatrix(); renderer.setSize(w2, Hv); };
         window.addEventListener("resize", onResize);
-        return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
+        return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); renderer.domElement.removeEventListener("pointerdown", onDown); window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
       }, [opt, shutters]);
-      return (<div><div className="flex items-center gap-2 mb-2"><button onClick={() => setShutters((s) => !s)} className="text-xs px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button><span className="text-[11px] text-slate-400">drag to orbit · scroll to zoom</span></div><div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} /></div>);
+      return (<div><div className="flex items-center gap-2 mb-2 flex-wrap"><button onClick={() => setShutters((s) => !s)} className="text-xs px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button><span className="text-[11px] text-slate-400">click a shelf / drawer / rack & drag ↕ to resize · drag empty space to orbit</span>{selInfo && <span className="text-[11px] text-indigo-600 font-medium">{selInfo.label}: {selInfo.mm} mm</span>}</div><div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} /></div>);
     }
 
     // Interactive drag-editor for a wardrobe option's front elevation: drag the horizontal
@@ -10956,7 +10970,7 @@ const frontendHTML = `<!DOCTYPE html>
             </tbody></table></div>
             <div className="text-[10px] text-slate-400 mt-1">Drilling schedule for LINE-32 boring — export to the CNC as a drill map per panel.</div>
           </div>)}
-          {repTab === "3D" && sel && <Wardrobe3D opt={sel} />}
+          {repTab === "3D" && sel && <Wardrobe3D opt={sel} onEdit={commitEdit} />}
         </div>
         <div className="text-[11px] text-slate-400 px-1">Learns from your uploaded references in the <span className="font-medium text-slate-500">Library</span> tab (vision-read wardrobes drive the Generator). This module applies Indian standard arrangements to your lifestyle inputs.</div>
       </div>);
