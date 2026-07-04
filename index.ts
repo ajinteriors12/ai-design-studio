@@ -10545,11 +10545,20 @@ const frontendHTML = `<!DOCTYPE html>
       const [selInfo, setSelInfo] = useState(null);   // {label, mm} of the picked/dragged cell
       const [vmode, setVmode] = useState("persp");     // §13.4 view mode
       const [explode, setExplode] = useState(0);       // §13.4 exploded view (0..1.2)
+      const [section, setSection] = useState(0);       // §13.4 section cut (0..0.95)
       const [shadows, setShadows] = useState(false);   // §13.6
-      const modeRef = React.useRef("persp"), explRef = React.useRef(0), shadRef = React.useRef(false), exportRef = React.useRef(null);
+      const [quality, setQuality] = useState("med");   // §13.8
+      const [light, setLight] = useState("day");       // §13.6 lighting preset
+      const [fly, setFly] = useState(false);           // §13.1 fly-through (auto-orbit)
+      const [menu3d, setMenu3d] = useState(null);      // §13.3 3D right-click menu
+      const modeRef = React.useRef("persp"), explRef = React.useRef(0), secRef = React.useRef(0), shadRef = React.useRef(false), qualRef = React.useRef("med"), lightRef = React.useRef("day"), flyRef = React.useRef(false), exportRef = React.useRef(null), opRef = React.useRef(null);
       React.useEffect(() => { modeRef.current = vmode; }, [vmode]);
       React.useEffect(() => { explRef.current = explode; }, [explode]);
+      React.useEffect(() => { secRef.current = section; }, [section]);
       React.useEffect(() => { shadRef.current = shadows; }, [shadows]);
+      React.useEffect(() => { qualRef.current = quality; }, [quality]);
+      React.useEffect(() => { lightRef.current = light; }, [light]);
+      React.useEffect(() => { flyRef.current = fly; }, [fly]);
       React.useEffect(() => {
         const THREE = window.THREE; if (!THREE || !ref.current || !opt) return;
         const host = ref.current, Wv = host.clientWidth || 640, Hv = 440;
@@ -10557,10 +10566,11 @@ const frontendHTML = `<!DOCTYPE html>
         try { renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true }); }
         catch (e) { host.innerHTML = "<div style='padding:24px;color:#64748b;font-size:13px'>3D preview needs WebGL (unavailable in this browser).</div>"; return; }
         renderer.setSize(Wv, Hv); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+        renderer.localClippingEnabled = true;   // §13.4 section cut
         host.innerHTML = ""; host.appendChild(renderer.domElement);
         const scene = new THREE.Scene(); scene.background = new THREE.Color(0xf1f5f9);
         const cam = new THREE.PerspectiveCamera(45, Wv / Hv, 10, 60000);
-        scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.05));
+        const hemi = new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.05); scene.add(hemi);
         const dl = new THREE.DirectionalLight(0xffffff, 0.7); dl.position.set(1, 2, 1.5); scene.add(dl);
         const g = new THREE.Group(); scene.add(g);
         const Wd = opt.width, H = opt.height, D = opt.depth, plinth = opt.plinth || 100, loftH = opt.hasLoft ? opt.loftH : 0, loftD = opt.loftDepth || 550, T = 18;
@@ -10569,7 +10579,8 @@ const frontendHTML = `<!DOCTYPE html>
         const finHex = (scope) => { const m = fin[scope] || fin.all; if (!m) return null; const raw = String(m.hex || m.colorCode || ""); return /^#?[0-9a-fA-F]{6}$/.test(raw) ? parseInt(raw.replace("#", ""), 16) : null; };
         const work = JSON.parse(JSON.stringify(opt.sections));   // mutable working copy for 3D drag
         let selKey = null;
-        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; g.add(m); if (!(opac != null && opac < 0.02)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8 })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; g.add(e); } return m; };
+        const clipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 1e7);   // §13.4 section cut (X-plane, off by default)
+        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac, clippingPlanes: [clipPlane], clipShadows: true })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; g.add(m); if (!(opac != null && opac < 0.02)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8, clippingPlanes: [clipPlane] })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; g.add(e); } return m; };
         const buildGroup = (secsData) => {
           while (g.children.length) { const chd = g.children.pop(); if (chd.geometry) chd.geometry.dispose(); if (chd.material) chd.material.dispose(); }
           const usableH = H - plinth - loftH;
@@ -10588,7 +10599,7 @@ const frontendHTML = `<!DOCTYPE html>
               const key = si + "-" + ci + "-" + k, ud = { cell: true, si, ci, k, key }, hl = key === selKey;
               if (kind === "shelf" || kind === "handbag" || kind === "shoe" || kind === "kidsShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
               else if (kind === "drawer" || kind === "jewellery" || kind === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, hl ? 0x818cf8 : (finHex("drawers") || finHex(sec.kind) || colColor), null, ud); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
-              else if (kind.toLowerCase().indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4 })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: cxMid, y: yt - 70, z: 0 } }); rod.castShadow = true; g.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
+              else if (kind.toLowerCase().indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4, clippingPlanes: [clipPlane] })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: cxMid, y: yt - 70, z: 0 } }); rod.castShadow = true; g.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
               else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
               yb = yt;
             });
@@ -10603,7 +10614,20 @@ const frontendHTML = `<!DOCTYPE html>
         renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         dl.position.set(span * 0.7, span * 1.6, span); dl.target.position.set(0, -H / 2, 0); scene.add(dl.target);
         dl.castShadow = shadRef.current; dl.shadow.mapSize.set(1024, 1024); { const sc = dl.shadow.camera, r = span * 1.3; sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r; sc.near = span * 0.1; sc.far = span * 6; sc.updateProjectionMatrix(); }
-        exportRef.current = () => { const lines = ["# AI Design Studio — wardrobe (OBJ)"]; let vBase = 0; g.updateMatrixWorld(true); const v = new THREE.Vector3(); g.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes && o.geometry.attributes.position && !(o.material && o.material.opacity != null && o.material.opacity < 0.02)) { const pos = o.geometry.attributes.position, idx = o.geometry.index; for (let i = 0; i < pos.count; i++) { v.fromBufferAttribute(pos, i); o.localToWorld(v); lines.push("v " + v.x.toFixed(1) + " " + v.y.toFixed(1) + " " + v.z.toFixed(1)); } if (idx) for (let i = 0; i < idx.count; i += 3) lines.push("f " + (idx.getX(i) + 1 + vBase) + " " + (idx.getX(i + 1) + 1 + vBase) + " " + (idx.getX(i + 2) + 1 + vBase)); vBase += pos.count; } }); saveBlobAs(new Blob([lines.join("\\n")], { type: "text/plain" }), "wardrobe-" + String(opt.label || "design").toLowerCase().replace(/[^\\w-]+/g, "-") + ".obj"); };
+        const fname = (ext) => "wardrobe-" + String(opt.label || "design").toLowerCase().replace(/[^\\w-]+/g, "-") + "." + ext;
+        const eachTri = (cb) => { g.updateMatrixWorld(true); const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(); g.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes && o.geometry.attributes.position && !(o.material && o.material.opacity != null && o.material.opacity < 0.02)) { const pos = o.geometry.attributes.position, idx = o.geometry.index; if (idx) for (let i = 0; i < idx.count; i += 3) { a.fromBufferAttribute(pos, idx.getX(i)); o.localToWorld(a); b.fromBufferAttribute(pos, idx.getX(i + 1)); o.localToWorld(b); c.fromBufferAttribute(pos, idx.getX(i + 2)); o.localToWorld(c); cb(a, b, c); } } }); };
+        const exportObj = () => { const lines = ["# AI Design Studio — wardrobe (OBJ)"]; let vb = 0; eachTri((a, b, c) => { lines.push("v " + a.x.toFixed(1) + " " + a.y.toFixed(1) + " " + a.z.toFixed(1), "v " + b.x.toFixed(1) + " " + b.y.toFixed(1) + " " + b.z.toFixed(1), "v " + c.x.toFixed(1) + " " + c.y.toFixed(1) + " " + c.z.toFixed(1), "f " + (vb + 1) + " " + (vb + 2) + " " + (vb + 3)); vb += 3; }); saveBlobAs(new Blob([lines.join("\\n")], { type: "text/plain" }), fname("obj")); };
+        const exportStl = () => { const lines = ["solid wardrobe"]; const n = new THREE.Vector3(), ab = new THREE.Vector3(), ac = new THREE.Vector3(); eachTri((a, b, c) => { ab.subVectors(b, a); ac.subVectors(c, a); n.crossVectors(ab, ac).normalize(); lines.push(" facet normal " + n.x.toFixed(4) + " " + n.y.toFixed(4) + " " + n.z.toFixed(4), "  outer loop", "   vertex " + a.x.toFixed(1) + " " + a.y.toFixed(1) + " " + a.z.toFixed(1), "   vertex " + b.x.toFixed(1) + " " + b.y.toFixed(1) + " " + b.z.toFixed(1), "   vertex " + c.x.toFixed(1) + " " + c.y.toFixed(1) + " " + c.z.toFixed(1), "  endloop", " endfacet"); }); lines.push("endsolid wardrobe"); saveBlobAs(new Blob([lines.join("\\n")], { type: "model/stl" }), fname("stl")); };
+        const exportGltf = () => { if (!THREE.GLTFExporter) { alert("GLTF exporter not loaded — try again."); return; } const meshes = g.children.filter((ch) => ch.isMesh); try { new THREE.GLTFExporter().parse(meshes.length ? meshes : g, (out) => { const bin = out instanceof ArrayBuffer; saveBlobAs(new Blob([bin ? out : JSON.stringify(out)], { type: bin ? "model/gltf-binary" : "model/gltf+json" }), fname(bin ? "glb" : "gltf")); }, { binary: true }); } catch (e) { alert("GLTF export failed: " + (e && e.message)); } };
+        exportRef.current = (fmt) => { if (fmt === "gltf") exportGltf(); else if (fmt === "stl") exportStl(); else exportObj(); };
+        opRef.current = (kind, arg, si, ci, k) => {
+          const cells = work[si] && work[si].columns[ci] && work[si].columns[ci].cells; if (!cells || !cells[k]) return;
+          if (kind === "convert") { const cv = WARD_CONVERTS.find((c) => c.kind === arg); if (cv) { cells[k].kind = cv.kind; cells[k].label = cv.label; cells[k].color = cv.color; } }
+          else if (kind === "add") { const isD = arg === "drawer"; const take = Math.min(cells[k].hMM - 60, isD ? 200 : 300); if (take < 60) return; cells[k].hMM -= take; cells.splice(k + 1, 0, { kind: isD ? "drawer" : "shelf", label: isD ? "Drawer" : "Shelf", color: isD ? "#ec4899" : "#22c55e", hMM: take }); }
+          else if (kind === "delete") { if (cells.length < 2) return; const h = cells[k].hMM; cells.splice(k, 1); cells[Math.min(k, cells.length - 1)].hMM += h; }
+          else if (kind === "lock") cells[k].locked = !cells[k].locked;
+          dirty = true; if (onEdit) onEdit(JSON.parse(JSON.stringify(work)));
+        };
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
         let drag = null, dirty = false;
         const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, cam); const hits = ray.intersectObjects(g.children, false); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
@@ -10611,33 +10635,57 @@ const frontendHTML = `<!DOCTYPE html>
         const onDown = (e) => { if (e.button !== 0) return; const u = pick(e); if (!u) return; e.preventDefault(); controls.enabled = false; drag = { si: u.si, ci: u.ci, k: u.k, y: e.clientY, wpp: worldPerPx(), moved: false }; selKey = u.key; const c0 = work[u.si].columns[u.ci].cells[u.k]; setSelInfo({ label: c0.label, mm: c0.hMM }); dirty = true; };
         const onMove = (e) => { if (!drag) return; const dMM = Math.round(-(e.clientY - drag.y) * drag.wpp / 5) * 5; if (!dMM) return; const cells = work[drag.si].columns[drag.ci].cells, cur = cells[drag.k], nb = cells[drag.k + 1] || cells[drag.k - 1]; if (!nb || cur.hMM + dMM < 60 || nb.hMM - dMM < 60) return; cur.hMM += dMM; nb.hMM -= dMM; drag.y = e.clientY; drag.moved = true; dirty = true; setSelInfo({ label: cur.label, mm: cur.hMM }); };
         const onUp = () => { if (!drag) return; const moved = drag.moved; controls.enabled = true; drag = null; if (moved && onEdit) onEdit(JSON.parse(JSON.stringify(work))); };
-        renderer.domElement.addEventListener("pointerdown", onDown);
+        const onCtx = (e) => { const u = pick(e); if (!u) return; e.preventDefault(); selKey = u.key; dirty = true; setMenu3d({ x: e.clientX, y: e.clientY, si: u.si, ci: u.ci, k: u.k }); };
+        renderer.domElement.addEventListener("pointerdown", onDown); renderer.domElement.addEventListener("contextmenu", onCtx);
         window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp);
-        let raf, lastMode = null, lastExpl = -1;
+        let raf, lastMode = null, lastExpl = -1, lastQ = "", lastLight = "";
         const loop = () => {
           raf = requestAnimationFrame(loop);
           if (dirty) { buildGroup(work); dirty = false; lastExpl = -1; }
           const ex = explRef.current;
           if (ex !== lastExpl) { g.children.forEach((ch) => { const b = ch.userData && ch.userData.base; if (b) ch.position.set(b.x + (b.x - Wd / 2) * ex, b.y + (b.y - H / 2) * ex, b.z + b.z * ex * 1.8); }); lastExpl = ex; }
           if (modeRef.current !== lastMode) { const m2 = modeRef.current; if (m2 === "front") cam.position.set(0, 0, span * 1.7); else if (m2 === "side") cam.position.set(span * 1.7, 0, 0); else if (m2 === "top") cam.position.set(0, span * 1.8, 0.01); else cam.position.set(span * 0.9, span * 0.32, span * 1.28); controls.target.set(0, 0, 0); controls.update(); lastMode = m2; }
+          clipPlane.constant = secRef.current > 0 ? (Wd / 2 - secRef.current * Wd) : 1e7;
           if (dl.castShadow !== shadRef.current) dl.castShadow = shadRef.current;
+          if (qualRef.current !== lastQ) { const q = qualRef.current, pr = q === "low" ? 1 : q === "high" ? Math.min(window.devicePixelRatio || 1, 2) : 1.5; renderer.setPixelRatio(pr); renderer.setSize(host.clientWidth || Wv, Hv); lastQ = q; }
+          if (lightRef.current !== lastLight) { const lp = lightRef.current; if (lp === "evening") { scene.background = new THREE.Color(0x2b3040); hemi.intensity = 0.5; dl.color.set(0xffd7a0); dl.intensity = 0.95; } else if (lp === "artificial") { scene.background = new THREE.Color(0xe9edf4); hemi.intensity = 0.8; dl.color.set(0xdfe8ff); dl.intensity = 0.9; } else { scene.background = new THREE.Color(0xf1f5f9); hemi.intensity = 1.05; dl.color.set(0xffffff); dl.intensity = 0.7; } lastLight = lp; }
+          controls.autoRotate = flyRef.current; controls.autoRotateSpeed = 1.4;
           controls.update(); renderer.render(scene, cam);
         }; loop();
         const onResize = () => { const w2 = host.clientWidth || Wv; cam.aspect = w2 / Hv; cam.updateProjectionMatrix(); renderer.setSize(w2, Hv); };
         window.addEventListener("resize", onResize);
-        return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); renderer.domElement.removeEventListener("pointerdown", onDown); window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
+        return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); renderer.domElement.removeEventListener("pointerdown", onDown); renderer.domElement.removeEventListener("contextmenu", onCtx); window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
       }, [opt, shutters]);
-      return (<div>
+      const mi3 = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
+      return (<div style={{ position: "relative" }}>
         <div className="flex items-center gap-2 mb-2 flex-wrap text-[11px]">
           <div className="flex gap-1">{[["persp", "Perspective"], ["front", "Front"], ["side", "Side"], ["top", "Top"]].map((m) => <button key={m[0]} onClick={() => setVmode(m[0])} className={"px-2 py-1 rounded border " + (vmode === m[0] ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{m[1]}</button>)}</div>
-          <label className="flex items-center gap-1 text-slate-500">Exploded <input type="range" min="0" max="120" value={Math.round(explode * 100)} onChange={(e) => setExplode(+e.target.value / 100)} style={{ width: 70 }} /></label>
+          <label className="flex items-center gap-1 text-slate-500">Exploded <input type="range" min="0" max="120" value={Math.round(explode * 100)} onChange={(e) => setExplode(+e.target.value / 100)} style={{ width: 58 }} /></label>
+          <label className="flex items-center gap-1 text-slate-500">Section <input type="range" min="0" max="95" value={Math.round(section * 100)} onChange={(e) => setSection(+e.target.value / 100)} style={{ width: 58 }} /></label>
           <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={shadows} onChange={(e) => setShadows(e.target.checked)} /> Shadows</label>
+          <select value={light} onChange={(e) => setLight(e.target.value)} className="px-1.5 py-1 border border-slate-200 rounded bg-white">{[["day", "☀ Day"], ["evening", "🌇 Evening"], ["artificial", "💡 Artificial"]].map((o) => <option key={o[0]} value={o[0]}>{o[1]}</option>)}</select>
+          <select value={quality} onChange={(e) => setQuality(e.target.value)} className="px-1.5 py-1 border border-slate-200 rounded bg-white">{[["low", "Low"], ["med", "Medium"], ["high", "High"]].map((o) => <option key={o[0]} value={o[0]}>{o[1]}</option>)}</select>
+          <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={fly} onChange={(e) => setFly(e.target.checked)} /> Fly</label>
           <button onClick={() => setShutters((s) => !s)} className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button>
-          <button onClick={() => exportRef.current && exportRef.current()} className="px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50">⬇ 3D (OBJ)</button>
+          <span className="text-slate-400">Export</span>
+          {["obj", "gltf", "stl"].map((f) => <button key={f} onClick={() => exportRef.current && exportRef.current(f)} className="px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 uppercase">{f === "gltf" ? "GLB" : f}</button>)}
           {selInfo && <span className="text-indigo-600 font-medium">{selInfo.label}: {selInfo.mm} mm</span>}
         </div>
-        <div className="text-[10px] text-slate-400 mb-1">click a shelf / drawer / rack & drag ↕ to resize · drag empty space to orbit</div>
+        <div className="text-[10px] text-slate-400 mb-1">click a shelf / drawer / rack & drag ↕ to resize · right-click for edit menu · drag empty space to orbit</div>
         <div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} />
+        {menu3d && (<React.Fragment>
+          <div className="fixed inset-0 z-40" onClick={() => setMenu3d(null)} onContextMenu={(e) => { e.preventDefault(); setMenu3d(null); }} />
+          <div style={{ position: "fixed", left: Math.min(menu3d.x, window.innerWidth - 190), top: Math.min(menu3d.y, window.innerHeight - 300), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1">
+            {mi3("+ Add shelf", () => { if (opRef.current) opRef.current("add", "shelf", menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
+            {mi3("+ Add drawer", () => { if (opRef.current) opRef.current("add", "drawer", menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
+            {mi3("🗑 Delete section", () => { if (opRef.current) opRef.current("delete", null, menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
+            <div className="border-t border-slate-100 my-1" />
+            <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
+            {WARD_CONVERTS.map((c) => mi3("• " + c.label, () => { if (opRef.current) opRef.current("convert", c.kind, menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); }))}
+            <div className="border-t border-slate-100 my-1" />
+            {mi3("🔒 Lock / Unlock", () => { if (opRef.current) opRef.current("lock", null, menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
+          </div>
+        </React.Fragment>)}
       </div>);
     }
 
