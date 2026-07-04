@@ -331,7 +331,7 @@ const UPLOAD_EXT: Record<string, string> = {
 };
 
 const DESIGN_TYPES = [
-  "Straight Kitchen", "L-Shape Kitchen", "U-Shape Kitchen", "Parallel Kitchen",
+  "Straight Kitchen", "L-Shape Kitchen", "U-Shape Kitchen", "G-Shape Kitchen", "Parallel Kitchen",
   "Island Kitchen", "Peninsula Kitchen", "Wardrobe", "Vanity Unit", "LCD/TV Panel", "Crockery Unit",
   "Mandir", "Wall Panel",
   "Office Furniture", "Study Table", "Bed Back Panel", "Reception Counter",
@@ -1516,6 +1516,19 @@ function buildKitchenLayout(type: string, dims: { wall: number; wallB?: number; 
     ];
     applied.push("U-Shape zone planning: Wall 1 Cooking (back) · Wall 2 Preparation (right) · Wall 3 Cleaning (left, sink).");
     applied.push("Two corners (prefer LeMans/Magic Corner, avoid dead corners); work triangle within 1200–7000 mm.");
+  } else if (t.includes("g-shape") || t.includes("g shape")) {
+    // G-Shape = U-Shape + a fourth peninsula return off the right wall (near-enclosed,
+    // one entry gap). Extra worktop / breakfast bar; open far end is seating.
+    const Lb = dims.wall, Ll = dims.wallB ?? 2400, Lr = dims.wallC ?? 2400;
+    const Lp = (dims as any).wallD ?? Math.round(Lb * 0.5);   // peninsula return length
+    runs = [
+      buildRun("Left Wall — Sink", Ll, { sink: true, cornerStart: true, adjoiningLen: Lb }),
+      buildCookingRun("Back Wall — Cooking", Lb),
+      buildRun("Right Wall — Storage", Lr, { cornerStart: true, adjoiningLen: Lb }),
+      buildRun("Peninsula — Breakfast/Prep", Lp, { cornerStart: true, openBack: true, adjoiningLen: Lr }),
+    ];
+    applied.push("G-Shape zoning: U-shape (cooking/prep/cleaning) + a fourth peninsula return for extra worktop / breakfast bar; near-enclosed with a single entry gap.");
+    applied.push("Three corners (prefer LeMans/Magic Corner, avoid dead corners); peninsula open end is seating with no wall cabinets above; walkway ≥1000 mm around the open end.");
   } else if (t.includes("parallel")) {
     const La = dims.wall, Lb = dims.wallB ?? La;
     runs = [
@@ -3348,6 +3361,7 @@ function renderPlan(type: string, runs: RunLayout[], dims: { wall: number; wallB
   const t = type.toLowerCase();
   if (t.includes("l-shape")) return renderPlanL(runs[0], runs[1], dims.wall, dims.wallB ?? 2400);
   if (t.includes("peninsula")) return renderPlanL(runs[0], runs[1], dims.wall, dims.wallB ?? 2400, { label: "Peninsula", openLeg: true });
+  if (t.includes("g-shape")) return renderPlanG(runs[0], runs[1], runs[2], runs[3], dims.wall, dims.wallB ?? 2400, dims.wallC ?? 2400, (runs[3] && runs[3].length) || Math.round(dims.wall * 0.5));
   if (t.includes("u-shape")) return renderPlanU(runs[0], runs[1], runs[2], dims.wall, dims.wallB ?? 2400, dims.wallC ?? 2400);
   if (t.includes("parallel")) return renderPlanParallel(runs[0], runs[1], dims.wall, dims.wallB ?? dims.wall);
   if (t.includes("island")) return renderPlanIsland(runs[0], runs[1], dims.wall, runs[1].length);
@@ -3546,6 +3560,44 @@ function renderPlanU(left: RunLayout, back: RunLayout, right: RunLayout, Lb: num
   p.push(`<text x="${xOf(Lb / 2)}" y="${oy - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
   p.push(`<text x="${ox + d * S / 2}" y="${oy + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">corner</text>`);
   p.push(`<text x="${rightX + d * S / 2}" y="${oy + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">corner</text>`);
+  p.push(`</svg>`);
+  return p.join("");
+}
+
+// G-Shape — a U-shape plus a peninsula return projecting left from the right wall's far end.
+function renderPlanG(left: RunLayout, back: RunLayout, right: RunLayout, peninsula: RunLayout, Lb: number, Ll: number, Lr: number, Lp: number): string {
+  const S = PLAN_S, d = STD.baseDepth, pad = 34, header = 20;
+  const maxSide = Math.max(Ll, Lr);
+  const W = Lb * S + pad * 2, H = maxSide * S + pad * 2 + header;
+  const ox = pad, oy = pad + header;
+  const xOf = (mm: number) => ox + mm * S, yOf = (mm: number) => oy + mm * S;
+  const rightX = ox + Lb * S - d * S;
+  const p = [svgHead(W, H)];
+  p.push(`<text x="${W / 2}" y="16" fill="#1e3a5f" font-size="11" text-anchor="middle">G-Shape — Plan (back ${Math.round(Lb)} · left ${Math.round(Ll)} · right ${Math.round(Lr)} · peninsula ${Math.round(Lp)} mm)</text>`);
+  // Walls: back (top), left, right
+  p.push(`<line x1="${ox}" y1="${oy}" x2="${xOf(Lb)}" y2="${oy}" stroke="#64748b" stroke-width="3"/>`);
+  p.push(`<line x1="${ox}" y1="${oy}" x2="${ox}" y2="${yOf(Ll)}" stroke="#64748b" stroke-width="3"/>`);
+  p.push(`<line x1="${xOf(Lb)}" y1="${oy}" x2="${xOf(Lb)}" y2="${yOf(Lr)}" stroke="#64748b" stroke-width="3"/>`);
+  // Back wall cabinets (hang down)
+  for (const c of back.base) p.push(`<rect x="${xOf(c.x)}" y="${oy}" width="${c.w * S}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+  // Left wall cabinets (extend right)
+  for (const c of left.base) { p.push(`<rect x="${ox}" y="${yOf(c.x)}" width="${d * S}" height="${c.w * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`); if (c.kind === "sink") p.push(sinkEllipse(ox + d * S / 2, yOf(c.x) + c.w * S / 2)); }
+  // Right wall cabinets (extend left)
+  for (const c of right.base) p.push(`<rect x="${rightX}" y="${yOf(c.x)}" width="${d * S}" height="${c.w * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+  // Peninsula bar (bottom, projecting LEFT from the right wall's far end)
+  const penTop = yOf(Lr) - d * S;
+  for (const c of (peninsula && peninsula.base) || []) {
+    const xr = xOf(Lb) - c.x * S;                 // right edge of this cab
+    const xl = xOf(Lb) - (c.x + c.w) * S;          // left edge
+    p.push(`<rect x="${Math.min(xl, xr)}" y="${penTop}" width="${Math.abs(xr - xl)}" height="${d * S}" fill="${planFill(c.kind)}" stroke="#2f74d0" stroke-width="1"/>`);
+    if (c.kind === "sink") p.push(sinkEllipse((xl + xr) / 2, penTop + d * S / 2));
+  }
+  // chimney mark + corner + peninsula labels
+  p.push(`<rect x="${xOf(Lb / 2 - GEN.chimneyWidth / 2)}" y="${oy - 6}" width="${GEN.chimneyWidth * S}" height="5" fill="#a5b4fc"/>`);
+  p.push(`<text x="${xOf(Lb / 2)}" y="${oy - 8}" fill="#3730a3" font-size="7" text-anchor="middle">chimney</text>`);
+  p.push(`<text x="${ox + d * S / 2}" y="${oy + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">corner</text>`);
+  p.push(`<text x="${rightX + d * S / 2}" y="${oy + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">corner</text>`);
+  p.push(`<text x="${xOf(Lb) - Lp * S / 2}" y="${penTop + d * S / 2}" fill="#475569" font-size="6" text-anchor="middle">peninsula</text>`);
   p.push(`</svg>`);
   return p.join("");
 }
@@ -4092,7 +4144,7 @@ function ssDetails(type: string, layout: any): { title: string; svg: string }[] 
   const t = (type || "").toLowerCase();
   if (t.includes("kitchen")) {
     const out = [{ title: "Base", svg: detailBaseCabinet() }, { title: "Wall", svg: detailWallCabinet() }, { title: "Counter", svg: detailCounterBacksplash() }];
-    if (t.includes("l-shape") || t.includes("u-shape") || t.includes("parallel") || t.includes("peninsula") || t.includes("island")) out.splice(2, 0, { title: "Corner", svg: detailCorner() });
+    if (t.includes("l-shape") || t.includes("u-shape") || t.includes("g-shape") || t.includes("parallel") || t.includes("peninsula") || t.includes("island")) out.splice(2, 0, { title: "Corner", svg: detailCorner() });
     return out.slice(0, 4);
   }
   if (t.includes("wardrobe")) return [{ title: "Track", svg: detailSlidingTrack() }, { title: "Carcass", svg: detailCarcassSection({ hang: true, topLabel: "Loft / Top Shelf" }) }, { title: "Base", svg: detailBaseCabinet() }];
@@ -4345,6 +4397,7 @@ function kitchenCompareSheet(): string {
     { type: "Parallel Kitchen", dims: { wall: 3000, wallB: 3000 } as any, desc: "Two parallel platforms — maximum efficiency & worktop." },
     { type: "L-Shape Kitchen", dims: { wall: 3000, wallB: 2400 } as any, desc: "Uses corner space; natural ergonomic work-triangle." },
     { type: "U-Shape Kitchen", dims: { wall: 3000, wallB: 2400, wallC: 2400 } as any, desc: "Best for larger rooms — ample storage & work area." },
+    { type: "G-Shape Kitchen", dims: { wall: 3000, wallB: 2400, wallC: 2400 } as any, desc: "U-shape plus a peninsula return — extra worktop & breakfast bar." },
   ];
   const items = defs.map((d) => { try { return { ...d, layout: buildLayout(d.type, d.dims) }; } catch { return { ...d, layout: null }; } });
   const W = SHEET_W, M = 22, gut = 16, innerW = W - M * 2;
@@ -7066,6 +7119,7 @@ const frontendHTML = `<!DOCTYPE html>
     //      placement as the 3D view (runs laid out on their walls in XZ). --------
     function planPlace(t, La, Lb, i) {
       if (t.includes("l-shape") || t.includes("peninsula")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 0], a: [0, 1], n: [1, 0] }][i];
+      if (t.includes("g-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }, { o: [Lb, Lb], a: [-1, 0], n: [0, -1] }][i];
       if (t.includes("u-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }][i];
       if (t.includes("parallel")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * STD_C.baseDepth], a: [1, 0], n: [0, -1] }][i];
       if (t.includes("island")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * STD_C.baseDepth], a: [1, 0], n: [0, 1] }][i];
@@ -7865,6 +7919,7 @@ const frontendHTML = `<!DOCTYPE html>
         // per-run placement: origin [x,z], axis along length [ax,az], normal into room [nx,nz]
         const place = (i) => {
           if (t.includes("l-shape") || t.includes("peninsula")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 0], a: [0, 1], n: [1, 0] }][i];
+          if (t.includes("g-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }, { o: [Lb, Lc], a: [-1, 0], n: [0, -1] }][i];
           if (t.includes("u-shape")) return [{ o: [0, 0], a: [0, 1], n: [1, 0] }, { o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [Lb, 0], a: [0, 1], n: [-1, 0] }][i];
           if (t.includes("parallel")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [0, 1000 + 2 * D], a: [1, 0], n: [0, -1] }][i];
           if (t.includes("island")) return [{ o: [0, 0], a: [1, 0], n: [0, 1] }, { o: [(La - (dims.wallB || La * 0.55)) / 2, 1000 + 2 * D], a: [1, 0], n: [0, 1] }][i];
@@ -9432,15 +9487,16 @@ const frontendHTML = `<!DOCTYPE html>
       const [beam, setBeam] = useState({ present: false, width: 0, drop: 300, height: 2100, wall: "Back", distance: 0, orientation: "horizontal" });
       const isL = type.indexOf("L-Shape") === 0;
       const isU = type.indexOf("U-Shape") === 0;
+      const isG = type.indexOf("G-Shape") === 0;
       const isParallel = type.indexOf("Parallel") === 0;
       const isIsland = type.indexOf("Island") === 0;
       const isPeninsula = type.indexOf("Peninsula") === 0;
       const isFurniture = type.indexOf("Kitchen") < 0;
       const isKitchen = !isFurniture;
-      const needsB = isL || isU || isParallel || isIsland || isPeninsula || isFurniture;
-      const wallLabel = isFurniture ? "Width (mm)" : isU ? "Back wall (mm)" : isL ? "Cooking wall — Run A (mm)"
+      const needsB = isL || isU || isG || isParallel || isIsland || isPeninsula || isFurniture;
+      const wallLabel = isFurniture ? "Width (mm)" : (isU || isG) ? "Back wall (mm)" : isL ? "Cooking wall — Run A (mm)"
         : isParallel ? "Run A — Cooking (mm)" : isIsland ? "Main wall (mm)" : isPeninsula ? "Main wall (mm)" : "Wall / Run length (mm)";
-      const wallBLabel = isFurniture ? "Height (mm)" : isU ? "Left wall (mm)" : isL ? "Sink wall — Run B (mm)"
+      const wallBLabel = isFurniture ? "Height (mm)" : (isU || isG) ? "Left wall (mm)" : isL ? "Sink wall — Run B (mm)"
         : isParallel ? "Run B — facing wall (mm)" : isPeninsula ? "Peninsula length (mm)" : "Island length (mm)";
 
       // 6.14 AI validation gate: room dimensions + wall/structure/point sanity before generation.
@@ -9460,7 +9516,7 @@ const frontendHTML = `<!DOCTYPE html>
         try {
           const body = { designType: type, wall: Number(wall) };
           if (needsB) body.wallB = Number(wallB);
-          if (isU) body.wallC = Number(wallC);
+          if (isU || isG) body.wallC = Number(wallC);
           if (isKitchen) { body.chimneyWidth = Number(chimneyWidth); body.hob = hob; body.dishwasher = dishwasher; body.hiunit = hiunit; body.utility = utility; body.handle = handle; body.applianceBrand = applianceBrand; }
           if (isKitchen && points.length) body.points = points.map((p) => ({ type: p.type, wall: p.wall, along: p.along, height: p.height, x: p.x, z: p.z }));   // 15.txt 5.18: marked 3D points drive placement
           if (isKitchen && structures.some((s) => s.kind === "window")) body.windows = structures.filter((s) => s.kind === "window").map((s) => ({ wall: s.wall, along: +s.pos || 0, width: +s.width || 1200, sill: +s.sill || 900, height: +s.height || 1200 }));   // 6.2 windows to respect
@@ -9639,7 +9695,7 @@ const frontendHTML = `<!DOCTYPE html>
               <input type="number" value={wallB} onChange={e => setWallB(e.target.value)} disabled={loading} min="900" max="8000"
                 className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50" />
             </React.Fragment>}
-            {isU && <React.Fragment>
+            {(isU || isG) && <React.Fragment>
               <label className="block text-xs text-slate-500">Right wall (mm)</label>
               <input type="number" value={wallC} onChange={e => setWallC(e.target.value)} disabled={loading} min="900" max="8000"
                 className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50" />
