@@ -167,6 +167,60 @@ try {
 } catch (e) { /* seed best-effort */ }
 
 // =============================================================================
+// Module 7 — MODULE LOCKING, ACCESS CONTROL & DASHBOARD
+// A strict module-access system: only Modular Kitchen + Wardrobe are active for
+// customers; every other module shows on the dashboard as "Coming Soon" and is
+// unlockable only by the Super Admin. Feature locks (exports / 3D / cutting list
+// / supplier directory / AI learning) and a role matrix round out the control.
+// =============================================================================
+sqlite.exec(`CREATE TABLE IF NOT EXISTS module_config (id TEXT PRIMARY KEY, label TEXT NOT NULL, status TEXT NOT NULL, updated_at INTEGER NOT NULL);`);
+sqlite.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+sqlite.exec(`CREATE TABLE IF NOT EXISTS access_requests (id TEXT PRIMARY KEY, module TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'request', name TEXT NOT NULL DEFAULT '', contact TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);`);
+// Canonical product-module catalogue — icon + default status (§7 dashboard table).
+const MODULE_CATALOG: { id: string; label: string; icon: string; tab: string; kind: string; status: string }[] = [
+  { id: "kitchen", label: "Modular Kitchen", icon: "🍳", tab: "Generator", kind: "product", status: "active" },
+  { id: "wardrobe", label: "Wardrobe", icon: "🚪", tab: "🚪 Wardrobe AI", kind: "product", status: "active" },
+  { id: "tv", label: "TV / LCD Unit", icon: "📺", tab: "Generator", kind: "product", status: "coming-soon" },
+  { id: "crockery", label: "Crockery Unit", icon: "🍽️", tab: "Generator", kind: "product", status: "coming-soon" },
+  { id: "vanity", label: "Vanity Unit", icon: "🚿", tab: "Generator", kind: "product", status: "coming-soon" },
+  { id: "mandir", label: "Mandir Unit", icon: "🛕", tab: "Generator", kind: "product", status: "coming-soon" },
+  { id: "shoe", label: "Shoe Rack", icon: "👟", tab: "Generator", kind: "product", status: "coming-soon" },
+  { id: "study", label: "Study Table", icon: "📚", tab: "Generator", kind: "product", status: "coming-soon" },
+  { id: "office", label: "Office Furniture", icon: "🗄️", tab: "Generator", kind: "product", status: "coming-soon" },
+  { id: "floating", label: "Floating Furniture", icon: "🎈", tab: "🏭 Fabrik", kind: "product", status: "coming-soon" },
+  { id: "walkin", label: "Walk-in Closet", icon: "🚶", tab: "🚪 Wardrobe AI", kind: "product", status: "coming-soon" },
+  { id: "custom", label: "Custom Cabinet", icon: "🧩", tab: "🏭 Fabrik", kind: "product", status: "coming-soon" },
+  // Pro / admin workspace tools — reachable by the Super Admin, not on the customer dashboard.
+  { id: "fabrik", label: "Manufacturing (Fabrik)", icon: "🏭", tab: "🏭 Fabrik", kind: "tool", status: "admin" },
+  { id: "library", label: "Reference Library", icon: "📁", tab: "Library", kind: "tool", status: "admin" },
+  { id: "learned", label: "What AI Learned", icon: "🧠", tab: "What AI Learned", kind: "tool", status: "admin" },
+  { id: "command", label: "Command Center", icon: "🛰️", tab: "Command Center", kind: "tool", status: "admin" },
+];
+const FEATURE_LOCK_KEYS = ["exports", "render3d", "cuttingList", "supplierDirectory", "aiLearning"];
+const ROLE_MATRIX: { role: string; access: string }[] = [
+  { role: "Super Admin", access: "Full access to every module, setting, database, user, payment, AI data, catalog, supplier & production report." },
+  { role: "Admin", access: "Access assigned by the Super Admin." },
+  { role: "Designer", access: "Only assigned projects / modules." },
+  { role: "Dealer / Agency", access: "Only purchased / approved modules." },
+  { role: "Customer", access: "Only paid / active modules." },
+  { role: "Factory Team", access: "Only production / cutting / packing data." },
+  { role: "Installer", access: "Only installation guides & site drawings." },
+];
+const ADMIN_PIN = process.env.FABRIK_ADMIN_PIN || "246810";   // Super-Admin PIN (env-overridable)
+const ADMIN_TOK = new Set<string>();   // in-memory admin session tokens
+function appSetting(key: string, def: string): string { try { const r: any = sqlite.prepare(`SELECT value FROM app_settings WHERE key=?`).get(key); return r ? r.value : def; } catch { return def; } }
+function featureLocks(): Record<string, boolean> {
+  const raw = appSetting("feature_locks", "{}"); let o: any = {}; try { o = JSON.parse(raw); } catch { o = {}; }
+  const out: Record<string, boolean> = {}; for (const k of FEATURE_LOCK_KEYS) out[k] = !!o[k]; return out;
+}
+// Merge the catalogue with any admin overrides → the live module list.
+function resolvedModules(): any[] {
+  const ov: Record<string, any> = {};
+  try { for (const r of sqlite.prepare(`SELECT * FROM module_config`).all() as any[]) ov[r.id] = r; } catch { /* table fresh */ }
+  return MODULE_CATALOG.map((m) => { const o = ov[m.id]; return { ...m, label: (o && o.label) || m.label, status: (o && o.status) || m.status }; });
+}
+
+// =============================================================================
 // 2. CACHING LAYER — In-Memory Redis-Like Store (with hit/miss observability)
 // PRODUCTION UPGRADE: Replace with Redis via ioredis
 //   import Redis from "ioredis"; const redis = new Redis(process.env.REDIS_URL);
@@ -6300,15 +6354,16 @@ const frontendHTML = `<!DOCTYPE html>
       await saveBlobAs(pdf.output("blob"), (type + "-" + ((result.id || "design") + "").slice(0, 8) + ".pdf").replace(/[^\\w.-]/g, "_"));   // 18.pdf §6: ask where to save
     };
 
-    function Tabs({ tab, setTab }) {
-      const items = ["Generator", "🚪 Wardrobe AI", "🏭 Fabrik", "Library", "What AI Learned", "Command Center", "Admin Dashboard"];
+    function Tabs({ tab, setTab, visTabs }) {
+      const items = (visTabs && visTabs.length) ? visTabs : ["🏠 Dashboard"];
+      const label = (t) => t === "Generator" ? "🍳 Modular Kitchen" : t;
       return (
         <div className="flex flex-wrap gap-2 mb-6">
           {items.map(t => (
             <button key={t} onClick={() => setTab(t)}
               className={"px-4 py-2 rounded-lg text-sm font-medium transition-colors border " +
                 (tab === t ? "bg-cyan-600 border-cyan-500 text-white" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300")}>
-              {t}
+              {label(t)}
             </button>
           ))}
         </div>
@@ -10853,16 +10908,48 @@ const frontendHTML = `<!DOCTYPE html>
         </div>
       );
     }
-    function AdminDashboard() {
+    function AdminDashboard({ admin, setAdmin, modules, features, roles, reloadModules }) {
       const [d, setD] = useState(null);
       const [bench, setBench] = useState(null);
       const [loading, setLoading] = useState(false);
-      const load = useCallback(async () => { const j = await api("/api/admin/dashboard"); setD(j.data); }, []);
-      useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+      const [pin, setPin] = useState("");
+      const [err, setErr] = useState("");
+      const [reqs, setReqs] = useState([]);
+      const load = useCallback(async () => { if (!admin) return; const j = await api("/api/admin/dashboard"); setD(j.data); }, [admin]);
+      useEffect(() => { if (!admin) return; load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load, admin]);
+      const loadReqs = useCallback(async () => { if (!admin) return; const j = await api("/api/admin/access-requests?token=" + encodeURIComponent(admin)); if (j.data) setReqs(j.data); }, [admin]);
+      useEffect(() => { loadReqs(); }, [loadReqs]);
       const runBench = async () => { setLoading(true); setBench(await api("/api/benchmark")); setLoading(false); };
-      if (!d) return <p className="text-slate-500 text-sm">Loading dashboard…</p>;
+      const login = async () => { setErr(""); const j = await api("/api/admin/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin }) }); if (j.data && j.data.token) { setAdmin(j.data.token); setPin(""); } else setErr(j.error || "Invalid PIN"); };
+      const logout = async () => { await api("/api/admin/logout?token=" + encodeURIComponent(admin), { method: "POST" }); setAdmin(null); };
+      const setStatus = async (m, status) => { await api("/api/admin/module?token=" + encodeURIComponent(admin), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, status }) }); reloadModules(); };
+      const toggleFeature = async (k) => { await api("/api/admin/features?token=" + encodeURIComponent(admin), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ [k]: !features[k] }) }); reloadModules(); };
+      if (!admin) return (
+        <div className="max-w-md mx-auto mt-4 bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+          <div className="text-lg font-bold text-slate-800">🔐 Super Admin Login</div>
+          <div className="text-xs text-slate-500 mt-1 mb-4">Full control of modules, access, catalogs, suppliers, payments &amp; AI data is restricted to the Super Admin.</div>
+          <input type="password" value={pin} onChange={(e) => setPin(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") login(); }} placeholder="Admin PIN" className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm mb-2" />
+          <button onClick={login} className="w-full px-3 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-700 text-white text-sm font-medium">Unlock Admin</button>
+          {err && <div className="text-xs text-rose-600 mt-2">{err}</div>}
+          <div className="mt-5 pt-4 border-t border-slate-100">
+            <div className="text-xs font-semibold text-slate-600 mb-1">Role-based access control</div>
+            {(roles || []).map((r, i) => (<div key={i} className="flex gap-2 text-[11px] py-0.5"><span className="font-medium text-slate-700 w-24 flex-shrink-0">{r.role}</span><span className="text-slate-500">{r.access}</span></div>))}
+          </div>
+        </div>
+      );
       return (
         <div className="space-y-5">
+          <div className="bg-white rounded-xl p-5 border border-slate-200">
+            <div className="flex items-center justify-between mb-3"><h3 className="text-sm font-semibold text-slate-700">🧩 Module &amp; Access Control</h3><button onClick={logout} className="text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Log out</button></div>
+            <div className="grid sm:grid-cols-2 gap-2 mb-4">
+              {(modules || []).map((m) => (<div key={m.id} className="flex items-center gap-2 border border-slate-100 rounded-lg px-2.5 py-1.5"><span className="text-lg">{m.icon}</span><span className="text-xs text-slate-700 flex-1 truncate">{m.label}</span><select value={m.status} onChange={(e) => setStatus(m, e.target.value)} className="text-[11px] border border-slate-200 rounded px-1 py-0.5"><option value="active">Active</option><option value="coming-soon">Coming Soon</option><option value="admin">Admin only</option><option value="disabled">Disabled</option></select></div>))}
+            </div>
+            <div className="text-xs font-semibold text-slate-600 mb-1">Feature locks</div>
+            <div className="flex flex-wrap gap-2 mb-4">{["exports", "render3d", "cuttingList", "supplierDirectory", "aiLearning"].map((k) => (<button key={k} onClick={() => toggleFeature(k)} className={"text-[11px] px-2.5 py-1 rounded-full border " + (features[k] ? "bg-rose-50 border-rose-300 text-rose-700" : "bg-emerald-50 border-emerald-200 text-emerald-700")}>{features[k] ? "🔒 " : "🔓 "}{k}</button>))}</div>
+            <div className="text-xs font-semibold text-slate-600 mb-1">Access requests ({reqs.length})</div>
+            <div className="max-h-32 overflow-auto text-[11px]">{reqs.length === 0 ? <span className="text-slate-400">No requests yet.</span> : reqs.map((r) => (<div key={r.id} className="flex gap-2 py-0.5 border-b border-slate-50"><span className="text-slate-700 font-medium">{r.module}</span><span className="text-slate-400">{r.kind}</span>{r.contact && <span className="text-slate-500">{r.contact}</span>}</div>))}</div>
+          </div>
+          {!d ? <p className="text-slate-500 text-sm">Loading analytics…</p> : (<div className="space-y-5">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <Stat label="References" value={d.references.total} />
             <Stat label="Learned" value={d.references.learned} accent="text-emerald-600" />
@@ -10937,6 +11024,7 @@ const frontendHTML = `<!DOCTYPE html>
               {(d.conflicts || []).map((m, i) => <div key={i} className="text-[11px] py-1 border-b border-slate-100 text-amber-700">⚠ {m}</div>)}
             </div>
           </div>
+          </div>)}
         </div>
       );
     }
@@ -12292,36 +12380,95 @@ const frontendHTML = `<!DOCTYPE html>
       );
     }
 
+    // Module 7: premium module dashboard — active tiles open the module; locked tiles show Coming Soon.
+    function Dashboard({ modules, features, admin, setTab }) {
+      const products = (modules || []).filter((m) => m.kind === "product");
+      const [reqMsg, setReqMsg] = useState({});
+      const request = async (m, kind) => {
+        await api("/api/access-request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ module: m.label, kind }) });
+        setReqMsg((prev) => ({ ...prev, [m.id]: kind === "notify" ? "✓ We will notify you" : "✓ Request sent to admin" }));
+      };
+      const activeCount = products.filter((m) => m.status === "active").length;
+      const lockedFeatures = Object.keys(features || {}).filter((k) => features[k]);
+      return (
+        <div className="space-y-6">
+          <div className="rounded-2xl bg-gradient-to-br from-cyan-500 via-blue-500 to-indigo-600 text-white p-6 shadow-lg">
+            <div className="text-2xl font-bold">Design Studio Dashboard</div>
+            <div className="text-white/80 text-sm mt-1">Pick a module to start — {activeCount} of {products.length} modules active{admin ? " · Super Admin: manage modules in the Admin Dashboard tab" : ""}.</div>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+            {products.map((m) => {
+              const active = m.status === "active";
+              return (
+                <div key={m.id} onClick={active ? () => setTab(m.tab) : undefined}
+                  className={"relative rounded-2xl border p-5 transition-all " + (active ? "bg-white border-slate-200 shadow-sm hover:shadow-lg hover:border-cyan-300 hover:-translate-y-0.5 cursor-pointer" : "bg-slate-50 border-slate-200")}>
+                  <div className={"text-4xl mb-3 " + (active ? "" : "opacity-40 grayscale")}>{m.icon}</div>
+                  <div className={"font-semibold text-sm " + (active ? "text-slate-800" : "text-slate-400")}>{m.label}</div>
+                  {active ? <div className="mt-2 inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">● Active</div>
+                    : <div className="mt-2 inline-flex items-center gap-1 text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">🔒 Coming Soon</div>}
+                  {active && <div className="mt-2 text-[11px] text-cyan-600 font-medium">Open →</div>}
+                  {!active && (reqMsg[m.id] ? <div className="mt-2 text-[10px] text-emerald-600 font-medium">{reqMsg[m.id]}</div> :
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      <button onClick={(e) => { e.stopPropagation(); request(m, "request"); }} className="text-[10px] px-2 py-0.5 rounded bg-slate-200 text-slate-600 hover:bg-slate-300">Request Access</button>
+                      <button onClick={(e) => { e.stopPropagation(); request(m, "notify"); }} className="text-[10px] px-2 py-0.5 rounded bg-slate-200 text-slate-600 hover:bg-slate-300">Notify Me</button>
+                    </div>)}
+                </div>
+              );
+            })}
+          </div>
+          {lockedFeatures.length > 0 && <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">🔒 Admin has locked: {lockedFeatures.join(", ")}. Contact the admin to enable.</div>}
+        </div>
+      );
+    }
+
     function App() {
-      const [tab, setTab] = useState("Generator");
+      // ?dev=1 (or ?tab=NAME) = developer/deep-link mode: every tab visible, opens on the named tab
+      // (default Generator) — real users land on the gated Dashboard. Keeps existing harnesses working.
+      const _params = (() => { try { return new URLSearchParams(window.location.search); } catch (e) { return new URLSearchParams(""); } })();
+      const devMode = _params.get("dev") === "1" || !!_params.get("tab");
+      const [tab, setTab] = useState(devMode ? (_params.get("tab") || "Generator") : "🏠 Dashboard");
       const [scanMsg, setScanMsg] = useState("");
       const [scanning, setScanning] = useState(false);
+      const [modules, setModules] = useState([]);          // Module 7: live module list
+      const [features, setFeatures] = useState({});        // feature locks
+      const [roles, setRoles] = useState([]);              // RBAC matrix
+      const [admin, setAdmin] = useState(null);            // Super-Admin session token
+      const loadModules = useCallback(async () => { const j = await api("/api/modules"); if (j.data) { setModules(j.data.modules); setFeatures(j.data.features); setRoles(j.data.roles); try { window.__adsFeatures = j.data.features; } catch (e) {} } }, []);
+      useEffect(() => { loadModules(); }, [loadModules]);
       const scan = async () => {
         setScanning(true);
         const j = await api("/api/learning/scan", { method: "POST" });
         setScanMsg(j.data ? ("Phase-1 scan: learned " + j.data.learned + ", duplicates " + j.data.duplicates + ", features " + j.data.featuresAdded) : "scan failed");
         setScanning(false);
       };
+      // Nav gating: Dashboard + active product modules + (admin ? workspace tools) + Admin Dashboard.
+      const prodTabs = modules.filter((m) => m.kind === "product" && m.status === "active" && m.tab).map((m) => m.tab);
+      const toolTabs = (admin || devMode) ? ["🏭 Fabrik", "Library", "What AI Learned", "Command Center"] : [];
+      const baseTabs = devMode ? ["🏠 Dashboard", "Generator", "🚪 Wardrobe AI"] : ["🏠 Dashboard"];
+      const seen = {}; const visTabs = baseTabs.concat(prodTabs, toolTabs, ["Admin Dashboard"]).filter((t) => (seen[t] ? false : (seen[t] = true)));
+      // If the current tab became hidden (e.g. admin logout), fall back to the dashboard (not in dev mode).
+      useEffect(() => { if (!devMode && visTabs.indexOf(tab) < 0) setTab("🏠 Dashboard"); }, [admin, modules.length]);
       return (
         <div className="max-w-6xl mx-auto px-4 py-8">
           <header className="mb-6">
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-cyan-600 via-blue-600 to-purple-600 bg-clip-text text-transparent">AI Design Studio</h1>
-            <p className="text-slate-500 text-sm">CAD Learning Engine + Modular Design Generation — Hono · Drizzle · SQLite · React · Zod. <span className="text-slate-400">(No cutting/nesting optimizer — by design.)</span></p>
-            <div className="mt-3 flex items-center gap-3">
+            <h1 className="text-3xl font-bold bg-gradient-to-r from-cyan-600 via-blue-600 to-purple-600 bg-clip-text text-transparent">Fabrik — AI Design Studio</h1>
+            <p className="text-slate-500 text-sm">From Sketch to Factory, in Real Time · Modular Kitchen &amp; Wardrobe design → manufacturing. {admin && <span className="text-emerald-600 font-medium">· Super Admin</span>}</p>
+            {admin && <div className="mt-3 flex items-center gap-3">
               <button onClick={scan} disabled={scanning} className="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50">{scanning ? "Scanning…" : "Run Phase-1 Learning Scan"}</button>
               {scanMsg && <span className="text-xs text-slate-500">{scanMsg}</span>}
-            </div>
+            </div>}
           </header>
-          <Tabs tab={tab} setTab={setTab} />
-          {tab === "Generator" && <Generator />}
-          {tab === "🚪 Wardrobe AI" && <WardrobeAI />}
-          {tab === "🏭 Fabrik" && <Fabrik />}
-          {tab === "Library" && <Library />}
-          {tab === "What AI Learned" && <WhatAILearned />}
-          {tab === "Command Center" && <CommandCenter />}
-          {tab === "Admin Dashboard" && <AdminDashboard />}
+          <Tabs key="tabs" tab={tab} setTab={setTab} visTabs={visTabs} />
+          {tab === "🏠 Dashboard" && <Dashboard key="dash" modules={modules} features={features} admin={admin} setTab={setTab} />}
+          {tab === "Generator" && <Generator key="gen" />}
+          {tab === "🚪 Wardrobe AI" && <WardrobeAI key="ward" />}
+          {tab === "🏭 Fabrik" && <Fabrik key="fab" />}
+          {tab === "Library" && <Library key="lib" />}
+          {tab === "What AI Learned" && <WhatAILearned key="learned" />}
+          {tab === "Command Center" && <CommandCenter key="cmd" />}
+          {tab === "Admin Dashboard" && <AdminDashboard key="admin" admin={admin} setAdmin={setAdmin} modules={modules} features={features} roles={roles} reloadModules={loadModules} />}
           <footer className="text-center text-xs text-slate-400 pt-8 mt-8 border-t border-slate-200">
-            Single-File Full-Stack · CAD learning, detection &amp; generation only · extend the SVG engine into a real canvas (drag/zoom/snap) + PWA for production.
+            Fabrik · Single-File Full-Stack · Modular furniture design → manufacturing · role-based module access.
           </footer>
         </div>
       );
@@ -13044,6 +13191,51 @@ app.post("/api/suppliers", async (c) => {   // admin add (unauth like the app's 
   return c.json({ data: { id, ok: true } });
 });
 app.delete("/api/suppliers/:id", (c) => { sqlite.prepare(`DELETE FROM suppliers WHERE id=?`).run(c.req.param("id")); return c.json({ data: { ok: true } }); });
+
+// ── Module 7: module locking / access control / dashboard ──
+function adminOk(c: any): boolean { const t = c.req.query("token") || (c.req.header("x-admin-token") || ""); return !!t && ADMIN_TOK.has(t); }
+// Public: live module list + feature locks + role matrix (drives the dashboard + nav gating).
+app.get("/api/modules", (c) => c.json({ data: { modules: resolvedModules(), features: featureLocks(), roles: ROLE_MATRIX } }));
+// Super-Admin login — PIN → in-memory session token.
+app.post("/api/admin/login", async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  if (String(b.pin || "") !== ADMIN_PIN) return c.json({ error: "Invalid admin PIN" }, 401);
+  const token = randomUUID(); ADMIN_TOK.add(token);
+  return c.json({ data: { token, role: "Super Admin" } });
+});
+app.post("/api/admin/logout", (c) => { const t = c.req.query("token") || c.req.header("x-admin-token") || ""; if (t) ADMIN_TOK.delete(t); return c.json({ data: { ok: true } }); });
+// Super-Admin: enable / disable / rename a module (status: active | coming-soon | admin | disabled).
+app.post("/api/admin/module", async (c) => {
+  if (!adminOk(c)) return c.json({ error: "admin only" }, 403);
+  const b = await c.req.json().catch(() => ({} as any));
+  const base = MODULE_CATALOG.find((m) => m.id === b.id); if (!base) return c.json({ error: "unknown module" }, 400);
+  const status = ["active", "coming-soon", "admin", "disabled"].includes(String(b.status)) ? String(b.status) : base.status;
+  const label = String(b.label || base.label).slice(0, 60);
+  sqlite.prepare(`INSERT INTO module_config(id,label,status,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,status=excluded.status,updated_at=excluded.updated_at`).run(base.id, label, status, Date.now());
+  return c.json({ data: { ok: true, modules: resolvedModules() } });
+});
+// Super-Admin: set feature locks (exports / render3d / cuttingList / supplierDirectory / aiLearning).
+app.post("/api/admin/features", async (c) => {
+  if (!adminOk(c)) return c.json({ error: "admin only" }, 403);
+  const b = await c.req.json().catch(() => ({} as any));
+  const cur = featureLocks(); for (const k of FEATURE_LOCK_KEYS) if (k in b) cur[k] = !!b[k];
+  sqlite.prepare(`INSERT INTO app_settings(key,value) VALUES('feature_locks',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(JSON.stringify(cur));
+  return c.json({ data: { ok: true, features: cur } });
+});
+// Public: capture a "Request Access" / "Notify Me" lead from a locked module tile.
+app.post("/api/access-request", async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const mod = String(b.module || "").slice(0, 60); if (!mod) return c.json({ error: "module required" }, 400);
+  const kind = ["request", "notify", "contact"].includes(String(b.kind)) ? String(b.kind) : "request";
+  sqlite.prepare(`INSERT INTO access_requests(id,module,kind,name,contact,created_at) VALUES(?,?,?,?,?,?)`).run(randomUUID(), mod, kind, String(b.name || "").slice(0, 80), String(b.contact || "").slice(0, 120), Date.now());
+  return c.json({ data: { ok: true } });
+});
+// Super-Admin: view captured access requests.
+app.get("/api/admin/access-requests", (c) => {
+  if (!adminOk(c)) return c.json({ error: "admin only" }, 403);
+  const rows = sqlite.prepare(`SELECT * FROM access_requests ORDER BY created_at DESC LIMIT 200`).all();
+  return c.json({ data: rows });
+});
 
 // =============================================================================
 // WARDROBE OPTIONS ENGINE — lifestyle-driven 3-option wardrobe designer.

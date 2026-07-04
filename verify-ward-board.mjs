@@ -21,7 +21,7 @@ try {
     const orig = URL.createObjectURL.bind(URL);
     URL.createObjectURL = (blob) => { try { const fr = new FileReader(); fr.onload = () => { window.__caught = fr.result; }; fr.readAsDataURL(blob); } catch (e) {} return orig(blob); };
   });
-  await page.goto(B + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(B + "/?dev=1", { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForSelector("#root", { timeout: 10000 });
   let ready = false;
   for (let i = 0; i < 40; i++) { await sleep(300); if (await page.evaluate(() => /Wardrobe AI/.test(document.body.innerText))) { ready = true; break; } }

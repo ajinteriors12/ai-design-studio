@@ -20,7 +20,7 @@ try {
   const client = await page.target().createCDPSession();
   await client.send("Page.setDownloadBehavior", { behavior: "allow", downloadPath: dir });
 
-  await page.goto(B + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(B + "/?dev=1", { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForSelector("#root", { timeout: 10000 });
   await page.evaluate(() => { window.__adsSaveSilent = true; });
   await sleep(600);

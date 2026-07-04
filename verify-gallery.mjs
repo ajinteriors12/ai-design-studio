@@ -33,7 +33,7 @@ try {
   const victim = (await post("/api/generate", { designType: "Straight Kitchen", wall: 3000 })).data;
   const slug = String(victim.id).slice(0, 8);
 
-  await page.goto(B + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(B + "/?dev=1", { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForSelector("#root", { timeout: 10000 });
   // the app compiles JSX in-browser via Babel — wait until the UI is actually interactive
   // (can't use networkidle here: the app holds a persistent SSE connection, so it never goes idle)

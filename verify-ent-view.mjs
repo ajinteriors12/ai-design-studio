@@ -22,7 +22,7 @@ try {
   let designId = null;
   page.on("request", (req) => { const m = req.url().match(/render\/jobs\?design=([\w-]+)/); if (m) designId = m[1]; });
 
-  await page.goto(B + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(B + "/?dev=1", { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForSelector("#root", { timeout: 10000 });
   await sleep(600);
   await clickByText(page, /generate design/i);

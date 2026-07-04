@@ -11,7 +11,7 @@ try {
   const errors = [];
   page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
   page.on("pageerror", (e) => errors.push(String(e)));
-  await page.goto(B + "/", { waitUntil: "networkidle2", timeout: 30000 });
+  await page.goto(B + "/?dev=1", { waitUntil: "networkidle2", timeout: 30000 });
   await page.waitForSelector("#root", { timeout: 10000 });
   await new Promise((r) => setTimeout(r, 800));
   ok("page renders, no console errors", errors.length === 0, errors.slice(0, 2).join(" | "));

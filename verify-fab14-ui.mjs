@@ -13,7 +13,7 @@ try {
   const errs = [];
   page.on("console", (m) => { if (m.type() === "error") errs.push(m.text()); });
   page.on("pageerror", (e) => errs.push(String(e)));
-  await page.goto(B, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.goto(B + "/?dev=1", { waitUntil: "domcontentloaded", timeout: 60000 });
   for (let i = 0; i < 40; i++) { if (await page.evaluate(() => /Fabrik/i.test(document.body.innerText))) break; await sleep(400); }
   ok("Fabrik tab present", await clickBtnRe(page, /Fabrik/i));
   await sleep(1500);

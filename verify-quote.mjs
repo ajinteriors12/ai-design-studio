@@ -17,7 +17,7 @@ try {
   let designId = null;
   page.on("request", (rq) => { const m = rq.url().match(/\/api\/designs\/([0-9a-f-]{8,})\/quote/); if (m) designId = m[1]; });
 
-  await page.goto(B + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(B + "/?dev=1", { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForSelector("#root", { timeout: 10000 });
   await sleep(600);
   await clickByText(page, /generate design/i);

@@ -23,7 +23,7 @@ page.on("console", (m) => { if (m.type() === "error") errs.push(m.text()); });
 page.on("pageerror", (e) => errs.push(String(e)));
 
 console.log("\n== Generator: kitchen Math Engine ==");
-await page.goto(BASE, { waitUntil: "domcontentloaded" });
+await page.goto(BASE + "?dev=1", { waitUntil: "domcontentloaded" });
 ok(await waitText(page, /Generate Design/i), "app mounted");
 // set U-Shape kitchen if a type selector exists, then generate
 await clickText(page, /^Generate Design$/i) || await clickText(page, /Generate Design/i);
