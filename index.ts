@@ -10557,6 +10557,9 @@ const frontendHTML = `<!DOCTYPE html>
         const Wd = opt.width, H = opt.height, D = opt.depth, plinth = opt.plinth || 100, loftH = opt.hasLoft ? opt.loftH : 0, loftD = opt.loftDepth || 550, usableH = opt.usableH, T = 18;
         const box = (w, h, d, x, y, z, col, opac) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac })); m.position.set(x, y, z); g.add(m); const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: 0x94a3b8 })); e.position.copy(m.position); g.add(e); return m; };
         const WOOD = 0xd8c4a4, SHELF = 0xc9b391;
+        // §14 applied catalog finish → colour the shutters / drawer fronts by scope
+        const fin = opt.finishes || {};
+        const finHex = (scope) => { const m = fin[scope] || fin.all; if (!m) return null; const raw = String(m.hex || m.colorCode || ""); return /^#?[0-9a-fA-F]{6}$/.test(raw) ? parseInt(raw.replace("#", ""), 16) : null; };
         box(Wd, T, D, Wd / 2, plinth + T / 2, 0, WOOD);
         box(Wd, T, D, Wd / 2, H - T / 2, 0, WOOD);
         box(T, H, D, T / 2, H / 2, 0, WOOD);
@@ -10572,13 +10575,13 @@ const frontendHTML = `<!DOCTYPE html>
           for (const cell of col.cells) {
             const ch = cell.hMM, yt = yb + ch, k = cell.kind, colColor = parseInt((cell.color || "#cbd5e1").slice(1), 16) || 0xcbd5e1;
             if (k === "shelf" || k === "handbag" || k === "shoe" || k === "kidsShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, SHELF);
-            else if (k === "drawer" || k === "jewellery" || k === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, colColor); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
+            else if (k === "drawer" || k === "jewellery" || k === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, finHex("drawers") || finHex(sec.kind) || colColor); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
             else if (k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: 0x9aa3af, metalness: 0.6, roughness: 0.4 })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); g.add(rod); }
             else if (k === "safe" || k === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, colColor, 0.85);
             yb = yt;
           }
         }
-        if (shutters) for (const sec of opt.sections) for (const col of sec.columns) box(col.w - 4, H - 20, T, col.x + col.w / 2, H / 2, D / 2 - T / 2, 0xbcd0e6, 0.28);
+        if (shutters) for (const sec of opt.sections) for (const col of sec.columns) { const fh = finHex(sec.kind); box(col.w - 4, H - 20, T, col.x + col.w / 2, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }
         g.position.set(-Wd / 2, -H / 2, 0); scene.add(g);
         const span = Math.max(Wd, H, D);
         cam.position.set(span * 0.9, span * 0.32, span * 1.28);
@@ -10717,6 +10720,9 @@ const frontendHTML = `<!DOCTYPE html>
       const [saved, setSaved] = useState([]);        // saved wardrobe designs (gallery)
       const [showSaved, setShowSaved] = useState(false);
       const [saveMsg, setSaveMsg] = useState("");
+      const [finScope, setFinScope] = useState("all");   // §14 catalog finish application
+      const [finQ, setFinQ] = useState("");
+      const [finRes, setFinRes] = useState([]);
       const reTimer = React.useRef(null);
       const firstSig = React.useRef(true);
       const suppressGen = React.useRef(false);       // skip auto-regen when restoring a saved design
@@ -10741,6 +10747,9 @@ const frontendHTML = `<!DOCTYPE html>
       React.useEffect(() => { generate(); }, []);
       const sig = JSON.stringify(input);
       React.useEffect(() => { if (firstSig.current) { firstSig.current = false; return; } if (suppressGen.current) { suppressGen.current = false; return; } const id = setTimeout(() => generate(), 400); return () => clearTimeout(id); }, [sig]);
+      React.useEffect(() => { if (!finQ) { setFinRes([]); return; } const id = setTimeout(() => { fetch("/api/materials?limit=24&q=" + encodeURIComponent(finQ)).then((r) => r.json()).then((j) => setFinRes((j.data && j.data.materials) || [])).catch(() => {}); }, 300); return () => clearTimeout(id); }, [finQ]);
+      const applyFinish = (m) => setInput((p) => { const f = Object.assign({}, p.finishes || {}); f[finScope] = { materialId: m.materialId, code: m.code, brand: m.brand, colorName: m.colorName, hex: m.hex, finishType: m.finishType, customerRate: m.customerRate }; return Object.assign({}, p, { finishes: f }); });
+      const clearFinish = (scope) => setInput((p) => { const f = Object.assign({}, p.finishes || {}); delete f[scope]; return Object.assign({}, p, { finishes: f }); });
       const loadSaved = () => fetch("/api/wardrobe/saved").then((r) => r.json()).then((j) => setSaved(j.data || [])).catch(() => {});
       React.useEffect(() => { loadSaved(); }, []);
       const saveToGallery = () => {
@@ -10858,6 +10867,21 @@ const frontendHTML = `<!DOCTYPE html>
               {[["beamProj", "Projection ↓ (mm)", 50, 600, 10], ["beamSoffit", "Soffit height (mm)", 1600, 2900, 10], ["beamPos", "Position from left (mm)", 0, 4000, 10], ["beamWidth", "Beam width (mm)", 100, 3000, 10]].map((f) => (<label key={f[0]} className="flex flex-col gap-1"><span className="text-[11px] text-orange-600">{f[1]}</span><input type="number" value={input[f[0]]} min={f[2]} max={f[3]} step={f[4]} onChange={(e) => set(f[0], +e.target.value)} className="px-2 py-1 border border-orange-300 rounded text-xs" /></label>))}
             </div>)}
             {input.beamOn && sel && sel.beamNote && <div className="mt-2 text-[11px] text-orange-700">{sel.beamNote}</div>}
+          </div>
+          <div className="mt-2 rounded-lg bg-fuchsia-50 border border-fuchsia-200 p-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <span className="text-[12px] font-semibold text-fuchsia-700">🎨 Finish / material (catalog)</span>
+              <div className="flex items-center gap-2">
+                <select value={finScope} onChange={(e) => setFinScope(e.target.value)} className="px-2 py-1 border border-fuchsia-300 rounded text-xs bg-white">{[["all", "All shutters"], ["male", "Male section"], ["female", "Female section"], ["loft", "Loft shutters"], ["drawers", "Drawer fronts"]].map((o) => <option key={o[0]} value={o[0]}>{o[1]}</option>)}</select>
+                <input value={finQ} onChange={(e) => setFinQ(e.target.value)} placeholder="search brand / colour / code…" className="px-2 py-1 border border-fuchsia-300 rounded text-xs" style={{ width: 180 }} />
+              </div>
+            </div>
+            {Object.keys(input.finishes || {}).filter((k) => (input.finishes || {})[k]).length > 0 && (<div className="flex flex-wrap gap-1.5 mt-2">
+              {Object.keys(input.finishes || {}).filter((k) => input.finishes[k]).map((k) => { const m = input.finishes[k]; return (<span key={k} className="inline-flex items-center gap-1 bg-white border border-fuchsia-200 rounded-full px-2 py-0.5 text-[11px]"><span style={{ width: 12, height: 12, borderRadius: 3, background: (m.hex || "#ccc"), border: "1px solid #cbd5e1" }} />{k}: {m.colorName} <span className="text-slate-400">{m.brand}</span><button onClick={() => clearFinish(k)} className="text-slate-300 hover:text-red-500">✕</button></span>); })}
+            </div>)}
+            {finQ && finRes.length > 0 && (<div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 mt-2" style={{ maxHeight: 168, overflow: "auto" }}>
+              {finRes.map((m) => (<button key={m.materialId} onClick={() => applyFinish(m)} className="flex flex-col items-center gap-0.5 p-1 rounded border border-slate-200 bg-white hover:border-fuchsia-400" title={(m.brand || "") + " " + (m.code || "") + " · " + (m.finishType || "")}><span style={{ width: "100%", height: 20, borderRadius: 3, background: (m.hex || "#ccc") }} /><span className="text-[9px] text-slate-600 truncate w-full text-center">{m.colorName}</span></button>))}
+            </div>)}
           </div>
         </div>
 
@@ -11915,8 +11939,11 @@ function buildWardrobeOption(strategy: string, input: any): any {
     columns: sections.reduce((a: number, s: any) => a + s.columns.length, 0), totalItems: allCells.length,
   };
   const label = strategy === "maxHanging" ? "Max Hanging" : strategy === "maxFolding" ? "Max Folding" : "Balanced";
-  return { id: strategy, label, strategy, width, height, depth, plinth: S.plinth, hasLoft, loftH, loftDepth: S.loftDepth, usableH, sections, stats, beam, beamNote };
+  const finishes = (input.finishes && typeof input.finishes === "object") ? input.finishes : {};
+  return { id: strategy, label, strategy, width, height, depth, plinth: S.plinth, hasLoft, loftH, loftDepth: S.loftDepth, usableH, sections, stats, beam, beamNote, finishes };
 }
+// §14 resolve a section/scope's applied catalog finish (falls back to the whole-project "all").
+function wardFinishFor(finishes: any, scope: string): any { return (finishes && (finishes[scope] || finishes.all)) || null; }
 function wardReports(opt: any): any {
   const S = WARDROBE_STD, sqft = (mm2: number) => mm2 / 92903;
   const H = opt.height, D = opt.depth, W = opt.width;
@@ -12009,7 +12036,21 @@ function wardBOQ(opt: any): any {
   mat += line("18mm BWP ply (2440×1220)", nest.sheets, "sheet", R.sheet18);
   if (backSheets) mat += line("6mm back panel", backSheets, "sheet", R.sheet6);
   mat += line("Edge banding (1-2mm PVC)", ebM, "m", R.edgeBandM);
-  mat += line("Laminate / finish", finishArea, "sq.ft", R.laminate);
+  // §14 per-scope catalog finish costing: bill each applied material by its own rate + area.
+  const fin = opt.finishes || {};
+  const scopeArea = (kind: string) => opt.sections.filter((s: any) => s.kind === kind).reduce((a: number, s: any) => a + s.columns.reduce((b: number, c: any) => b + (c.w * (c.top || opt.height)), 0), 0) / 92903;
+  const anyFin = fin.all || fin.male || fin.female || fin.loft || fin.drawers;
+  if (anyFin) {
+    const done = new Set();
+    const bill = (scope: string, area: number) => { const m = wardFinishFor(fin, scope); if (!m || area <= 0) return; const key = m.materialId || (m.brand + m.code); const rate = +m.customerRate || R.laminate; mat += line("Finish [" + scope + "] " + (m.colorName || "") + " · " + (m.brand || "") + " " + (m.code || ""), area, "sq.ft", rate); };
+    bill("male", scopeArea("male")); bill("female", scopeArea("female"));
+    const loftArea = opt.hasLoft ? (opt.width * opt.loftDepth) / 92903 : 0; if (fin.loft || fin.all) bill("loft", loftArea);
+    const drwArea = panels.filter((p) => p.part.indexOf("Drawer") >= 0).reduce((a, p) => a + p.w * p.h * p.qty, 0) / 92903; if (fin.drawers || fin.all) bill("drawers", drwArea);
+    // any scope without a resolved finish falls back to plain laminate on the remaining area
+    const billed = scopeArea("male") * (wardFinishFor(fin, "male") ? 1 : 0) + scopeArea("female") * (wardFinishFor(fin, "female") ? 1 : 0);
+    const rem = Math.max(0, finishArea - billed - (fin.loft || fin.all ? loftArea : 0) - (fin.drawers || fin.all ? drwArea : 0));
+    if (rem > 0.5) mat += line("Laminate / finish (remaining)", rem, "sq.ft", R.laminate);
+  } else mat += line("Laminate / finish", finishArea, "sq.ft", R.laminate);
   let hw = 0;
   hw += line("Soft-close hinges (110°)", counts.shutters * 3, "no", R.hinge);
   if (counts.drawerFronts) hw += line("Tandem drawer channels", counts.drawerFronts, "pair", R.slide);
@@ -12060,6 +12101,13 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
   p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif">`);
   p.push(`<rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
   p.push(`<text x="${x0}" y="20" fill="#0f172a" font-size="13" font-weight="700">${esc(opt.label)}</text>`);
+  { // §14 applied-finish swatch strip
+    const fEnt = Object.keys(opt.finishes || {}).filter((k) => opt.finishes[k]);
+    if (fEnt.length) {
+      let fx = x0 + 34; p.push(`<text x="${x0}" y="34" fill="#475569" font-size="7.5" font-weight="600">Finish:</text>`);
+      for (const k of fEnt.slice(0, 4)) { const m = opt.finishes[k]; const raw = String(m.hex || m.colorCode || "#cccccc"); const hx = /^#?[0-9a-fA-F]{6}$/.test(raw) ? (raw[0] === "#" ? raw : "#" + raw) : "#cccccc"; const lbl = k + " · " + String(m.colorName || "").slice(0, 16); p.push(`<rect x="${fx}" y="28" width="8" height="8" rx="1.5" fill="${hx}" stroke="#94a3b8" stroke-width="0.4"/><text x="${fx + 11}" y="34.5" fill="#475569" font-size="7">${esc(lbl)}</text>`); fx += 11 + lbl.length * 3.5 + 14; }
+    }
+  }
   p.push(`<text x="${W - padR}" y="20" fill="#64748b" font-size="10" text-anchor="end">${opt.width}×${opt.height}×${opt.depth} mm</text>`);
   const loftPx = opt.hasLoft ? opt.loftH * scale : 0, plinthPx = S.plinth * scale, floorY = y0 + hpx - plinthPx, usableTopY = y0 + loftPx;
   for (const sec of opt.sections) {
