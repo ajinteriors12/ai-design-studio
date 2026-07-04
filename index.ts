@@ -23,6 +23,7 @@ import { eq, desc } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 import { readFileSync as fsRead, writeFileSync as fsWrite, existsSync as fsExists } from "fs";
 import { inflateSync, inflateRawSync } from "zlib";   // PNG IDAT decode (GIF encoder #6) + ZIP member inflate (§8 multi-upload)
+import { networkInterfaces } from "os";   // LAN IP discovery for the on-network deploy
 import { transformSync as esbuildTransform } from "esbuild";   // precompile the client JSX at boot (no slow in-browser Babel)
 
 // =============================================================================
@@ -13280,13 +13281,16 @@ app.put("/api/designs/:id/client", async (c) => {
 // =============================================================================
 
 const PORT = Number(process.env.PORT) || 3000;
-serve({ fetch: app.fetch, port: PORT }, () => {
+const HOST = process.env.HOST || "0.0.0.0";   // bind all interfaces → reachable across the LAN
+serve({ fetch: app.fetch, port: PORT, hostname: HOST }, () => {
+  const lanIps: string[] = [];
+  try { const nets = networkInterfaces(); for (const name of Object.keys(nets)) for (const ni of (nets[name] || [])) if (ni && ni.family === "IPv4" && !ni.internal) lanIps.push(ni.address); } catch { }
   console.log("=".repeat(64));
   console.log("  AI Design Studio — CAD Learning + Design Generation");
-  console.log(`  UI:         http://localhost:${PORT}/`);
-  console.log(`  Learn scan: POST http://localhost:${PORT}/api/learning/scan`);
-  console.log(`  Generate:   POST http://localhost:${PORT}/api/generate`);
-  console.log(`  Dashboard:  http://localhost:${PORT}/api/admin/dashboard`);
+  console.log(`  This machine:  http://localhost:${PORT}/`);
+  for (const ip of lanIps) console.log(`  On the LAN:     http://${ip}:${PORT}/`);
+  if (!lanIps.length) console.log("  (no LAN IPv4 found — check your network connection)");
+  console.log(`  Generate:      POST /api/generate`);
   console.log("  Constraint: NO cutting/nesting/CNC optimizer included.");
   console.log("=".repeat(64));
 });
