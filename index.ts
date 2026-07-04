@@ -10564,6 +10564,7 @@ const frontendHTML = `<!DOCTYPE html>
         box(Wd, H, 6, Wd / 2, H / 2, -D / 2 + 3, 0xb7a488);
         box(Wd, plinth, D - 40, Wd / 2, plinth / 2, 0, 0x8a7b63);
         if (loftH > 0) box(Wd, T, loftD, Wd / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
+        if (opt.beam && opt.beam.on) { const bh = H - opt.beam.soffit; if (bh > 20) box(opt.beam.width, bh, D + 40, opt.beam.pos + opt.beam.width / 2, opt.beam.soffit + bh / 2, 0, 0xf97316, 0.6); }
         for (const sec of opt.sections) for (const col of sec.columns) {
           const cw = col.w, cxMid = col.x + cw / 2;
           if (col.x > 0) box(T, usableH, D, col.x, plinth + usableH / 2, 0, WOOD);
@@ -10704,7 +10705,7 @@ const frontendHTML = `<!DOCTYPE html>
 
     // ── Wardrobe AI Designer — lifestyle-driven 3-option wardrobe generator (§2-§12) ──
     function WardrobeAI() {
-      const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300 });
+      const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300, beamOn: false, beamProj: 200, beamSoffit: 2100, beamPos: 600, beamWidth: 900 });
       const [data, setData] = useState(null);
       const [meta, setMeta] = useState(null);
       const [busy, setBusy] = useState(false);
@@ -10724,6 +10725,7 @@ const frontendHTML = `<!DOCTYPE html>
       const generate = (ov) => {
         setBusy(true); setEdited(null);
         const body = Object.assign({}, input, ov || {});
+        body.beam = body.beamOn ? { proj: +body.beamProj, soffit: +body.beamSoffit, pos: +body.beamPos, width: +body.beamWidth } : {};
         fetch("/api/wardrobe/options", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
           .then((r) => r.json()).then((j) => { setData(j.data); setSelIdx((j.data && j.data.recommendation && j.data.recommendation.bestIndex) || 0); setBusy(false); })
           .catch(() => setBusy(false));
@@ -10849,6 +10851,13 @@ const frontendHTML = `<!DOCTYPE html>
             <div className="sm:col-span-2 text-[11px] font-semibold text-slate-500">🎚 Interactive editor (live)</div>
             {slider("maleRatio", "Male section", 25, 75, 1, "%")}{slider("loftH", "Loft height", 300, 750, 10, "")}
             {slider("drawerH", "Drawer height", 100, 300, 10, "")}{slider("shoeH", "Shoe shelf", 200, 400, 10, "")}
+          </div>
+          <div className="mt-2 rounded-lg bg-orange-50 border border-orange-200 p-3">
+            <label className="flex items-center gap-2 text-[12px] font-semibold text-orange-700"><input type="checkbox" checked={input.beamOn} onChange={(e) => set("beamOn", e.target.checked)} /> 🏗 Room beam (AI adapts the wardrobe under it)</label>
+            {input.beamOn && (<div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[["beamProj", "Projection ↓ (mm)", 50, 600, 10], ["beamSoffit", "Soffit height (mm)", 1600, 2900, 10], ["beamPos", "Position from left (mm)", 0, 4000, 10], ["beamWidth", "Beam width (mm)", 100, 3000, 10]].map((f) => (<label key={f[0]} className="flex flex-col gap-1"><span className="text-[11px] text-orange-600">{f[1]}</span><input type="number" value={input[f[0]]} min={f[2]} max={f[3]} step={f[4]} onChange={(e) => set(f[0], +e.target.value)} className="px-2 py-1 border border-orange-300 rounded text-xs" /></label>))}
+            </div>)}
+            {input.beamOn && sel && sel.beamNote && <div className="mt-2 text-[11px] text-orange-700">{sel.beamNote}</div>}
           </div>
         </div>
 
@@ -11865,6 +11874,12 @@ function buildWardrobeOption(strategy: string, input: any): any {
   const hasLoft = height >= 2400;
   const loftH = hasLoft ? wardClamp(Math.round(+input.loftH || S.loftBand), 300, 750) : 0;
   const usableH = height - S.plinth - loftH;
+  // §13 beam awareness: a ceiling beam (projection + soffit-height + span) lowers the columns
+  // beneath it to the soffit and splits the loft to clear it.
+  const bm = input.beam || {};
+  const beam: any = { on: false, proj: Math.round(+bm.proj || 0), soffit: Math.round(+bm.soffit || 0), pos: wardClamp(Math.round(+bm.pos || 0), 0, Math.max(0, width - 100)), width: 0 };
+  beam.width = wardClamp(Math.round(+bm.width || 0), 0, width - beam.pos);
+  beam.on = beam.proj > 0 && beam.width > 0 && beam.soffit > 800 && beam.soffit < height - 150;
   const L = { traditional: input.traditional || "medium", western: input.western || "medium", winter: input.winter || "low", luxury: input.luxury || "low", professionals: +input.professionals || 0 };
   const secs: { kind: string; label: string; frac: number }[] = [];
   if (male > 0 && female > 0) { secs.push({ kind: "male", label: "Male", frac: maleRatio }); secs.push({ kind: "female", label: "Female", frac: 1 - maleRatio }); }
@@ -11878,10 +11893,18 @@ function buildWardrobeOption(strategy: string, input: any): any {
     const n = wardClamp(Math.round(secW / S.colTarget), 1, 4);
     const colW = secW / n;
     const recipes = wardSectionRecipes(sec.kind, n, strategy, L);
-    const columns = recipes.map((r, i) => ({ x: Math.round(x + i * colW), w: Math.round(colW), recipe: r, cells: wardColumn(r, usableH).map(c => ({ ...c, color: WARD_COLORS[c.kind] || "#cbd5e1" })) }));
+    const columns = recipes.map((r, i) => {
+      const cx = Math.round(x + i * colW), cwv = Math.round(colW);
+      const ub = beam.on && (cx < beam.pos + beam.width) && (cx + cwv > beam.pos);
+      const top = ub ? beam.soffit : height, cLoft = ub ? 0 : loftH;
+      const cUse = Math.max(300, top - S.plinth - cLoft);
+      return { x: cx, w: cwv, recipe: r, top, loftH: cLoft, underBeam: ub, cells: wardColumn(r, cUse).map(c => ({ ...c, color: WARD_COLORS[c.kind] || "#cbd5e1" })) };
+    });
     sections.push({ kind: sec.kind, label: sec.label, x: Math.round(x), width: secW, columns });
     x += secW;
   }
+  const beamCols = sections.reduce((a: number, s: any) => a + s.columns.filter((c: any) => c.underBeam).length, 0);
+  const beamNote = beam.on ? "Beam " + beam.proj + " mm proj · soffit " + beam.soffit + " mm · " + beam.pos + "–" + (beam.pos + beam.width) + " mm: " + beamCols + " column(s) lowered to the soffit · loft split to clear the beam · beam-boxed with a filler above." : null;
   const allCells = sections.flatMap((s: any) => s.columns.flatMap((c: any) => c.cells));
   const cnt = (pred: (k: string) => boolean) => allCells.filter((c: any) => pred(c.kind)).length;
   const stats = {
@@ -11892,7 +11915,7 @@ function buildWardrobeOption(strategy: string, input: any): any {
     columns: sections.reduce((a: number, s: any) => a + s.columns.length, 0), totalItems: allCells.length,
   };
   const label = strategy === "maxHanging" ? "Max Hanging" : strategy === "maxFolding" ? "Max Folding" : "Balanced";
-  return { id: strategy, label, strategy, width, height, depth, plinth: S.plinth, hasLoft, loftH, loftDepth: S.loftDepth, usableH, sections, stats };
+  return { id: strategy, label, strategy, width, height, depth, plinth: S.plinth, hasLoft, loftH, loftDepth: S.loftDepth, usableH, sections, stats, beam, beamNote };
 }
 function wardReports(opt: any): any {
   const S = WARDROBE_STD, sqft = (mm2: number) => mm2 / 92903;
@@ -12060,7 +12083,21 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
     }
     p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#94a3b8" stroke-width="0.7"/>`);
   }
-  if (opt.hasLoft) { p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="${WARD_COLORS.loft}55" stroke="#a16207" stroke-width="0.8"/>`); p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(y0 + loftPx / 2 + 3).toFixed(1)}" fill="#a16207" font-size="9" font-weight="600" text-anchor="middle">LOFT ${opt.loftH} mm</text>`); }
+  const beam = opt.beam && opt.beam.on ? opt.beam : null;
+  const ubOf = (cx: number, cw: number) => beam && cx < beam.pos + beam.width && cx + cw > beam.pos;
+  if (opt.hasLoft) {
+    if (beam) {
+      // loft only over columns that clear the beam
+      for (const sec of opt.sections) for (const col of sec.columns) { if (ubOf(col.x, col.w)) continue; const lx = xOf(col.x), lw = col.w * scale; p.push(`<rect x="${lx.toFixed(1)}" y="${y0.toFixed(1)}" width="${lw.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="${WARD_COLORS.loft}55" stroke="#a16207" stroke-width="0.8"/>`); }
+      p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(y0 + loftPx / 2 + 3).toFixed(1)}" fill="#a16207" font-size="9" font-weight="600" text-anchor="middle">LOFT (split) ${opt.loftH} mm</text>`);
+    } else { p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="${WARD_COLORS.loft}55" stroke="#a16207" stroke-width="0.8"/>`); p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(y0 + loftPx / 2 + 3).toFixed(1)}" fill="#a16207" font-size="9" font-weight="600" text-anchor="middle">LOFT ${opt.loftH} mm</text>`); }
+  }
+  if (beam) {
+    const bx = xOf(beam.pos), bw = beam.width * scale, byBottom = y0 + (opt.height - beam.soffit) * scale;
+    p.push(`<rect x="${bx.toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${(byBottom - y0).toFixed(1)}" fill="#f9731633" stroke="#ea580c" stroke-width="1" stroke-dasharray="4 3"/>`);
+    p.push(`<line x1="${bx.toFixed(1)}" y1="${byBottom.toFixed(1)}" x2="${(bx + bw).toFixed(1)}" y2="${byBottom.toFixed(1)}" stroke="#ea580c" stroke-width="1.4"/>`);
+    p.push(`<text x="${(bx + bw / 2).toFixed(1)}" y="${(y0 + (byBottom - y0) / 2 + 3).toFixed(1)}" fill="#c2410c" font-size="8" font-weight="700" text-anchor="middle">BEAM ↓${beam.proj}</text>`);
+  }
   p.push(`<rect x="${x0.toFixed(1)}" y="${floorY.toFixed(1)}" width="${wpx.toFixed(1)}" height="${plinthPx.toFixed(1)}" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>`);
   p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${hpx.toFixed(1)}" fill="none" stroke="#334155" stroke-width="1.4"/>`);
   for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${dx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#475569" stroke-width="1.6"/>`); }
@@ -12192,10 +12229,14 @@ app.post("/api/wardrobe/rerender", async (c) => {
     o.hasLoft = !!o.hasLoft && o.height >= 2400;
     o.loftH = o.hasLoft ? wardClamp(Math.round(+o.loftH || 600), 300, 750) : 0;
     o.usableH = o.height - o.plinth - o.loftH;
+    // beam-aware per-column target: columns under the beam renormalise to the soffit height
+    const beam = o.beam && o.beam.on && +o.beam.proj > 0 && +o.beam.width > 0 ? o.beam : null;
     for (const sec of o.sections) for (const col of (sec.columns || [])) {
+      const ub = beam && col.x < beam.pos + beam.width && col.x + col.w > beam.pos;
+      const target = Math.max(300, (ub ? beam.soffit : o.height) - o.plinth - (ub ? 0 : o.loftH));
       let cells = (col.cells || []).filter((cc: any) => cc && +cc.hMM > 0).map((cc: any) => ({ kind: String(cc.kind || "shelf"), label: String(cc.label || ""), hMM: Math.max(40, Math.round(+cc.hMM)), color: WARD_COLORS[String(cc.kind)] || "#cbd5e1", locked: !!cc.locked }));
-      if (!cells.length) cells = [{ kind: "shelf", label: "Shelf", hMM: o.usableH, color: WARD_COLORS.shelf }];
-      const sum = cells.reduce((a: number, cc: any) => a + cc.hMM, 0) || 1, f = o.usableH / sum;
+      if (!cells.length) cells = [{ kind: "shelf", label: "Shelf", hMM: target, color: WARD_COLORS.shelf }];
+      const sum = cells.reduce((a: number, cc: any) => a + cc.hMM, 0) || 1, f = target / sum;
       cells.forEach((cc: any) => cc.hMM = Math.round(cc.hMM * f));
       col.cells = cells;
     }
