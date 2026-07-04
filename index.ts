@@ -10872,9 +10872,11 @@ const frontendHTML = `<!DOCTYPE html>
       const [finScope, setFinScope] = useState("all");   // §14 catalog finish application
       const [finQ, setFinQ] = useState("");
       const [finRes, setFinRes] = useState([]);
-      const [boardSvg, setBoardSvg] = useState("");       // presentation-board composite SVG
+      const [boardSvg, setBoardSvg] = useState("");       // presentation-board composite SVG (schematic)
       const [boardBusy, setBoardBusy] = useState(false);
       const [boardHero, setBoardHero] = useState(null);   // captured 3D snapshot used as the board hero
+      const [photoBoard, setPhotoBoard] = useState("");   // AI photoreal board (Stability renders) — overrides boardSvg when set
+      const [photoBusy, setPhotoBusy] = useState(false);
       const reTimer = React.useRef(null);
       const firstSig = React.useRef(true);
       const suppressGen = React.useRef(false);       // skip auto-regen when restoring a saved design
@@ -10908,6 +10910,7 @@ const frontendHTML = `<!DOCTYPE html>
       React.useEffect(() => {
         if (repTab !== "Board") return;
         const o = edited || (data && data.options && data.options[selIdx]); if (!o) return;
+        setPhotoBoard("");   // any design/selection change invalidates a previously rendered photoreal board
         setBoardBusy(true);
         const id = setTimeout(() => {
           fetch("/api/wardrobe/presentation-board", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option: o, input, hero: boardHero }) })
@@ -10915,6 +10918,14 @@ const frontendHTML = `<!DOCTYPE html>
         }, 120);
         return () => clearTimeout(id);
       }, [repTab, selIdx, edited, boardHero, data, input]);
+      // Photoreal board: turn the current wardrobe spec into 3 Stability renders + drop them into the board.
+      const renderPhotoBoard = () => {
+        const o = edited || (data && data.options && data.options[selIdx]); if (!o) return;
+        setPhotoBusy(true);
+        fetch("/api/wardrobe/photoreal-board", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option: o, input }) })
+          .then((r) => r.json()).then((j) => { if (j.data && j.data.svg) setPhotoBoard(j.data.svg); else alert((j && j.message) || "Photoreal render failed."); setPhotoBusy(false); })
+          .catch(() => { setPhotoBusy(false); alert("Photoreal render failed — check the server / Stability key."); });
+      };
       const saveToGallery = () => {
         if (!data || !data.options) return;
         fetch("/api/wardrobe/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data, input, selIdx }) })
@@ -10982,8 +10993,9 @@ const frontendHTML = `<!DOCTYPE html>
       const best = data && data.recommendation ? data.recommendation.bestIndex : 0;
       const exportBoardPdf = async () => {
         const jsPDF = window.jspdf && window.jspdf.jsPDF; if (!jsPDF) { alert("jsPDF not loaded yet — try again in a moment."); return; }
-        if (!boardSvg) { alert("Open the Board tab first."); return; }
-        let png; try { png = await svgToPng(boardSvg, 2); } catch (e) { alert("Board render failed."); return; }
+        const useSvg = photoBoard || boardSvg;
+        if (!useSvg) { alert("Open the Board tab first."); return; }
+        let png; try { png = await svgToPng(useSvg, 2); } catch (e) { alert("Board render failed."); return; }
         const P = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
         const PW = P.internal.pageSize.getWidth(), PH = P.internal.pageSize.getHeight(), M = 18;
         const aw = png.w || 1536, ah = png.h || 1024; let iw = PW - 2 * M, ih = iw * ah / aw; if (ih > PH - 2 * M) { ih = PH - 2 * M; iw = ih * aw / ah; }
@@ -11132,13 +11144,15 @@ const frontendHTML = `<!DOCTYPE html>
           {repTab === "3D" && sel && <Wardrobe3D opt={sel} onEdit={commitEdit} onSnap={(d) => { setBoardHero(d); setRepTab("Board"); }} />}
           {repTab === "Board" && sel && (<div>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
-              <button onClick={exportBoardPdf} disabled={!boardSvg} className="px-2.5 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 text-xs font-medium disabled:opacity-50">⬇ Board PDF</button>
-              <a href={"/api/wardrobe/presentation-board?inline=1"} onClick={(e) => { e.preventDefault(); if (boardSvg) saveBlobAs(new Blob([boardSvg], { type: "image/svg+xml" }), "wardrobe-board-" + wardSlug((sel || {}).label) + ".svg"); }} className="px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium cursor-pointer">⬇ SVG</a>
+              <button onClick={renderPhotoBoard} disabled={photoBusy} className="px-2.5 py-1 rounded bg-gradient-to-r from-violet-600 to-indigo-600 text-white hover:from-violet-700 hover:to-indigo-700 text-xs font-semibold disabled:opacity-50 shadow-sm">{photoBusy ? "✨ Rendering photoreal…" : "✨ Photoreal Board"}</button>
+              {photoBoard && <button onClick={() => setPhotoBoard("")} className="px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs">↺ Schematic board</button>}
+              <button onClick={exportBoardPdf} disabled={!(photoBoard || boardSvg)} className="px-2.5 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 text-xs font-medium disabled:opacity-50">⬇ Board PDF</button>
+              <a href={"/api/wardrobe/presentation-board?inline=1"} onClick={(e) => { e.preventDefault(); const s = photoBoard || boardSvg; if (s) saveBlobAs(new Blob([s], { type: "image/svg+xml" }), "wardrobe-board-" + wardSlug((sel || {}).label) + ".svg"); }} className="px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs font-medium cursor-pointer">⬇ SVG</a>
               {boardHero && <button onClick={() => setBoardHero(null)} className="px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-xs">↻ Use drawing hero</button>}
-              <span className="text-[11px] text-slate-400">{boardHero ? "Hero = your captured 3D render" : "Tip: open the 3D tab → 🖼 To Board to drop a live 3D render into the hero"}</span>
-              {boardBusy && <span className="text-[11px] text-indigo-500">rendering…</span>}
+              <span className="text-[11px] text-slate-400">{photoBoard ? "Hero = AI photoreal renders (Stability)" : boardHero ? "Hero = your captured 3D render" : "✨ renders photoreal · or 3D tab → 🖼 To Board for a live hero"}</span>
+              {(boardBusy || photoBusy) && <span className="text-[11px] text-indigo-500">rendering…</span>}
             </div>
-            <div className="rounded-lg border border-slate-200 overflow-auto bg-slate-100 p-2" style={{ maxHeight: 620 }} dangerouslySetInnerHTML={{ __html: boardSvg }} />
+            <div className="rounded-lg border border-slate-200 overflow-auto bg-slate-100 p-2" style={{ maxHeight: 620 }} dangerouslySetInnerHTML={{ __html: photoBoard || boardSvg }} />
           </div>)}
         </div>
         <div className="text-[11px] text-slate-400 px-1">Learns from your uploaded references in the <span className="font-medium text-slate-500">Library</span> tab (vision-read wardrobes drive the Generator). This module applies Indian standard arrangements to your lifestyle inputs.</div>
@@ -12514,6 +12528,70 @@ app.post("/api/wardrobe/presentation-board", async (c) => {
     if (c.req.query("inline")) { c.header("Content-Type", "image/svg+xml"); return c.body(svg); }
     return c.json({ data: { svg } });
   } catch (err) { console.error(err); return c.json({ error: "Presentation board failed" }, 500); }
+});
+
+// ── Photoreal presentation board ──────────────────────────────────────────────
+// Turn the wardrobe SPEC into three photorealistic renders (hero / angle / inside)
+// via Stability text-to-image, then drop them into the presentation-board slots so
+// the sheet reads like a studio render instead of a schematic. Fully server-side —
+// no browser 3D capture needed. Any render that fails falls back to the line view.
+function wardrobePhotoPrompt(opt: any, input: any, view: string): string {
+  const finAll = (opt.finishes && (opt.finishes.all || opt.finishes.male || opt.finishes.female)) || null;
+  const finish = String((finAll && (finAll.colorName ? (finAll.brand ? finAll.brand + " " + finAll.colorName : finAll.colorName) : finAll.brand)) || (input && input.finish) || "matte laminate").toLowerCase();
+  const wardType = String((input && input.wardType) || "hinged").toLowerCase().replace(/wardrobe/i, "").trim() || "hinged";
+  const kinds = new Set((opt.sections || []).map((s: any) => String(s.kind)));
+  const secParts: string[] = [];
+  if (kinds.has("male")) secParts.push("a men's section with formal shirts, trousers and suits neatly hung on wooden hangers");
+  if (kinds.has("female")) secParts.push("a women's section with sarees, kurtis and dresses hung, folded stacks on shelves");
+  if (kinds.has("kids")) secParts.push("a compact kids section");
+  if (!secParts.length) secParts.push("neatly organised hanging clothes and folded garments");
+  const loft = opt.hasLoft ? "full-width loft storage cabinets above with woven storage baskets, " : "";
+  const dims = opt.width + "mm wide and " + opt.height + "mm tall";
+  const base = "Photorealistic architectural interior render of a modern Indian " + wardType + " wardrobe, " + finish + " finish shutters, " + dims + ", built into a contemporary well-lit bedroom, warm ambient lighting with under-shelf LED strips, professional real-estate interior photography, ultra realistic, physically based materials, soft global illumination, ambient occlusion, 8k, interior-design magazine quality, cinematic";
+  if (view === "angle")
+    return "Three-quarter angled perspective view of a closed " + wardType + " wardrobe wall, tall floor-to-ceiling shutters in " + finish + " finish with slim vertical steel bar handles, " + loft + "seen from the side of a contemporary bedroom, " + base;
+  if (view === "inside")
+    return "Detailed close-up interior view of an open wardrobe revealing " + secParts.join(", ") + ", chrome hanging rods, white soft-close laminate drawers, accessory shelves, warm LED-lit interior, " + base;
+  // hero: front-on, several shutters open, both sections visible
+  return "Front elevation view of a " + wardType + " wardrobe with several shutters open revealing the fully organised interior: " + secParts.join(" on one side, ") + ", chrome hanging rods, folded garments on open shelves, white laminate drawers with steel handles, a shoe rack at the bottom, a full-length mirror on one door, " + loft + base;
+}
+function stabilityGenerate(prompt: string, aspect: string, key: string): Promise<string | null> {
+  const fd = new FormData();
+  fd.append("prompt", prompt);
+  fd.append("negative_prompt", "cartoon, illustration, cgi look, low poly, flat shading, blurry, noisy, distorted geometry, warped cabinets, extra rooms, doorways, watermark, text, logo, people, oversaturated, fisheye");
+  fd.append("aspect_ratio", aspect);
+  fd.append("output_format", "jpeg");   // JPEG keeps the composed board small enough for WARD_IMG_RE (<5MB/img)
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 90000);
+  return fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
+    method: "POST", headers: { Authorization: "Bearer " + key, Accept: "image/*" }, body: fd as any, signal: ac.signal,
+  }).then(async (res) => {
+    if (!res.ok) { console.error("stability " + res.status + ": " + (await res.text().catch(() => "")).slice(0, 160)); return null; }
+    const buf = Buffer.from(await res.arrayBuffer());
+    return "data:image/jpeg;base64," + buf.toString("base64");
+  }).catch((e) => { console.error("stability fetch:", String(e && e.message || e).slice(0, 120)); return null; })
+    .finally(() => clearTimeout(t));
+}
+app.post("/api/wardrobe/photoreal-board", async (c) => {
+  try {
+    const key = loadAIKeys().stability;
+    if (!key) return c.json({ error: "no-key", message: "Add a Stability AI key to ai-keys.json to render a photoreal board." }, 400);
+    const body = await c.req.json().catch(() => ({} as any));
+    let opt = body.option || body.opt;
+    if (!opt || !Array.isArray(opt.sections)) return c.json({ error: "no wardrobe option supplied" }, 400);
+    if (!opt.views || !opt.views.Front) opt.views = { Front: renderWardrobeElevationSvg(opt, "front"), Internal: renderWardrobeElevationSvg(opt, "internal"), Top: renderWardrobeTopSvg(opt), Side: renderWardrobeSideSvg(opt), Loft: renderWardrobeLoftSvg(opt) };
+    const input = body.input || {};
+    const [hero, angle, inside] = await Promise.all([
+      stabilityGenerate(wardrobePhotoPrompt(opt, input, "hero"), "3:2", key),
+      stabilityGenerate(wardrobePhotoPrompt(opt, input, "angle"), "3:2", key),
+      stabilityGenerate(wardrobePhotoPrompt(opt, input, "inside"), "3:2", key),
+    ]);
+    const images: any = {};
+    if (hero) images.hero = hero; if (angle) images.angle = angle; if (inside) images.inside = inside;
+    const got = Object.keys(images).length;
+    if (!got) return c.json({ error: "render-failed", message: "Stability AI returned no images (check the key / quota)." }, 502);
+    const svg = wardrobePresentationBoard(opt, input, images);
+    return c.json({ data: { svg, rendered: got } });
+  } catch (err) { console.error(err); return c.json({ error: "Photoreal board failed" }, 500); }
 });
 function wardrobeOptions(input: any): any {
   const options = ["maxHanging", "balanced", "maxFolding"].map((st) => {

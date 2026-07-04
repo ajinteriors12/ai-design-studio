@@ -71,6 +71,7 @@ dbg-*
 !verify-ward-reassign.mjs
 !verify-ward-quote.mjs
 !verify-ward-board.mjs
+!verify-photoboard-ui.mjs
 
 # editor/OS
 .DS_Store
