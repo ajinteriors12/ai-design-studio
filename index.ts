@@ -10543,6 +10543,13 @@ const frontendHTML = `<!DOCTYPE html>
       const ref = React.useRef(null);
       const [shutters, setShutters] = useState(false);
       const [selInfo, setSelInfo] = useState(null);   // {label, mm} of the picked/dragged cell
+      const [vmode, setVmode] = useState("persp");     // §13.4 view mode
+      const [explode, setExplode] = useState(0);       // §13.4 exploded view (0..1.2)
+      const [shadows, setShadows] = useState(false);   // §13.6
+      const modeRef = React.useRef("persp"), explRef = React.useRef(0), shadRef = React.useRef(false), exportRef = React.useRef(null);
+      React.useEffect(() => { modeRef.current = vmode; }, [vmode]);
+      React.useEffect(() => { explRef.current = explode; }, [explode]);
+      React.useEffect(() => { shadRef.current = shadows; }, [shadows]);
       React.useEffect(() => {
         const THREE = window.THREE; if (!THREE || !ref.current || !opt) return;
         const host = ref.current, Wv = host.clientWidth || 640, Hv = 440;
@@ -10562,10 +10569,11 @@ const frontendHTML = `<!DOCTYPE html>
         const finHex = (scope) => { const m = fin[scope] || fin.all; if (!m) return null; const raw = String(m.hex || m.colorCode || ""); return /^#?[0-9a-fA-F]{6}$/.test(raw) ? parseInt(raw.replace("#", ""), 16) : null; };
         const work = JSON.parse(JSON.stringify(opt.sections));   // mutable working copy for 3D drag
         let selKey = null;
-        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac })); m.position.set(x, y, z); if (ud) m.userData = ud; g.add(m); if (!(opac != null && opac < 0.02)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8 })); e.position.copy(m.position); g.add(e); } return m; };
+        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; g.add(m); if (!(opac != null && opac < 0.02)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8 })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; g.add(e); } return m; };
         const buildGroup = (secsData) => {
           while (g.children.length) { const chd = g.children.pop(); if (chd.geometry) chd.geometry.dispose(); if (chd.material) chd.material.dispose(); }
           const usableH = H - plinth - loftH;
+          const floor = new THREE.Mesh(new THREE.PlaneGeometry(Wd * 2.4, D * 3.2), new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 1 })); floor.rotation.x = -Math.PI / 2; floor.position.set(Wd / 2, -1, 0); floor.receiveShadow = true; g.add(floor);
           box(Wd, T, D, Wd / 2, plinth + T / 2, 0, WOOD); box(Wd, T, D, Wd / 2, H - T / 2, 0, WOOD);
           box(T, H, D, T / 2, H / 2, 0, WOOD); box(T, H, D, Wd - T / 2, H / 2, 0, WOOD);
           box(Wd, H, 6, Wd / 2, H / 2, -D / 2 + 3, 0xb7a488); box(Wd, plinth, D - 40, Wd / 2, plinth / 2, 0, 0x8a7b63);
@@ -10580,7 +10588,7 @@ const frontendHTML = `<!DOCTYPE html>
               const key = si + "-" + ci + "-" + k, ud = { cell: true, si, ci, k, key }, hl = key === selKey;
               if (kind === "shelf" || kind === "handbag" || kind === "shoe" || kind === "kidsShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
               else if (kind === "drawer" || kind === "jewellery" || kind === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, hl ? 0x818cf8 : (finHex("drawers") || finHex(sec.kind) || colColor), null, ud); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
-              else if (kind.toLowerCase().indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4 })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = ud; g.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
+              else if (kind.toLowerCase().indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4 })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: cxMid, y: yt - 70, z: 0 } }); rod.castShadow = true; g.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
               else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
               yb = yt;
             });
@@ -10592,6 +10600,10 @@ const frontendHTML = `<!DOCTYPE html>
         const span = Math.max(Wd, H, D);
         cam.position.set(span * 0.9, span * 0.32, span * 1.28);
         const controls = new THREE.OrbitControls(cam, renderer.domElement); controls.target.set(0, 0, 0); controls.update();
+        renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        dl.position.set(span * 0.7, span * 1.6, span); dl.target.position.set(0, -H / 2, 0); scene.add(dl.target);
+        dl.castShadow = shadRef.current; dl.shadow.mapSize.set(1024, 1024); { const sc = dl.shadow.camera, r = span * 1.3; sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r; sc.near = span * 0.1; sc.far = span * 6; sc.updateProjectionMatrix(); }
+        exportRef.current = () => { const lines = ["# AI Design Studio — wardrobe (OBJ)"]; let vBase = 0; g.updateMatrixWorld(true); const v = new THREE.Vector3(); g.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes && o.geometry.attributes.position && !(o.material && o.material.opacity != null && o.material.opacity < 0.02)) { const pos = o.geometry.attributes.position, idx = o.geometry.index; for (let i = 0; i < pos.count; i++) { v.fromBufferAttribute(pos, i); o.localToWorld(v); lines.push("v " + v.x.toFixed(1) + " " + v.y.toFixed(1) + " " + v.z.toFixed(1)); } if (idx) for (let i = 0; i < idx.count; i += 3) lines.push("f " + (idx.getX(i) + 1 + vBase) + " " + (idx.getX(i + 1) + 1 + vBase) + " " + (idx.getX(i + 2) + 1 + vBase)); vBase += pos.count; } }); saveBlobAs(new Blob([lines.join("\\n")], { type: "text/plain" }), "wardrobe-" + String(opt.label || "design").toLowerCase().replace(/[^\\w-]+/g, "-") + ".obj"); };
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
         let drag = null, dirty = false;
         const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, cam); const hits = ray.intersectObjects(g.children, false); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
@@ -10601,12 +10613,32 @@ const frontendHTML = `<!DOCTYPE html>
         const onUp = () => { if (!drag) return; const moved = drag.moved; controls.enabled = true; drag = null; if (moved && onEdit) onEdit(JSON.parse(JSON.stringify(work))); };
         renderer.domElement.addEventListener("pointerdown", onDown);
         window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp);
-        let raf; const loop = () => { raf = requestAnimationFrame(loop); if (dirty) { buildGroup(work); dirty = false; } controls.update(); renderer.render(scene, cam); }; loop();
+        let raf, lastMode = null, lastExpl = -1;
+        const loop = () => {
+          raf = requestAnimationFrame(loop);
+          if (dirty) { buildGroup(work); dirty = false; lastExpl = -1; }
+          const ex = explRef.current;
+          if (ex !== lastExpl) { g.children.forEach((ch) => { const b = ch.userData && ch.userData.base; if (b) ch.position.set(b.x + (b.x - Wd / 2) * ex, b.y + (b.y - H / 2) * ex, b.z + b.z * ex * 1.8); }); lastExpl = ex; }
+          if (modeRef.current !== lastMode) { const m2 = modeRef.current; if (m2 === "front") cam.position.set(0, 0, span * 1.7); else if (m2 === "side") cam.position.set(span * 1.7, 0, 0); else if (m2 === "top") cam.position.set(0, span * 1.8, 0.01); else cam.position.set(span * 0.9, span * 0.32, span * 1.28); controls.target.set(0, 0, 0); controls.update(); lastMode = m2; }
+          if (dl.castShadow !== shadRef.current) dl.castShadow = shadRef.current;
+          controls.update(); renderer.render(scene, cam);
+        }; loop();
         const onResize = () => { const w2 = host.clientWidth || Wv; cam.aspect = w2 / Hv; cam.updateProjectionMatrix(); renderer.setSize(w2, Hv); };
         window.addEventListener("resize", onResize);
         return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); renderer.domElement.removeEventListener("pointerdown", onDown); window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
       }, [opt, shutters]);
-      return (<div><div className="flex items-center gap-2 mb-2 flex-wrap"><button onClick={() => setShutters((s) => !s)} className="text-xs px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button><span className="text-[11px] text-slate-400">click a shelf / drawer / rack & drag ↕ to resize · drag empty space to orbit</span>{selInfo && <span className="text-[11px] text-indigo-600 font-medium">{selInfo.label}: {selInfo.mm} mm</span>}</div><div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} /></div>);
+      return (<div>
+        <div className="flex items-center gap-2 mb-2 flex-wrap text-[11px]">
+          <div className="flex gap-1">{[["persp", "Perspective"], ["front", "Front"], ["side", "Side"], ["top", "Top"]].map((m) => <button key={m[0]} onClick={() => setVmode(m[0])} className={"px-2 py-1 rounded border " + (vmode === m[0] ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{m[1]}</button>)}</div>
+          <label className="flex items-center gap-1 text-slate-500">Exploded <input type="range" min="0" max="120" value={Math.round(explode * 100)} onChange={(e) => setExplode(+e.target.value / 100)} style={{ width: 70 }} /></label>
+          <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={shadows} onChange={(e) => setShadows(e.target.checked)} /> Shadows</label>
+          <button onClick={() => setShutters((s) => !s)} className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button>
+          <button onClick={() => exportRef.current && exportRef.current()} className="px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50">⬇ 3D (OBJ)</button>
+          {selInfo && <span className="text-indigo-600 font-medium">{selInfo.label}: {selInfo.mm} mm</span>}
+        </div>
+        <div className="text-[10px] text-slate-400 mb-1">click a shelf / drawer / rack & drag ↕ to resize · drag empty space to orbit</div>
+        <div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} />
+      </div>);
     }
 
     // Interactive drag-editor for a wardrobe option's front elevation: drag the horizontal
