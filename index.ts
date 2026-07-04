@@ -10648,6 +10648,17 @@ const frontendHTML = `<!DOCTYPE html>
           else if (kind === "add") { const isD = arg === "drawer"; const take = Math.min(cells[k].hMM - 60, isD ? 200 : 300); if (take < 60) return; cells[k].hMM -= take; cells.splice(k + 1, 0, { kind: isD ? "drawer" : "shelf", label: isD ? "Drawer" : "Shelf", color: isD ? "#ec4899" : "#22c55e", hMM: take }); }
           else if (kind === "delete") { if (cells.length < 2) return; const h = cells[k].hMM; cells.splice(k, 1); cells[Math.min(k, cells.length - 1)].hMM += h; }
           else if (kind === "lock") cells[k].locked = !cells[k].locked;
+          else if (kind === "reassign") { // §8.2 move this column to another section
+            const sec = work[si]; if (!sec || sec.kind === arg) return;
+            const moving = sec.columns.splice(ci, 1)[0]; if (!moving) return;
+            let tsec = work.find((s) => s.kind === arg);
+            if (!tsec) { tsec = { kind: arg, label: arg === "male" ? "Male" : arg === "female" ? "Female" : "Kids", x: 0, width: 0, columns: [] }; work.push(tsec); }
+            tsec.columns.push(moving);
+            const order = { male: 0, female: 1, kids: 2 };
+            const cleaned = work.filter((s) => s.columns.length > 0).sort((a, b) => (order[a.kind] == null ? 3 : order[a.kind]) - (order[b.kind] == null ? 3 : order[b.kind]));
+            let xx = 0; cleaned.forEach((s) => { s.x = xx; s.width = s.columns.reduce((a, c) => a + c.w, 0); let cxx = xx; s.columns.forEach((c) => { c.x = cxx; cxx += c.w; }); xx += s.width; });
+            work.length = 0; cleaned.forEach((s) => work.push(s)); selKey = null;
+          }
           dirty = true; if (onEdit) onEdit(JSON.parse(JSON.stringify(work)));
         };
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
@@ -10706,6 +10717,9 @@ const frontendHTML = `<!DOCTYPE html>
             <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
             {WARD_CONVERTS.map((c) => mi3("• " + c.label, () => { if (opRef.current) opRef.current("convert", c.kind, menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); }))}
             <div className="border-t border-slate-100 my-1" />
+            <div className="px-3 py-0.5 text-slate-400">Move column to…</div>
+            {[["male", "♂ Male"], ["female", "♀ Female"], ["kids", "🧒 Kids"]].map((t) => mi3("→ " + t[1] + " section", () => { if (opRef.current) opRef.current("reassign", t[0], menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); }))}
+            <div className="border-t border-slate-100 my-1" />
             {mi3("🔒 Lock / Unlock", () => { if (opRef.current) opRef.current("lock", null, menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
           </div>
         </React.Fragment>)}
@@ -10763,6 +10777,18 @@ const frontendHTML = `<!DOCTYPE html>
         else if (kind === "equal") { const tot = cells.reduce((a, c) => a + c.hMM, 0), ev = Math.round(tot / cells.length); cells.forEach((c) => c.hMM = ev); }
         else if (kind === "split") { const nw = Math.round(col.w / 2); if (nw < 250) { setMenu(null); return; } const newCol = JSON.parse(JSON.stringify(col)); col.w = nw; newCol.w = nw; sec.columns.splice(menu.ci + 1, 0, newCol); reflowX(sec); }
         else if (kind === "merge") { const ri = sec.columns[menu.ci + 1] ? menu.ci + 1 : menu.ci - 1; const r = sec.columns[ri]; if (!r) { setMenu(null); return; } col.w += r.w; sec.columns.splice(ri, 1); reflowX(sec); }
+        else if (kind === "reassign") { // §8.2 move this column across the Male/Female/Kids split
+          if (sec.kind === arg) { setMenu(null); return; }
+          const moving = sec.columns.splice(menu.ci, 1)[0]; if (!moving) { setMenu(null); return; }
+          let tsec = n.find((s) => s.kind === arg);
+          if (!tsec) { tsec = { kind: arg, label: arg === "male" ? "Male" : arg === "female" ? "Female" : "Kids", x: 0, width: 0, columns: [] }; n.push(tsec); }
+          tsec.columns.push(moving);
+          const order = { male: 0, female: 1, kids: 2 };
+          const cleaned = n.filter((s) => s.columns.length > 0).sort((a, b) => (order[a.kind] == null ? 3 : order[a.kind]) - (order[b.kind] == null ? 3 : order[b.kind]));
+          let xx = 0;
+          cleaned.forEach((s) => { s.x = xx; s.width = s.columns.reduce((a, c) => a + c.w, 0); let cxx = xx; s.columns.forEach((c) => { c.x = cxx; cxx += c.w; }); xx += s.width; });
+          n.length = 0; cleaned.forEach((s) => n.push(s));
+        }
         else if (kind === "lock") { cells[k].locked = true; }
         else if (kind === "unlock") { cells[k].locked = false; }
         setSecs(n); onCommit(n); setMenu(null);
@@ -10815,6 +10841,9 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="border-t border-slate-100 my-1" />
               {mi("⊟ Split column", () => op("split"))}
               {mi("⊞ Merge with next", () => op("merge"))}
+              <div className="border-t border-slate-100 my-1" />
+              <div className="px-3 py-0.5 text-slate-400">Move column to…</div>
+              {[["male", "♂ Male section"], ["female", "♀ Female section"], ["kids", "🧒 Kids section"]].filter((t) => t[0] !== (secs[menu.si] && secs[menu.si].kind)).map((t) => mi("→ " + t[1], () => op("reassign", t[0])))}
               <div className="border-t border-slate-100 my-1" />
               {mi("🔒 Lock section", () => op("lock"))}
             </React.Fragment>)}
