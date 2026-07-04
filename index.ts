@@ -10550,6 +10550,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [quality, setQuality] = useState("med");   // §13.8
       const [light, setLight] = useState("day");       // §13.6 lighting preset
       const [fly, setFly] = useState(false);           // §13.1 fly-through (auto-orbit)
+      const [led, setLed] = useState(false);           // §13 decorative LED strip lighting
       const [menu3d, setMenu3d] = useState(null);      // §13.3 3D right-click menu
       const modeRef = React.useRef("persp"), explRef = React.useRef(0), secRef = React.useRef(0), shadRef = React.useRef(false), qualRef = React.useRef("med"), lightRef = React.useRef("day"), flyRef = React.useRef(false), exportRef = React.useRef(null), opRef = React.useRef(null);
       React.useEffect(() => { modeRef.current = vmode; }, [vmode]);
@@ -10570,6 +10571,10 @@ const frontendHTML = `<!DOCTYPE html>
         host.innerHTML = ""; host.appendChild(renderer.domElement);
         const scene = new THREE.Scene(); scene.background = new THREE.Color(0xf1f5f9);
         const cam = new THREE.PerspectiveCamera(45, Wv / Hv, 10, 60000);
+        const spanE = Math.max(opt.width, opt.height, opt.depth);   // §13 true orthographic camera for front/side/top
+        const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -spanE * 6, spanE * 8);
+        let activeCam = cam;
+        const setOrthoFrustum = () => { const aspect = (host.clientWidth || Wv) / Hv, hh = spanE * 0.72, hw = hh * aspect; ortho.left = -hw; ortho.right = hw; ortho.top = hh; ortho.bottom = -hh; ortho.updateProjectionMatrix(); };
         const hemi = new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.05); scene.add(hemi);
         const dl = new THREE.DirectionalLight(0xffffff, 0.7); dl.position.set(1, 2, 1.5); scene.add(dl);
         const g = new THREE.Group(); scene.add(g);
@@ -10580,9 +10585,12 @@ const frontendHTML = `<!DOCTYPE html>
         const work = JSON.parse(JSON.stringify(opt.sections));   // mutable working copy for 3D drag
         let selKey = null;
         const clipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 1e7);   // §13.4 section cut (X-plane, off by default)
-        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac, clippingPlanes: [clipPlane], clipShadows: true })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; g.add(m); if (!(opac != null && opac < 0.02)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8, clippingPlanes: [clipPlane] })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; g.add(e); } return m; };
+        let lodSkipEdges = false;   // §13 LOD: on large/busy wardrobes drop interior edge overlays + rod segments
+        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac, clippingPlanes: [clipPlane], clipShadows: true })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; g.add(m); if (!(opac != null && opac < 0.02) && !(lodSkipEdges && ud && ud.cell)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8, clippingPlanes: [clipPlane] })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; g.add(e); } return m; };
         const buildGroup = (secsData) => {
           while (g.children.length) { const chd = g.children.pop(); if (chd.geometry) chd.geometry.dispose(); if (chd.material) chd.material.dispose(); }
+          const cellCnt = secsData.reduce((a, s) => a + s.columns.reduce((b, c) => b + c.cells.length, 0), 0);
+          lodSkipEdges = cellCnt > 36;   // §13 LOD kicks in on busy layouts
           const usableH = H - plinth - loftH;
           const floor = new THREE.Mesh(new THREE.PlaneGeometry(Wd * 2.4, D * 3.2), new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 1 })); floor.rotation.x = -Math.PI / 2; floor.position.set(Wd / 2, -1, 0); floor.receiveShadow = true; g.add(floor);
           box(Wd, T, D, Wd / 2, plinth + T / 2, 0, WOOD); box(Wd, T, D, Wd / 2, H - T / 2, 0, WOOD);
@@ -10599,18 +10607,32 @@ const frontendHTML = `<!DOCTYPE html>
               const key = si + "-" + ci + "-" + k, ud = { cell: true, si, ci, k, key }, hl = key === selKey;
               if (kind === "shelf" || kind === "handbag" || kind === "shoe" || kind === "kidsShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
               else if (kind === "drawer" || kind === "jewellery" || kind === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, hl ? 0x818cf8 : (finHex("drawers") || finHex(sec.kind) || colColor), null, ud); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
-              else if (kind.toLowerCase().indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4, clippingPlanes: [clipPlane] })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: cxMid, y: yt - 70, z: 0 } }); rod.castShadow = true; g.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
+              else if (kind.toLowerCase().indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, lodSkipEdges ? 6 : 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4, clippingPlanes: [clipPlane] })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: cxMid, y: yt - 70, z: 0 } }); rod.castShadow = true; g.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
               else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
               yb = yt;
             });
           }));
           if (shutters) secsData.forEach((sec) => sec.columns.forEach((col) => { const fh = finHex(sec.kind); box(col.w - 4, H - 20, T, col.x + col.w / 2, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }));
+          if (led) {   // §13 decorative warm LED strips under the top / loft rail + a couple of glow lights
+            const ledMat = new THREE.MeshStandardMaterial({ color: 0xfff4d6, emissive: 0xffe6a8, emissiveIntensity: 1.5, roughness: 0.4, clippingPlanes: [clipPlane] });
+            const stripY = (loftH > 0 ? H - loftH : H) - T - 6;
+            secsData.forEach((sec) => sec.columns.forEach((col) => { const s = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, col.w - 40), 6, 14), ledMat); s.position.set(col.x + col.w / 2, stripY, D / 2 - 24); s.userData = { base: { x: col.x + col.w / 2, y: stripY, z: D / 2 - 24 } }; g.add(s); }));
+            [0.25, 0.75].forEach((fx) => { const lp = new THREE.PointLight(0xffe1a6, 0.5, spanE * 2.4); lp.position.set(Wd * fx, stripY, D); lp.userData = { base: { x: Wd * fx, y: stripY, z: D } }; g.add(lp); });
+          }
           g.position.set(-Wd / 2, -H / 2, 0);
         };
         buildGroup(work);
         const span = Math.max(Wd, H, D);
         cam.position.set(span * 0.9, span * 0.32, span * 1.28);
         const controls = new THREE.OrbitControls(cam, renderer.domElement); controls.target.set(0, 0, 0); controls.update();
+        const applyMode = (m2) => {   // §13 snap to a TRUE orthographic camera for front/side/top, perspective otherwise
+          const orthoView = m2 === "front" || m2 === "side" || m2 === "top";
+          if (orthoView) { setOrthoFrustum(); if (m2 === "front") ortho.position.set(0, 0, spanE * 3); else if (m2 === "side") ortho.position.set(spanE * 3, 0, 0); else ortho.position.set(0, spanE * 3, 0.001); ortho.up.set(0, 1, 0); }
+          else cam.position.set(spanE * 0.9, spanE * 0.32, spanE * 1.28);
+          const want = orthoView ? ortho : cam;
+          if (activeCam !== want) { activeCam = want; controls.object = want; }
+          controls.target.set(0, 0, 0); controls.update();
+        };
         renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         dl.position.set(span * 0.7, span * 1.6, span); dl.target.position.set(0, -H / 2, 0); scene.add(dl.target);
         dl.castShadow = shadRef.current; dl.shadow.mapSize.set(1024, 1024); { const sc = dl.shadow.camera, r = span * 1.3; sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r; sc.near = span * 0.1; sc.far = span * 6; sc.updateProjectionMatrix(); }
@@ -10630,8 +10652,8 @@ const frontendHTML = `<!DOCTYPE html>
         };
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
         let drag = null, dirty = false;
-        const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, cam); const hits = ray.intersectObjects(g.children, false); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
-        const worldPerPx = () => 2 * cam.position.distanceTo(controls.target) * Math.tan((45 * Math.PI / 180) / 2) / (host.clientHeight || Hv);
+        const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, false); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
+        const worldPerPx = () => activeCam.isOrthographicCamera ? (activeCam.top - activeCam.bottom) / (activeCam.zoom || 1) / (host.clientHeight || Hv) : 2 * activeCam.position.distanceTo(controls.target) * Math.tan((45 * Math.PI / 180) / 2) / (host.clientHeight || Hv);
         const onDown = (e) => { if (e.button !== 0) return; const u = pick(e); if (!u) return; e.preventDefault(); controls.enabled = false; drag = { si: u.si, ci: u.ci, k: u.k, y: e.clientY, wpp: worldPerPx(), moved: false }; selKey = u.key; const c0 = work[u.si].columns[u.ci].cells[u.k]; setSelInfo({ label: c0.label, mm: c0.hMM }); dirty = true; };
         const onMove = (e) => { if (!drag) return; const dMM = Math.round(-(e.clientY - drag.y) * drag.wpp / 5) * 5; if (!dMM) return; const cells = work[drag.si].columns[drag.ci].cells, cur = cells[drag.k], nb = cells[drag.k + 1] || cells[drag.k - 1]; if (!nb || cur.hMM + dMM < 60 || nb.hMM - dMM < 60) return; cur.hMM += dMM; nb.hMM -= dMM; drag.y = e.clientY; drag.moved = true; dirty = true; setSelInfo({ label: cur.label, mm: cur.hMM }); };
         const onUp = () => { if (!drag) return; const moved = drag.moved; controls.enabled = true; drag = null; if (moved && onEdit) onEdit(JSON.parse(JSON.stringify(work))); };
@@ -10644,18 +10666,18 @@ const frontendHTML = `<!DOCTYPE html>
           if (dirty) { buildGroup(work); dirty = false; lastExpl = -1; }
           const ex = explRef.current;
           if (ex !== lastExpl) { g.children.forEach((ch) => { const b = ch.userData && ch.userData.base; if (b) ch.position.set(b.x + (b.x - Wd / 2) * ex, b.y + (b.y - H / 2) * ex, b.z + b.z * ex * 1.8); }); lastExpl = ex; }
-          if (modeRef.current !== lastMode) { const m2 = modeRef.current; if (m2 === "front") cam.position.set(0, 0, span * 1.7); else if (m2 === "side") cam.position.set(span * 1.7, 0, 0); else if (m2 === "top") cam.position.set(0, span * 1.8, 0.01); else cam.position.set(span * 0.9, span * 0.32, span * 1.28); controls.target.set(0, 0, 0); controls.update(); lastMode = m2; }
+          if (modeRef.current !== lastMode) { applyMode(modeRef.current); lastMode = modeRef.current; }
           clipPlane.constant = secRef.current > 0 ? (Wd / 2 - secRef.current * Wd) : 1e7;
           if (dl.castShadow !== shadRef.current) dl.castShadow = shadRef.current;
           if (qualRef.current !== lastQ) { const q = qualRef.current, pr = q === "low" ? 1 : q === "high" ? Math.min(window.devicePixelRatio || 1, 2) : 1.5; renderer.setPixelRatio(pr); renderer.setSize(host.clientWidth || Wv, Hv); lastQ = q; }
           if (lightRef.current !== lastLight) { const lp = lightRef.current; if (lp === "evening") { scene.background = new THREE.Color(0x2b3040); hemi.intensity = 0.5; dl.color.set(0xffd7a0); dl.intensity = 0.95; } else if (lp === "artificial") { scene.background = new THREE.Color(0xe9edf4); hemi.intensity = 0.8; dl.color.set(0xdfe8ff); dl.intensity = 0.9; } else { scene.background = new THREE.Color(0xf1f5f9); hemi.intensity = 1.05; dl.color.set(0xffffff); dl.intensity = 0.7; } lastLight = lp; }
           controls.autoRotate = flyRef.current; controls.autoRotateSpeed = 1.4;
-          controls.update(); renderer.render(scene, cam);
+          controls.update(); renderer.render(scene, activeCam);
         }; loop();
-        const onResize = () => { const w2 = host.clientWidth || Wv; cam.aspect = w2 / Hv; cam.updateProjectionMatrix(); renderer.setSize(w2, Hv); };
+        const onResize = () => { const w2 = host.clientWidth || Wv; cam.aspect = w2 / Hv; cam.updateProjectionMatrix(); setOrthoFrustum(); renderer.setSize(w2, Hv); };
         window.addEventListener("resize", onResize);
         return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); renderer.domElement.removeEventListener("pointerdown", onDown); renderer.domElement.removeEventListener("contextmenu", onCtx); window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
-      }, [opt, shutters]);
+      }, [opt, shutters, led]);
       const mi3 = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
       return (<div style={{ position: "relative" }}>
         <div className="flex items-center gap-2 mb-2 flex-wrap text-[11px]">
@@ -10666,6 +10688,7 @@ const frontendHTML = `<!DOCTYPE html>
           <select value={light} onChange={(e) => setLight(e.target.value)} className="px-1.5 py-1 border border-slate-200 rounded bg-white">{[["day", "☀ Day"], ["evening", "🌇 Evening"], ["artificial", "💡 Artificial"]].map((o) => <option key={o[0]} value={o[0]}>{o[1]}</option>)}</select>
           <select value={quality} onChange={(e) => setQuality(e.target.value)} className="px-1.5 py-1 border border-slate-200 rounded bg-white">{[["low", "Low"], ["med", "Medium"], ["high", "High"]].map((o) => <option key={o[0]} value={o[0]}>{o[1]}</option>)}</select>
           <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={fly} onChange={(e) => setFly(e.target.checked)} /> Fly</label>
+          <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={led} onChange={(e) => setLed(e.target.checked)} /> 💡LED</label>
           <button onClick={() => setShutters((s) => !s)} className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button>
           <span className="text-slate-400">Export</span>
           {["obj", "gltf", "stl"].map((f) => <button key={f} onClick={() => exportRef.current && exportRef.current(f)} className="px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 uppercase">{f === "gltf" ? "GLB" : f}</button>)}

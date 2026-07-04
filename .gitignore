@@ -67,6 +67,10 @@ dbg-*
 !verify-gallery.mjs
 !verify-specsheet.mjs
 !verify-cabmat.mjs
+!verify-ward3d.mjs
+!verify-ward-reassign.mjs
+!verify-ward-quote.mjs
+!verify-ward-board.mjs
 
 # editor/OS
 .DS_Store
