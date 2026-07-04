@@ -10610,8 +10610,14 @@ const frontendHTML = `<!DOCTYPE html>
       const x0 = padL, y0 = padT, xOf = (mm) => x0 + mm * scale;
       const loftPx = opt.hasLoft ? opt.loftH * scale : 0, plinthPx = (opt.plinth || 100) * scale, floorY = y0 + hpx - plinthPx, usableTopY = y0 + loftPx;
       const reflowX = (sec) => { let x = sec.x; for (const c of sec.columns) { c.x = x; x += c.w; } };
+      const rescaleCols = (sec, nw) => { const old = sec.width || nw, f = nw / old; let acc = 0; sec.columns.forEach((c, i) => { c.w = i === sec.columns.length - 1 ? nw - acc : Math.max(200, Math.round(c.w * f)); acc += c.w; }); sec.width = nw; reflowX(sec); };
       const onMove = (e) => {
         const d = dragRef.current; if (!d) return;
+        if (d.kind === "sect") {
+          const dxMM = Math.round((e.clientX - d.x) / scale / 5) * 5; if (!dxMM) return;
+          setSecs((prev) => { const n = JSON.parse(JSON.stringify(prev)); const L = n[d.i], R = n[d.i + 1]; if (!L || !R) return prev; const nLw = L.width + dxMM, nRw = R.width - dxMM; if (nLw < 500 || nRw < 500) return prev; rescaleCols(L, nLw); R.x = L.x + L.width; rescaleCols(R, nRw); setTip({ x: e.clientX, y: e.clientY, text: L.width + " / " + R.width + " mm" }); return n; });
+          d.x = e.clientX; return;
+        }
         if (d.kind === "col") {
           const dx = Math.round((e.clientX - d.x) / scale / 5) * 5; if (!dx) return;
           setSecs((prev) => { const n = JSON.parse(JSON.stringify(prev)); const sec = n[d.si], L = sec.columns[d.ci], R = sec.columns[d.ci + 1]; if (!L || !R || L.w + dx < 250 || R.w - dx < 250) return prev; L.w += dx; R.w -= dx; reflowX(sec); setTip({ x: e.clientX, y: e.clientY, text: L.w + " / " + R.w + " mm" }); return n; });
@@ -10624,6 +10630,7 @@ const frontendHTML = `<!DOCTYPE html>
       const endDrag = () => { const d = dragRef.current; dragRef.current = null; setTip(null); if (d) onCommit(secs); };
       const startCell = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "cell", si, ci, k, y: e.clientY }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
       const startCol = (e, si, ci) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "col", si, ci, x: e.clientX }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
+      const startSect = (e, i) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "sect", i, x: e.clientX }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
       const op = (kind, arg) => {
         if (!menu) return;
         const n = JSON.parse(JSON.stringify(secs)); const sec = n[menu.si], col = sec.columns[menu.ci], cells = col.cells, k = menu.k;
@@ -10634,6 +10641,8 @@ const frontendHTML = `<!DOCTYPE html>
         else if (kind === "equal") { const tot = cells.reduce((a, c) => a + c.hMM, 0), ev = Math.round(tot / cells.length); cells.forEach((c) => c.hMM = ev); }
         else if (kind === "split") { const nw = Math.round(col.w / 2); if (nw < 250) { setMenu(null); return; } const newCol = JSON.parse(JSON.stringify(col)); col.w = nw; newCol.w = nw; sec.columns.splice(menu.ci + 1, 0, newCol); reflowX(sec); }
         else if (kind === "merge") { const ri = sec.columns[menu.ci + 1] ? menu.ci + 1 : menu.ci - 1; const r = sec.columns[ri]; if (!r) { setMenu(null); return; } col.w += r.w; sec.columns.splice(ri, 1); reflowX(sec); }
+        else if (kind === "lock") { cells[k].locked = true; }
+        else if (kind === "unlock") { cells[k].locked = false; }
         setSecs(n); onCommit(n); setMenu(null);
       };
       const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, si, ci, k }); };
@@ -10648,7 +10657,8 @@ const frontendHTML = `<!DOCTYPE html>
             els.push(<rect key={"c" + si + "-" + ci + "-" + k} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={(cell.color || "#cbd5e1") + "33"} stroke={cell.color || "#cbd5e1"} strokeWidth="0.7" style={{ cursor: "context-menu" }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
             if (ch > 12) els.push(<text key={"cl" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
             if (ch > 22) els.push(<text key={"cd" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.hMM + " mm"}</text>);
-            if (k < col.cells.length - 1) { els.push(<line key={"hl" + si + "-" + ci + "-" + k} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" style={{ pointerEvents: "none" }} />); els.push(<rect key={"hh" + si + "-" + ci + "-" + k} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
+            if (cell.locked && ch > 10) els.push(<text key={"lk" + si + "-" + ci + "-" + k} x={cx + cw - 7} y={yt + 9} fontSize="8" textAnchor="middle" style={{ pointerEvents: "none" }}>🔒</text>);
+            if (k < col.cells.length - 1 && !cell.locked && !col.cells[k + 1].locked) { els.push(<line key={"hl" + si + "-" + ci + "-" + k} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" style={{ pointerEvents: "none" }} />); els.push(<rect key={"hh" + si + "-" + ci + "-" + k} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
             yb = yt;
           });
           els.push(<line key={"cp" + si + "-" + ci} x1={cx} y1={usableTopY} x2={cx} y2={floorY} stroke="#94a3b8" strokeWidth="0.7" style={{ pointerEvents: "none" }} />);
@@ -10657,26 +10667,35 @@ const frontendHTML = `<!DOCTYPE html>
       });
       els.push(<rect key="pl" x={x0} y={floorY} width={wpx} height={plinthPx} fill="#e2e8f0" stroke="#94a3b8" strokeWidth="0.6" style={{ pointerEvents: "none" }} />);
       els.push(<rect key="fr" x={x0} y={y0} width={wpx} height={hpx} fill="none" stroke="#334155" strokeWidth="1.4" style={{ pointerEvents: "none" }} />);
-      for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); }
+      for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); els.push(<rect key={"sdh" + i} x={dx - 5} y={usableTopY} width={10} height={floorY - usableTopY} fill="rgba(71,85,105,0.001)" style={{ cursor: "ew-resize" }} onPointerDown={(e) => startSect(e, i)} />); }
+      const mCol = menu && secs[menu.si] && secs[menu.si].columns[menu.ci];
+      const mLocked = mCol && mCol.cells[menu.k] && mCol.cells[menu.k].locked;
       const mi = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
       return (<div style={{ position: "relative" }}>
         <svg width={W} height={H} viewBox={"0 0 " + W + " " + H} style={{ maxWidth: "100%", touchAction: "none", userSelect: "none" }} onPointerMove={onMove} onPointerUp={endDrag} onPointerLeave={endDrag}>{els}</svg>
         {menu && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
-          <div style={{ position: "fixed", left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 340), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1" >
-            {mi("+ Add shelf", () => op("add", "shelf"))}
-            {mi("+ Add drawer", () => op("add", "drawer"))}
-            {mi("🗑 Delete section", () => op("delete"))}
-            <div className="border-t border-slate-100 my-1" />
-            <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
-            {WARD_CONVERTS.map((c) => mi("• " + c.label, () => op("convert", c.kind)))}
-            <div className="border-t border-slate-100 my-1" />
-            {mi("▲ Increase height (+50)", () => op("inc"))}
-            {mi("▼ Decrease height (−50)", () => op("dec"))}
-            {mi("≡ Equal-divide column", () => op("equal"))}
-            <div className="border-t border-slate-100 my-1" />
-            {mi("⊟ Split column", () => op("split"))}
-            {mi("⊞ Merge with next", () => op("merge"))}
+          <div style={{ position: "fixed", left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1" >
+            {mLocked ? (<React.Fragment>
+              <div className="px-3 py-1 text-slate-500">🔒 Locked section</div>
+              {mi("🔓 Unlock section", () => op("unlock"))}
+            </React.Fragment>) : (<React.Fragment>
+              {mi("+ Add shelf", () => op("add", "shelf"))}
+              {mi("+ Add drawer", () => op("add", "drawer"))}
+              {mi("🗑 Delete section", () => op("delete"))}
+              <div className="border-t border-slate-100 my-1" />
+              <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
+              {WARD_CONVERTS.map((c) => mi("• " + c.label, () => op("convert", c.kind)))}
+              <div className="border-t border-slate-100 my-1" />
+              {mi("▲ Increase height (+50)", () => op("inc"))}
+              {mi("▼ Decrease height (−50)", () => op("dec"))}
+              {mi("≡ Equal-divide column", () => op("equal"))}
+              <div className="border-t border-slate-100 my-1" />
+              {mi("⊟ Split column", () => op("split"))}
+              {mi("⊞ Merge with next", () => op("merge"))}
+              <div className="border-t border-slate-100 my-1" />
+              {mi("🔒 Lock section", () => op("lock"))}
+            </React.Fragment>)}
           </div>
         </React.Fragment>)}
         {tip && <div style={{ position: "fixed", left: tip.x + 12, top: tip.y - 10, zIndex: 50, pointerEvents: "none" }} className="bg-slate-800 text-white text-[10px] px-1.5 py-0.5 rounded">{tip.text}</div>}
@@ -10868,7 +10887,7 @@ const frontendHTML = `<!DOCTYPE html>
 
         {sel && (<div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-slate-700">✏️ Edit — <span className="text-indigo-600">Option {selIdx + 1} · {sel.label}</span> <span className="text-xs font-normal text-slate-400">· drag dividers (↕ bands · ↔ partitions) · right-click a section for add / delete / convert</span></h3>
+            <h3 className="text-sm font-semibold text-slate-700">✏️ Edit — <span className="text-indigo-600">Option {selIdx + 1} · {sel.label}</span> <span className="text-xs font-normal text-slate-400">· drag dividers (↕ bands · ↔ partitions · ↔ male/female split) · right-click for add / delete / convert / lock</span></h3>
             {edited && <button onClick={() => setEdited(null)} className="text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Reset edits</button>}
           </div>
           <div className="overflow-auto"><WardrobeDrawEditor opt={sel} onCommit={commitEdit} /></div>
@@ -12174,7 +12193,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
     o.loftH = o.hasLoft ? wardClamp(Math.round(+o.loftH || 600), 300, 750) : 0;
     o.usableH = o.height - o.plinth - o.loftH;
     for (const sec of o.sections) for (const col of (sec.columns || [])) {
-      let cells = (col.cells || []).filter((cc: any) => cc && +cc.hMM > 0).map((cc: any) => ({ kind: String(cc.kind || "shelf"), label: String(cc.label || ""), hMM: Math.max(40, Math.round(+cc.hMM)), color: WARD_COLORS[String(cc.kind)] || "#cbd5e1" }));
+      let cells = (col.cells || []).filter((cc: any) => cc && +cc.hMM > 0).map((cc: any) => ({ kind: String(cc.kind || "shelf"), label: String(cc.label || ""), hMM: Math.max(40, Math.round(+cc.hMM)), color: WARD_COLORS[String(cc.kind)] || "#cbd5e1", locked: !!cc.locked }));
       if (!cells.length) cells = [{ kind: "shelf", label: "Shelf", hMM: o.usableH, color: WARD_COLORS.shelf }];
       const sum = cells.reduce((a: number, cc: any) => a + cc.hMM, 0) || 1, f = o.usableH / sum;
       cells.forEach((cc: any) => cc.hMM = Math.round(cc.hMM * f));
