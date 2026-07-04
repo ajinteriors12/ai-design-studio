@@ -6964,6 +6964,57 @@ const frontendHTML = `<!DOCTYPE html>
       return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Top View (editable) — click a WALL to select · drag Wall B/C to stretch the room · right-click a wall to lock/delete · drag any object across walls (snaps) · Delete key removes selection</div><svg ref={svgRef} width={w + pad * 2} height={h + pad * 2 + 18} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
     }
 
+    // ---- Free-form POLYGON room editor: walls = edges between vertices ----------
+    // Click an edge to select a wall, drag a vertex to reshape, right-click an edge
+    // to Split/Delete, right-click a vertex to Join (merge the two adjacent walls).
+    function RoomPolygon2D({ polygon, openWalls, lockedWalls, selected, onSelectWall, onSelectVertex, onMoveVertex, onWallMenu, onVertexMenu }) {
+      const pts = (polygon && polygon.length >= 3) ? polygon : [{ x: 0, y: 0 }, { x: 3600, y: 0 }, { x: 3600, y: 2400 }, { x: 0, y: 2400 }];
+      const n = pts.length, pad = 30, maxPx = 460;
+      const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      const spanX = Math.max(1, maxX - minX), spanY = Math.max(1, maxY - minY);
+      const S = maxPx / Math.max(spanX, spanY);
+      const px = (p) => ({ x: pad + (p.x - minX) * S, y: pad + (p.y - minY) * S });
+      const ow = openWalls || [], lw = lockedWalls || [];
+      const svgRef = React.useRef(null);
+      const [drag, setDrag] = React.useState(null);   // {vertex:i}
+      const onMove = (ev) => {
+        if (drag == null || drag.vertex == null || !svgRef.current) return;
+        const r = svgRef.current.getBoundingClientRect();
+        const mx = Math.round(((ev.clientX - r.left - pad) / S + minX) / 10) * 10;
+        const my = Math.round(((ev.clientY - r.top - pad) / S + minY) / 10) * 10;
+        onMoveVertex && onMoveVertex(drag.vertex, mx, my);
+      };
+      const onUp = () => setDrag(null);
+      const P = pts.map(px);
+      const path = "M" + P.map((p) => p.x.toFixed(1) + "," + p.y.toFixed(1)).join(" L") + " Z";
+      const els = [];
+      els.push(<path key="poly" d={path} fill="#f4f7fb" stroke="none" />);
+      // shoelace area (m²) + perimeter (m)
+      let area2 = 0, perim = 0;
+      for (let i = 0; i < n; i++) { const a = pts[i], b = pts[(i + 1) % n]; area2 += a.x * b.y - b.x * a.y; perim += Math.hypot(b.x - a.x, b.y - a.y); }
+      const areaM2 = Math.abs(area2) / 2 / 1_000_000;
+      // edges (walls)
+      for (let i = 0; i < n; i++) {
+        const a = P[i], b = P[(i + 1) % n], A = pts[i], B = pts[(i + 1) % n];
+        const isOpen = ow.indexOf(i) >= 0, isLock = lw.indexOf(i) >= 0, sel = selected && selected.kind === "polywall" && selected.id === i;
+        els.push(<line key={"e" + i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={sel ? "#ea580c" : isOpen ? "#cbd5e1" : "#334155"} strokeWidth={sel ? 6 : 4} strokeDasharray={isOpen ? "6 5" : "0"} strokeLinecap="round" pointerEvents="none" />);
+        els.push(<line key={"h" + i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={14} strokeLinecap="round" style={{ cursor: "pointer" }} onPointerDown={(e) => { e.stopPropagation(); onSelectWall && onSelectWall(i); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onSelectWall && onSelectWall(i); onWallMenu && onWallMenu(i, e.clientX, e.clientY); }} />);
+        const len = Math.round(Math.hypot(B.x - A.x, B.y - A.y));
+        els.push(<text key={"l" + i} x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 4} fill={sel ? "#ea580c" : "#64748b"} fontSize="8.5" textAnchor="middle" pointerEvents="none">{isOpen ? "open" : len}{isLock ? " 🔒" : ""}</text>);
+      }
+      // vertices
+      for (let i = 0; i < n; i++) {
+        const p = P[i], selv = selected && selected.kind === "polyvertex" && selected.id === i;
+        els.push(<circle key={"v" + i} cx={p.x} cy={p.y} r={selv ? 7 : 5} fill={selv ? "#ea580c" : "#fff"} stroke="#334155" strokeWidth={2} style={{ cursor: "move" }}
+          onPointerDown={(e) => { e.stopPropagation(); onSelectVertex && onSelectVertex(i); setDrag({ vertex: i }); }}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onSelectVertex && onSelectVertex(i); onVertexMenu && onVertexMenu(i, e.clientX, e.clientY); }} />);
+      }
+      const W = (maxX - minX) * S + pad * 2, H = (maxY - minY) * S + pad * 2 + 16;
+      els.push(<text key="area" x={pad} y={H - 4} fill="#94a3b8" fontSize="9">{n} walls · {(perim / 1000).toFixed(2)} m perimeter · {areaM2.toFixed(2)} m² · {Math.round(spanX)}×{Math.round(spanY)} mm bounds</text>);
+      return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Free-form plan — click a WALL to select · drag a VERTEX to reshape · right-click a wall to Split/Delete · right-click a vertex to Join</div><svg ref={svgRef} width={W} height={H} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
+    }
+
     // ---- 15.txt 5.14: interactive EMPTY 3D room (3D-first workflow) ----------
     // Floor + 4 walls (A back / B right / C front / D left) sized to the room; orbit/pan/zoom;
     // click a wall to select it (right-click → Wall Properties + structural elements in Phase 2).
@@ -8829,7 +8880,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [live, setLive] = useState({ on: false, clients: 0 });
       const [tile, setTile] = useState({ on: true, color: "#e8eef0", grid: "#c2d0d4", size: 100, pattern: "grid" });   // 13.pdf §4 selectable backsplash
       // 15.txt 3D-first workflow: room model + interactive empty 3D room shown before generation
-      const [room, setRoom] = useState({ width: 3600, depth: 2400, height: 2700, ceiling: 2700, wallA: 3600, wallB: 2400, wallC: 3600, wallD: 2400, unit: "mm", openWalls: [], lockedWalls: [], wallThickness: 100 });
+      const [room, setRoom] = useState({ width: 3600, depth: 2400, height: 2700, ceiling: 2700, wallA: 3600, wallB: 2400, wallC: 3600, wallD: 2400, unit: "mm", openWalls: [], lockedWalls: [], wallThickness: 100, shape: "rect", polygon: null });
       const [selectedWall, setSelectedWall] = useState(null);
       const [structures, setStructures] = useState([]);   // doors/windows/beams/columns on walls (5.16)
       const [wallProps, setWallProps] = useState({});     // {wallName: {height,thickness,direction,usable,allowCab,allowTall,allowWallCab}} (5.15)
@@ -8848,6 +8899,24 @@ const frontendHTML = `<!DOCTYPE html>
       const resizeRoom = (patch) => setRoom((r) => { const nr = { ...r }; if (patch.width != null) { nr.width = patch.width; nr.wallA = patch.width; nr.wallC = patch.width; } if (patch.depth != null) { nr.depth = patch.depth; nr.wallB = patch.depth; nr.wallD = patch.depth; } return nr; });
       const toggleWallOpen = (name) => setRoom((r) => { const o = (r.openWalls || []).slice(); const i = o.indexOf(name); if (i >= 0) o.splice(i, 1); else o.push(name); return { ...r, openWalls: o }; });
       const toggleWallLock = (name) => setRoom((r) => { const l = (r.lockedWalls || []).slice(); const i = l.indexOf(name); if (i >= 0) l.splice(i, 1); else l.push(name); return { ...r, lockedWalls: l }; });
+      // Free-form POLYGON room model + wall split/join
+      const rectPoly = (w, d) => [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: d }, { x: 0, y: d }];
+      const rnd10 = (v) => Math.round(v / 10) * 10;
+      const lPoly = (w, d) => [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: rnd10(d * 0.55) }, { x: rnd10(w * 0.55), y: rnd10(d * 0.55) }, { x: rnd10(w * 0.55), y: d }, { x: 0, y: d }];
+      const uPoly = (w, d) => [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: d }, { x: rnd10(w * 0.68), y: d }, { x: rnd10(w * 0.68), y: rnd10(d * 0.42) }, { x: rnd10(w * 0.32), y: rnd10(d * 0.42) }, { x: rnd10(w * 0.32), y: d }, { x: 0, y: d }];
+      const curPoly = () => (room.polygon && room.polygon.length >= 3) ? room.polygon : rectPoly(+room.width || 3600, +room.depth || 2400);
+      const polyBounds = (poly) => { const xs = poly.map((p) => p.x), ys = poly.map((p) => p.y); return { w: Math.max(...xs) - Math.min(...xs), d: Math.max(...ys) - Math.min(...ys) }; };
+      const commitPoly = (poly, r, extra) => { const b = polyBounds(poly); return { ...r, polygon: poly, width: b.w, depth: b.d, ...(extra || {}) }; };
+      const setShape = (shape) => setRoom((r) => shape === "poly" ? commitPoly((r.polygon && r.polygon.length >= 3) ? r.polygon : rectPoly(+r.width || 3600, +r.depth || 2400), r, { shape, openWalls: [], lockedWalls: [] }) : { ...r, shape, openWalls: [], lockedWalls: [] });
+      const usePreset = (kind) => setRoom((r) => { const w = +r.width || 3600, d = +r.depth || 2400; const poly = kind === "L" ? lPoly(w, d) : kind === "U" ? uPoly(w, d) : rectPoly(w, d); return commitPoly(poly, r, { shape: "poly", openWalls: [], lockedWalls: [] }); });
+      const polySelectWall = (i) => setSelectedObj({ kind: "polywall", id: i });
+      const polySelectVertex = (i) => setSelectedObj({ kind: "polyvertex", id: i });
+      const polyMoveVertex = (i, x, y) => setRoom((r) => commitPoly(curPoly().map((p, j) => j === i ? { x, y } : p), r));
+      const shiftIdx = (arr, from) => (arr || []).map((v) => typeof v === "number" && v >= from ? v + 1 : v);
+      const polySplitWall = (i) => { const poly = curPoly(); const a = poly[i], b = poly[(i + 1) % poly.length]; const mid = { x: rnd10((a.x + b.x) / 2), y: rnd10((a.y + b.y) / 2) }; const np = poly.slice(); np.splice(i + 1, 0, mid); setRoom((r) => commitPoly(np, r, { openWalls: shiftIdx(r.openWalls, i + 1), lockedWalls: shiftIdx(r.lockedWalls, i + 1) })); setSelectedObj(null); };
+      const polyJoinVertex = (i) => { const poly = curPoly(); if (poly.length <= 3) { alert("A room needs at least 3 walls."); return; } const np = poly.filter((_, j) => j !== i); const dec = (arr) => (arr || []).filter((v) => v !== i).map((v) => typeof v === "number" && v > i ? v - 1 : v); setRoom((r) => commitPoly(np, r, { openWalls: dec(r.openWalls), lockedWalls: dec(r.lockedWalls) })); setSelectedObj(null); };
+      const polyToggleOpen = (i) => setRoom((r) => { const o = (r.openWalls || []).slice(); const k = o.indexOf(i); if (k >= 0) o.splice(k, 1); else o.push(i); return { ...r, openWalls: o }; });
+      const polyToggleLock = (i) => setRoom((r) => { const l = (r.lockedWalls || []).slice(); const k = l.indexOf(i); if (k >= 0) l.splice(k, 1); else l.push(i); return { ...r, lockedWalls: l }; });
       // 5.13: print ONLY the cut list — open a clean window with just the table and print it.
       const printCutList = () => {
         if (!result || !result.cutList || !result.cutList.length) return;
@@ -9026,6 +9095,8 @@ const frontendHTML = `<!DOCTYPE html>
           if (selectedObj.kind === "struct") delStruct(selectedObj.id);
           else if (selectedObj.kind === "point") delPoint(selectedObj.id);
           else if (selectedObj.kind === "wall") toggleWallOpen(selectedObj.id);
+          else if (selectedObj.kind === "polywall") { polyToggleOpen(selectedObj.id); return; }
+          else if (selectedObj.kind === "polyvertex") { polyJoinVertex(selectedObj.id); return; }
           setSelectedObj(null);
         };
         window.addEventListener("keydown", onDel); return () => window.removeEventListener("keydown", onDel);
@@ -9525,6 +9596,31 @@ const frontendHTML = `<!DOCTYPE html>
                     ))}
                   </div>
                 )}
+                {/* Room-shape toggle + free-form polygon presets */}
+                <div className="mb-2 flex items-center gap-2 flex-wrap text-xs">
+                  <span className="text-slate-500 font-semibold">Room shape:</span>
+                  {[["rect", "▭ Rectangle"], ["poly", "⬡ Free-form"]].map(([v, l]) => <button key={v} onClick={() => setShape(v)} className={"px-2.5 py-1 rounded border " + (room.shape === v ? "bg-cyan-600 border-cyan-600 text-white" : "bg-white border-slate-300 text-slate-600")}>{l}</button>)}
+                  {room.shape === "poly" && <React.Fragment><span className="text-slate-300">|</span><span className="text-slate-400">Preset:</span>{[["rect", "Rect"], ["L", "L-shape"], ["U", "U-shape"]].map(([v, l]) => <button key={v} onClick={() => usePreset(v)} className="px-2 py-1 rounded border bg-white border-slate-300 text-slate-600 hover:border-cyan-400">{l}</button>)}</React.Fragment>}
+                </div>
+                {room.shape === "poly" ? (<React.Fragment>
+                  {selectedObj && selectedObj.kind === "polywall" && (() => { const poly = curPoly(); const i = selectedObj.id; const a = poly[i], b = poly[(i + 1) % poly.length]; const len = Math.round(Math.hypot(b.x - a.x, b.y - a.y)); const isOpen = (room.openWalls || []).indexOf(i) >= 0, isLock = (room.lockedWalls || []).indexOf(i) >= 0; return (
+                    <div className="mb-2 flex items-center gap-2 flex-wrap text-xs bg-cyan-50 border border-cyan-200 rounded-lg px-3 py-2">
+                      <span className="font-semibold text-cyan-700">🧱 Wall {i + 1}</span><span className="text-slate-500">Length {len} mm</span>
+                      <button onClick={() => polySplitWall(i)} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-indigo-700">✂ Split</button>
+                      <button onClick={() => polyToggleLock(i)} className={"px-2 py-0.5 rounded border " + (isLock ? "bg-amber-100 border-amber-300 text-amber-700" : "bg-white border-slate-300 text-slate-600")}>{isLock ? "🔓 Unlock" : "🔒 Lock"}</button>
+                      <button onClick={() => { polyToggleOpen(i); if (!isOpen) setSelectedObj(null); }} className={"px-2 py-0.5 rounded border " + (isOpen ? "bg-emerald-100 border-emerald-300 text-emerald-700" : "bg-rose-50 border-rose-300 text-rose-600")}>{isOpen ? "↺ Restore" : "🗑 Delete"}</button>
+                      <button onClick={() => setSelectedObj(null)} className="px-2 py-0.5 text-slate-400">✕</button>
+                    </div>); })()}
+                  {selectedObj && selectedObj.kind === "polyvertex" && (() => { const poly = curPoly(); const i = selectedObj.id; const v = poly[i] || { x: 0, y: 0 }; return (
+                    <div className="mb-2 flex items-center gap-2 flex-wrap text-xs bg-cyan-50 border border-cyan-200 rounded-lg px-3 py-2">
+                      <span className="font-semibold text-cyan-700">📍 Vertex {i + 1}</span>
+                      <label className="flex items-center gap-1">X<input type="number" value={v.x} onChange={(e) => polyMoveVertex(i, +e.target.value, v.y)} className="w-20 px-1.5 py-0.5 border border-slate-300 rounded" /></label>
+                      <label className="flex items-center gap-1">Y<input type="number" value={v.y} onChange={(e) => polyMoveVertex(i, v.x, +e.target.value)} className="w-20 px-1.5 py-0.5 border border-slate-300 rounded" /></label>
+                      <button onClick={() => polyJoinVertex(i)} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-indigo-700">⛓ Join (merge walls)</button>
+                      <button onClick={() => setSelectedObj(null)} className="px-2 py-0.5 text-slate-400">✕</button>
+                    </div>); })()}
+                  <RoomPolygon2D polygon={curPoly()} openWalls={room.openWalls} lockedWalls={room.lockedWalls} selected={selectedObj} onSelectWall={polySelectWall} onSelectVertex={polySelectVertex} onMoveVertex={polyMoveVertex} />
+                </React.Fragment>) : (<React.Fragment>
                 {selectedObj && selectedObj.kind === "wall" && (() => {
                   const nm = selectedObj.id, dimW = nm.indexOf("back") >= 0 || nm.indexOf("front") >= 0, len = dimW ? room.width : room.depth;
                   const isOpen = (room.openWalls || []).indexOf(nm) >= 0, isLock = (room.lockedWalls || []).indexOf(nm) >= 0;
@@ -9548,6 +9644,7 @@ const frontendHTML = `<!DOCTYPE html>
                   onResizeStruct={(id, patch) => updStruct(id, patch)}
                   onMovePoint={(id, along, wall) => updPoint(id, wall ? { along, wall } : { along })}
                   onDeleteObj={(kind, id) => { if (kind === "struct") delStruct(id); else delPoint(id); setSelectedObj(null); }} />
+                </React.Fragment>)}
                 {/* 5.15 Wall Properties modal */}
                 {wallPropEdit && (() => { const wp = getWallProps(wallPropEdit); const set = (f) => setWallProps((p) => ({ ...p, [wallPropEdit]: { ...wp, ...f } })); return (
                   <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/30" onClick={() => setWallPropEdit(null)}>
