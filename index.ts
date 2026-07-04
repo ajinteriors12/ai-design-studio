@@ -6816,7 +6816,7 @@ const frontendHTML = `<!DOCTYPE html>
     // ---- 15.txt 5.16: 2D room plan (top view) showing walls + doors/windows/beams/columns ----
     // 16/17 Part 6: the Top View (plan) is the PRIMARY, EDITABLE room planner. Objects are
     // wall-attached; drag along the wall (snaps to 10 mm), click to select, right-click to delete.
-    function RoomPlan2D({ room, structures, points, selected, onSelect, onMoveStruct, onMovePoint, onResizeStruct, onDeleteObj }) {
+    function RoomPlan2D({ room, structures, points, selected, onSelect, onMoveStruct, onMovePoint, onResizeStruct, onDeleteObj, onSelectWall, onResizeRoom, onWallMenu }) {
       const PC = { sink: "#2563eb", plumbing: "#0891b2", ro: "#14b8a6", chimney: "#6366f1", hob: "#ea580c", gas: "#dc2626", fridge: "#8b5cf6", microwave: "#f59e0b", oven: "#d97706", dishwasher: "#0ea5e9", washing: "#64748b", switchboard: "#eab308", socket: "#22c55e" };
       const Wd = +room.width || 3600, Dp = +room.depth || 2400, pad = 24, maxPx = 460;
       const S = maxPx / Math.max(Wd, Dp), w = Wd * S, h = Dp * S;
@@ -6835,6 +6835,11 @@ const frontendHTML = `<!DOCTYPE html>
       const onMove = (ev) => {
         if (!drag || !svgRef.current) return;
         const r = svgRef.current.getBoundingClientRect();
+        if (drag.kind === "wall") {   // §1: drag the far wall (B/C) to stretch the room
+          if (drag.dim === "width") { const v = Math.max(600, Math.min(12000, Math.round((ev.clientX - r.left - pad) / S / 10) * 10)); onResizeRoom && onResizeRoom({ width: v }); }
+          else { const v = Math.max(600, Math.min(12000, Math.round((ev.clientY - r.top - pad) / S / 10) * 10)); onResizeRoom && onResizeRoom({ depth: v }); }
+          return;
+        }
         const alongPx = horiz(drag.wall) ? (ev.clientX - r.left - pad) : (ev.clientY - r.top - pad);
         const mm = Math.round(alongPx / S / 10) * 10;                             // snap to 10 mm
         const WL = wallLen(drag.wall), MINW = 200;
@@ -6856,11 +6861,33 @@ const frontendHTML = `<!DOCTYPE html>
       const onUp = () => setDrag(null);
       const isSel = (kind, id) => selected && selected.kind === kind && selected.id === id;
       const els = [];
-      els.push(<rect key="rm" x={pad} y={pad} width={w} height={h} fill="#f4f7fb" stroke="#334155" strokeWidth="4" />);
-      els.push(<text key="wA" x={pad + w / 2} y={pad + 12} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="middle">Wall A</text>);
-      els.push(<text key="wB" x={pad + w - 4} y={pad + h / 2} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="end">Wall B</text>);
-      els.push(<text key="wC" x={pad + w / 2} y={pad + h - 5} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="middle">Wall C</text>);
-      els.push(<text key="wD" x={pad + 4} y={pad + h / 2} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="start">Wall D</text>);
+      els.push(<rect key="rm" x={pad} y={pad} width={w} height={h} fill="#f4f7fb" stroke="none" />);
+      els.push(<text key="wA" x={pad + w / 2} y={pad + 12} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="middle" pointerEvents="none">Wall A</text>);
+      els.push(<text key="wB" x={pad + w - 4} y={pad + h / 2} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="end" pointerEvents="none">Wall B</text>);
+      els.push(<text key="wC" x={pad + w / 2} y={pad + h - 5} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="middle" pointerEvents="none">Wall C</text>);
+      els.push(<text key="wD" x={pad + 4} y={pad + h / 2} fill="#1e3a5f" fontSize="10" fontWeight="bold" textAnchor="start" pointerEvents="none">Wall D</text>);
+      // §1: the 4 walls are interactive — click to select, drag the far walls (B/C) to
+      // stretch the room, right-click for the wall menu, lock, or delete (open) a wall.
+      const openWalls = room.openWalls || [], lockedWalls = room.lockedWalls || [];
+      const selWall = selected && selected.kind === "wall" ? selected.id : null;
+      const WALLS = [
+        { name: "Wall A (back)", x1: pad, y1: pad, x2: pad + w, y2: pad, dim: "width" },
+        { name: "Wall B (right)", x1: pad + w, y1: pad, x2: pad + w, y2: pad + h, dim: "depth", far: true },
+        { name: "Wall C (front)", x1: pad, y1: pad + h, x2: pad + w, y2: pad + h, dim: "width", far: true },
+        { name: "Wall D (left)", x1: pad, y1: pad, x2: pad, y2: pad + h, dim: "depth" },
+      ];
+      WALLS.forEach((wl) => {
+        const isOpen = openWalls.indexOf(wl.name) >= 0, isLocked = lockedWalls.indexOf(wl.name) >= 0, selw = selWall === wl.name;
+        const canResize = wl.far && !isOpen && !isLocked;
+        els.push(<line key={wl.name + "s"} x1={wl.x1} y1={wl.y1} x2={wl.x2} y2={wl.y2} stroke={selw ? "#ea580c" : isOpen ? "#cbd5e1" : "#334155"} strokeWidth={selw ? 7 : 4} strokeDasharray={isOpen ? "6 5" : "0"} strokeLinecap="round" pointerEvents="none" />);
+        const down = (e) => { e.stopPropagation(); onSelectWall && onSelectWall(wl.name); if (canResize) setDrag({ kind: "wall", wall: wl.name, dim: wl.dim }); };
+        const ctx = (e) => { e.preventDefault(); e.stopPropagation(); onSelectWall && onSelectWall(wl.name); onWallMenu && onWallMenu(wl.name, e.clientX, e.clientY); };
+        els.push(<line key={wl.name + "hit"} x1={wl.x1} y1={wl.y1} x2={wl.x2} y2={wl.y2} stroke="transparent" strokeWidth={14} strokeLinecap="round" style={{ cursor: canResize ? (wl.dim === "width" ? "ew-resize" : "ns-resize") : "pointer" }} onPointerDown={down} onContextMenu={ctx} />);
+        const mx = (wl.x1 + wl.x2) / 2, my = (wl.y1 + wl.y2) / 2;
+        const lox = wl.name.indexOf("right") >= 0 ? -18 : wl.name.indexOf("left") >= 0 ? 18 : 0;
+        const loy = wl.name.indexOf("back") >= 0 ? 22 : wl.name.indexOf("front") >= 0 ? -10 : 3;
+        els.push(<text key={wl.name + "len"} x={mx + lox} y={my + loy} fill={selw ? "#ea580c" : "#94a3b8"} fontSize="8" textAnchor="middle" pointerEvents="none">{isOpen ? "open" : String(wl.dim === "width" ? Wd : Dp)}{isLocked ? " 🔒" : ""}</text>);
+      });
       (structures || []).forEach((s) => {
         const sg = seg(s.wall), L = (s.width && s.kind !== "beam") ? s.width : (s.kind === "beam" && !s.width ? wallLen(s.wall) : (s.width || 300));
         const x1 = sg.x + sg.dx * (s.pos || 0) * S, y1 = sg.y + sg.dy * (s.pos || 0) * S;
@@ -6910,7 +6937,7 @@ const frontendHTML = `<!DOCTYPE html>
         );
       });
       els.push(<text key="lab" x={pad + w / 2} y={pad + h + 14} fill="#94a3b8" fontSize="9" textAnchor="middle">Top View — {Wd}×{Dp} mm · drag objects · right-click to delete</text>);
-      return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Top View (editable) — drag any object across walls (snaps to nearest wall) · resize handles on selection · right-click to delete</div><svg ref={svgRef} width={w + pad * 2} height={h + pad * 2 + 18} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
+      return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Top View (editable) — click a WALL to select · drag Wall B/C to stretch the room · right-click a wall to lock/delete · drag any object across walls (snaps) · Delete key removes selection</div><svg ref={svgRef} width={w + pad * 2} height={h + pad * 2 + 18} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
     }
 
     // ---- 15.txt 5.14: interactive EMPTY 3D room (3D-first workflow) ----------
@@ -8778,7 +8805,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [live, setLive] = useState({ on: false, clients: 0 });
       const [tile, setTile] = useState({ on: true, color: "#e8eef0", grid: "#c2d0d4", size: 100, pattern: "grid" });   // 13.pdf §4 selectable backsplash
       // 15.txt 3D-first workflow: room model + interactive empty 3D room shown before generation
-      const [room, setRoom] = useState({ width: 3600, depth: 2400, height: 2700, ceiling: 2700, wallA: 3600, wallB: 2400, wallC: 3600, wallD: 2400, unit: "mm" });
+      const [room, setRoom] = useState({ width: 3600, depth: 2400, height: 2700, ceiling: 2700, wallA: 3600, wallB: 2400, wallC: 3600, wallD: 2400, unit: "mm", openWalls: [], lockedWalls: [], wallThickness: 100 });
       const [selectedWall, setSelectedWall] = useState(null);
       const [structures, setStructures] = useState([]);   // doors/windows/beams/columns on walls (5.16)
       const [wallProps, setWallProps] = useState({});     // {wallName: {height,thickness,direction,usable,allowCab,allowTall,allowWallCab}} (5.15)
@@ -8792,6 +8819,11 @@ const frontendHTML = `<!DOCTYPE html>
       const placePoint = (p) => { setPoints((prev) => [...prev, { id: "pt" + prev.length + "_" + p.type, ...p }]); };
       const updPoint = (id, f) => setPoints((p) => p.map((q) => q.id === id ? { ...q, ...f } : q));
       const delPoint = (id) => setPoints((p) => p.filter((q) => q.id !== id));
+      // §1: interactive wall editing (select / stretch / lock / delete-open)
+      const selectWall2D = (name) => { setSelectedObj({ kind: "wall", id: name }); setSelectedWall(name); };
+      const resizeRoom = (patch) => setRoom((r) => { const nr = { ...r }; if (patch.width != null) { nr.width = patch.width; nr.wallA = patch.width; nr.wallC = patch.width; } if (patch.depth != null) { nr.depth = patch.depth; nr.wallB = patch.depth; nr.wallD = patch.depth; } return nr; });
+      const toggleWallOpen = (name) => setRoom((r) => { const o = (r.openWalls || []).slice(); const i = o.indexOf(name); if (i >= 0) o.splice(i, 1); else o.push(name); return { ...r, openWalls: o }; });
+      const toggleWallLock = (name) => setRoom((r) => { const l = (r.lockedWalls || []).slice(); const i = l.indexOf(name); if (i >= 0) l.splice(i, 1); else l.push(name); return { ...r, lockedWalls: l }; });
       // 5.13: print ONLY the cut list — open a clean window with just the table and print it.
       const printCutList = () => {
         if (!result || !result.cutList || !result.cutList.length) return;
@@ -8961,6 +8993,19 @@ const frontendHTML = `<!DOCTYPE html>
       const [cutListPage, setCutListPage] = useState(false);   // 5.13: separate Production Cut List page
       const [roomWarn, setRoomWarn] = useState(null);          // 6.14: 'Room definition incomplete' warning (keeps planner visible)
       const [selectedObj, setSelectedObj] = useState(null);    // 6.1: selected Top-View object {kind,id}
+      // §1/§2: Delete key removes the selected object (struct/point) or opens the selected wall.
+      React.useEffect(() => {
+        const onDel = (e) => {
+          const tag = (e.target && e.target.tagName) || ""; if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+          if ((e.key || "").toLowerCase() !== "delete" || !selectedObj) return;
+          e.preventDefault();
+          if (selectedObj.kind === "struct") delStruct(selectedObj.id);
+          else if (selectedObj.kind === "point") delPoint(selectedObj.id);
+          else if (selectedObj.kind === "wall") toggleWallOpen(selectedObj.id);
+          setSelectedObj(null);
+        };
+        window.addEventListener("keydown", onDel); return () => window.removeEventListener("keydown", onDel);
+      }, [selectedObj]);
       const canvasScrollRef = React.useRef(null);   // 6.11/6.12: 2D viewport (pan via scroll + cursor-centred wheel zoom)
       const last2dRef = React.useRef("plan");        // 5.12: remember the last 2D view for the 2D/3D toggle
       const cam3dRef = React.useRef(null);           // 6.11: persist 3D camera (position/target) across rebuilds
@@ -9433,6 +9478,9 @@ const frontendHTML = `<!DOCTYPE html>
                     <div className="px-3 py-1 text-[10px] text-slate-400 border-b border-slate-100">{wallMenu.wall}</div>
                     <button onClick={() => { setWallPropEdit(wallMenu.wall); setWallMenu(null); }} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-cyan-700">⚙ Wall Properties…</button>
                     {["door", "window", "beam", "column"].map((k) => <button key={k} onClick={() => addStruct(wallMenu.wall, k)} className="block w-full text-left px-3 py-1 hover:bg-slate-50 capitalize">＋ Add {k}</button>)}
+                    <div className="border-t border-slate-100 my-1"></div>
+                    <button onClick={() => { toggleWallLock(wallMenu.wall); setWallMenu(null); }} className="block w-full text-left px-3 py-1 hover:bg-amber-50 text-amber-700">{(room.lockedWalls || []).indexOf(wallMenu.wall) >= 0 ? "🔓 Unlock wall" : "🔒 Lock wall"}</button>
+                    <button onClick={() => { toggleWallOpen(wallMenu.wall); setWallMenu(null); setSelectedObj(null); }} className="block w-full text-left px-3 py-1 hover:bg-rose-50 text-rose-600">{(room.openWalls || []).indexOf(wallMenu.wall) >= 0 ? "↺ Restore wall" : "🗑 Delete (open) wall"}</button>
                   </div>
                 )}
                 {/* 5.16 structures list (edit/delete) + 5.16 2D room plan */}
@@ -9453,8 +9501,25 @@ const frontendHTML = `<!DOCTYPE html>
                     ))}
                   </div>
                 )}
+                {selectedObj && selectedObj.kind === "wall" && (() => {
+                  const nm = selectedObj.id, dimW = nm.indexOf("back") >= 0 || nm.indexOf("front") >= 0, len = dimW ? room.width : room.depth;
+                  const isOpen = (room.openWalls || []).indexOf(nm) >= 0, isLock = (room.lockedWalls || []).indexOf(nm) >= 0;
+                  return (<div className="mb-2 flex items-center gap-2 flex-wrap text-xs bg-cyan-50 border border-cyan-200 rounded-lg px-3 py-2">
+                    <span className="font-semibold text-cyan-700">🧱 {nm}</span>
+                    <label className="flex items-center gap-1">Length<input type="number" value={len} disabled={isLock} onChange={(e) => resizeRoom(dimW ? { width: +e.target.value } : { depth: +e.target.value })} className="w-20 px-1.5 py-0.5 border border-slate-300 rounded disabled:bg-slate-100" /></label>
+                    <label className="flex items-center gap-1">Thk<input type="number" value={room.wallThickness || 100} onChange={(e) => setRoom({ ...room, wallThickness: +e.target.value })} className="w-16 px-1.5 py-0.5 border border-slate-300 rounded" /></label>
+                    <label className="flex items-center gap-1">Ht<input type="number" value={room.height} onChange={(e) => setRoom({ ...room, height: +e.target.value })} className="w-16 px-1.5 py-0.5 border border-slate-300 rounded" /></label>
+                    <button onClick={() => toggleWallLock(nm)} className={"px-2 py-0.5 rounded border " + (isLock ? "bg-amber-100 border-amber-300 text-amber-700" : "bg-white border-slate-300 text-slate-600")}>{isLock ? "🔓 Unlock" : "🔒 Lock"}</button>
+                    <button onClick={() => { toggleWallOpen(nm); if (!isOpen) setSelectedObj(null); }} className={"px-2 py-0.5 rounded border " + (isOpen ? "bg-emerald-100 border-emerald-300 text-emerald-700" : "bg-rose-50 border-rose-300 text-rose-600")}>{isOpen ? "↺ Restore" : "🗑 Delete"}</button>
+                    <button onClick={() => setWallPropEdit(nm)} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-cyan-700">⚙ Properties…</button>
+                    <button onClick={() => setSelectedObj(null)} className="px-2 py-0.5 text-slate-400">✕</button>
+                  </div>);
+                })()}
                 <RoomPlan2D room={room} structures={structures} points={points} selected={selectedObj}
                   onSelect={(o) => setSelectedObj(o)}
+                  onSelectWall={(name) => selectWall2D(name)}
+                  onResizeRoom={(patch) => resizeRoom(patch)}
+                  onWallMenu={(name, x, y) => { setSelectedWall(name); setWallMenu({ wall: name, x, y }); }}
                   onMoveStruct={(id, pos, wall) => updStruct(id, wall ? { pos, wall } : { pos })}
                   onResizeStruct={(id, patch) => updStruct(id, patch)}
                   onMovePoint={(id, along, wall) => updPoint(id, wall ? { along, wall } : { along })}
