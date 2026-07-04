@@ -4420,6 +4420,7 @@ function hardwareSchedule(layout: any): HwRow[] {
   return [...m.values()];
 }
 function boq(layout: any): { item: string; qty: number; unit: string }[] {
+  if (layout && layout.wardrobe) return wardrobeBoqRows(layout);   // wardrobe designs use their own BOQ engine
   const cl = cutList(layout), hw = hardwareSchedule(layout), runs = layout.runs || [];
   const panels = cl.reduce((s, r) => s + r.qty, 0);
   const areaft = cl.reduce((s, r) => s + r.h * r.w * r.qty / 1e6, 0) * 10.7639;
@@ -13184,7 +13185,35 @@ function scopeFaceSqft(layout: any, scope: string): number {
   return Math.round(mm2 / 92903 * 10) / 10;   // 1 sqft = 92903 mm²
 }
 const SCOPE_LABEL: Record<string, string> = { base: "Base cabinets", wall: "Wall cabinets", tall: "Tall units" };
+// ── Wardrobe → kitchen quote/BOQ adapter ─────────────────────────────────────
+// A saved wardrobe (layout.wardrobe = {input, data, selIdx}) has runs:[] so the
+// kitchen boq()/priceQuote() would report ₹0. These map the wardrobe's OWN costed
+// BOQ into the shared quote shape so the gallery Estimate / quote CSV / quote PDF
+// all show real, authoritative wardrobe numbers instead of an empty kitchen quote.
+function wardrobeSelectedOption(layout: any): any { const w = (layout && layout.wardrobe) || {}; const opts = (w.data && w.data.options) || []; return opts[w.selIdx || 0] || opts[0] || null; }
+function wardrobeBoqRows(layout: any): { item: string; qty: number; unit: string }[] {
+  const sel = wardrobeSelectedOption(layout); if (!sel) return [];
+  const rows: { item: string; qty: number; unit: string }[] = [];
+  if (sel.boq && Array.isArray(sel.boq.lines)) for (const l of sel.boq.lines) rows.push({ item: l.item, qty: l.qty, unit: l.unit });
+  else { const rp = sel.reports || {}; (rp.cut || []).forEach((cu: any) => rows.push({ item: cu.part + " (" + cu.size + ")", qty: cu.qty, unit: "no" })); (rp.hardware || []).forEach((h: any) => rows.push({ item: h.item, qty: h.qty, unit: "no" })); }
+  return rows;
+}
+function wardrobeQuoteFromLayout(layout: any) {
+  const sel = wardrobeSelectedOption(layout); if (!sel || !sel.boq) return null;
+  const b = sel.boq;
+  const lines = (b.lines || []).map((l: any) => ({ item: l.item, qty: l.qty, unit: l.unit, rate: l.rate, amount: l.amount }));
+  if (!lines.length) return null;
+  const subtotal = b.subtotal || lines.reduce((s: number, l: any) => s + l.amount, 0);
+  const margin = b.labour || 0;   // the wardrobe engine's 22% labour uplift stands in for the quote "margin"
+  const marginPct = subtotal ? Math.round(margin / subtotal * 1000) / 10 : 0;
+  const taxable = b.taxable || (subtotal + margin);
+  const gst = b.gst || 0;
+  const gstPct = taxable ? Math.round(gst / taxable * 1000) / 10 : 0;
+  const total = b.grandTotal || (taxable + gst);
+  return { lines, subtotal, marginPct, margin, taxable, gstPct, gst, total, currency: "INR", wardrobe: true };
+}
 function priceQuote(layout: any, rates: Record<string, number>, scopes?: Record<string, any>, cabMats?: any) {
+  if (layout && layout.wardrobe) { const wq = wardrobeQuoteFromLayout(layout); if (wq) return wq; }
   const r = { ...DEFAULT_RATES, ...(rates || {}) };
   const lines = boq(layout).map((row) => {
     const key = rateKeyFor(row.item);
