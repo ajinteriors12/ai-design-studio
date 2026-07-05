@@ -17,7 +17,7 @@ try {
   const errs = [];
   page.on("console", (m) => { if (m.type() === "error") errs.push(m.text()); });
   page.on("pageerror", (e) => errs.push(String(e)));
-  await page.goto(B, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.goto(B + "/?dev=1", { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.waitForSelector("#root", { timeout: 15000 });
   await sleep(1800);
   ok("switched to Free-form", await clickBtnRe(page, /⬡ Free-form/));

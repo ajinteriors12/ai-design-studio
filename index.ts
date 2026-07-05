@@ -7376,8 +7376,19 @@ const frontendHTML = `<!DOCTYPE html>
         scene.add(new THREE.HemisphereLight(0xffffff, 0x90a0b5, 1.0));
         const dl = new THREE.DirectionalLight(0xffffff, 0.6); dl.castShadow = true; dl.shadow.mapSize.set(1024, 1024); dl.shadow.bias = -0.0008; scene.add(dl);
         const Wd = +room.width || 3600, Dp = +room.depth || 2400, Ht = +room.height || 2700, th = 80;
-        const floor = new THREE.Mesh(new THREE.PlaneGeometry(Wd, Dp), new THREE.MeshStandardMaterial({ color: 0xe3e9f0, roughness: 1 }));
-        floor.rotation.x = -Math.PI / 2; floor.position.set(Wd / 2, 0, Dp / 2); floor.receiveShadow = true; scene.add(floor);
+        // §Free-form: when the room is a polygon, floor + walls follow the drawn footprint (not the 4-box rectangle)
+        const poly = (room.shape === "poly" && Array.isArray(room.polygon) && room.polygon.length >= 3) ? room.polygon : null;
+        const openW = Array.isArray(room.openWalls) ? room.openWalls : [];
+        let floor;
+        if (poly) {
+          const shp = new THREE.Shape(); shp.moveTo(poly[0].x, -poly[0].y); for (let i = 1; i < poly.length; i++) shp.lineTo(poly[i].x, -poly[i].y); shp.closePath();
+          const fg = new THREE.ShapeGeometry(shp); fg.rotateX(-Math.PI / 2);
+          floor = new THREE.Mesh(fg, new THREE.MeshStandardMaterial({ color: 0xe3e9f0, roughness: 1, side: THREE.DoubleSide }));
+          floor.receiveShadow = true; scene.add(floor);
+        } else {
+          floor = new THREE.Mesh(new THREE.PlaneGeometry(Wd, Dp), new THREE.MeshStandardMaterial({ color: 0xe3e9f0, roughness: 1 }));
+          floor.rotation.x = -Math.PI / 2; floor.position.set(Wd / 2, 0, Dp / 2); floor.receiveShadow = true; scene.add(floor);
+        }
         dl.position.set(Wd * 0.3, Ht * 2 + 1500, Dp * 0.3 + 1500); dl.target.position.set(Wd / 2, 0, Dp / 2); scene.add(dl.target);
         const sc = dl.shadow.camera, rr = Math.max(Wd, Dp); sc.left = -rr; sc.right = rr; sc.top = rr; sc.bottom = -rr; sc.near = 100; sc.far = Ht * 6 + 5000; sc.updateProjectionMatrix();
         const wallMeshes = [], structMeshes = [];   // 6.5–6.7: interactive door/window/beam meshes
@@ -7402,10 +7413,19 @@ const frontendHTML = `<!DOCTYPE html>
             structMeshes.push(mm); scene.add(mm);
           });
         };
-        mkWall("Wall A (back)", Wd, Wd / 2, 0, 0);
-        mkWall("Wall B (right)", Dp, Wd, Dp / 2, Math.PI / 2);
-        mkWall("Wall C (front)", Wd, Wd / 2, Dp, 0);
-        mkWall("Wall D (left)", Dp, 0, Dp / 2, Math.PI / 2);
+        if (poly) {
+          for (let i = 0; i < poly.length; i++) {
+            if (openW.indexOf(i) >= 0) continue;   // an "opened" edge is a doorway/gap — no wall
+            const a = poly[i], b = poly[(i + 1) % poly.length];
+            const dx = b.x - a.x, dz = b.y - a.y, len = Math.hypot(dx, dz); if (len < 1) continue;
+            mkWall("Wall " + (i + 1), len, (a.x + b.x) / 2, (a.y + b.y) / 2, Math.atan2(-dz, dx));
+          }
+        } else {
+          mkWall("Wall A (back)", Wd, Wd / 2, 0, 0);
+          mkWall("Wall B (right)", Dp, Wd, Dp / 2, Math.PI / 2);
+          mkWall("Wall C (front)", Wd, Wd / 2, Dp, 0);
+          mkWall("Wall D (left)", Dp, 0, Dp / 2, Math.PI / 2);
+        }
         // 5.17 mandatory-point markers (sphere per point on its wall/floor; distance + height stored)
         const pointWorld = (p) => { const a = +p.along || 0, hy = +p.height || 0; if (p.wall === "Floor") return [+p.x || Wd / 2, 35, +p.z || Dp / 2]; if (p.wall.indexOf("back") >= 0) return [a, hy, th / 2 + 10]; if (p.wall.indexOf("front") >= 0) return [a, hy, Dp - th / 2 - 10]; if (p.wall.indexOf("right") >= 0) return [Wd - th / 2 - 10, hy, a]; return [th / 2 + 10, hy, a]; };
         (points || []).forEach((p) => {
@@ -9719,6 +9739,13 @@ const frontendHTML = `<!DOCTYPE html>
               <input type="number" value={wallC} onChange={e => setWallC(e.target.value)} disabled={loading} min="900" max="8000"
                 className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50" />
             </React.Fragment>}
+            {isKitchen && room && room.shape === "poly" && Array.isArray(room.polygon) && room.polygon.length >= 3 && (() => {
+              const pl = room.polygon, ed = [];
+              for (let i = 0; i < pl.length; i++) { const a = pl[i], b = pl[(i + 1) % pl.length]; ed.push(Math.round(Math.hypot(b.x - a.x, b.y - a.y))); }
+              const need = (isU || isG) ? 3 : needsB ? 2 : 1;
+              const fit = () => { const s = ed.slice().sort((a, z) => z - a).slice(0, need).map((v) => Math.max(900, Math.min(8000, v))); if (s[0]) setWall(s[0]); if (need >= 2 && s[1]) setWallB(s[1]); if (need >= 3 && s[2]) setWallC(s[2]); };
+              return <button type="button" onClick={fit} disabled={loading} className="w-full text-[11px] px-2 py-1.5 rounded border border-cyan-300 text-cyan-700 bg-cyan-50 hover:bg-cyan-100 disabled:opacity-50">⬡ Fit walls to drawn room ({room.polygon.length} edges → {need} run{need > 1 ? "s" : ""})</button>;
+            })()}
             {isKitchen && <React.Fragment>
               <label className="block text-xs text-slate-500">Chimney width (mm)</label>
               <select value={chimneyWidth} onChange={e => setChimneyWidth(e.target.value)} disabled={loading}
