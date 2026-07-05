@@ -6543,6 +6543,9 @@ const frontendHTML = `<!DOCTYPE html>
       const L = run.length, W = width || 900, S = W / L, vH = Math.round((width || 900) * 0.4), vS = vH / 2400, floorY = vH;
       const baseTopY = floorY - 850 * vS;
       const reflow = (arr) => { let x = 0; return arr.map((c) => { const n = { ...c, x }; x += c.w; return n; }); };
+      // §7 plan-CAD: a group is a contiguous run of cabinets sharing groupId; expand to the whole group at i
+      const groupRange = (arr, i) => { const gid = arr[i] && arr[i].groupId; if (gid == null) return [i, i]; let a = i, b = i; while (a > 0 && arr[a - 1].groupId === gid) a--; while (b < arr.length - 1 && arr[b + 1].groupId === gid) b++; return [a, b]; };
+      const nextGid = (arr) => "g" + (Math.max(0, ...arr.map((x) => (x.groupId ? (parseInt(String(x.groupId).slice(1), 10) || 0) : 0))) + 1);
       // ── MANDATORY: chimney ⇄ 3-drawer bond (5.9.11) ──────────────────────────
       // The base row (3-drawer) and wall row (chimney) pack independently, so any edit
       // can drift them apart. syncChimney() re-centres the chimney zone [sidepanel·glass·
@@ -6717,6 +6720,12 @@ const frontendHTML = `<!DOCTYPE html>
           setMsg("Cabinet deleted" + msgTail + warn);
         }
         else if (op === "mirror") { setRow(row, reflow(arr.slice().reverse())); setSel(null); setMsg("Row mirrored about its centre."); }
+        else if (op === "array") { const n = Math.max(1, +arg || 1); const copies = []; for (let k = 0; k < n; k++) copies.push({ ...c, groupId: null }); arr.splice(i + 1, 0, ...copies); setRow(row, reflow(arr)); setSel(null); setMsg("Array: added " + n + " copy(ies) — " + (n + 1) + " identical cabinets in a row."); }
+        else if (op === "group") { const gid = nextGid(arr); let a2 = i, b2; if (arg === "end") { b2 = arr.length - 1; } else { const N = Math.max(2, +arg || 2); a2 = Math.max(0, Math.min(i, arr.length - N)); b2 = Math.min(arr.length - 1, a2 + N - 1); } for (let k = a2; k <= b2; k++) arr[k] = { ...arr[k], groupId: gid }; setRow(row, arr); setSel({ row, i: a2 }); setMsg("Grouped " + (b2 - a2 + 1) + " cabinets (" + gid + ") — duplicate / mirror / delete them together."); }
+        else if (op === "ungroup") { const [a, b] = groupRange(arr, i); for (let k = a; k <= b; k++) arr[k] = { ...arr[k], groupId: null }; setRow(row, arr); setMsg("Ungrouped " + (b - a + 1) + " cabinet(s)."); }
+        else if (op === "dup-group") { const [a, b] = groupRange(arr, i); const gid = arr[a].groupId ? nextGid(arr) : null; const seg = arr.slice(a, b + 1).map((x) => ({ ...x, groupId: gid })); arr.splice(b + 1, 0, ...seg); setRow(row, reflow(arr)); setMsg("Duplicated " + seg.length + " cabinet(s)" + (gid ? " as a new group." : ".")); }
+        else if (op === "mirror-group") { const [a, b] = groupRange(arr, i); if (b <= a) { setMsg("Not grouped — use “Mirror row”, or group cabinets first."); } else { const seg = arr.slice(a, b + 1).reverse(); arr.splice(a, b - a + 1, ...seg); setRow(row, reflow(arr)); setSel(null); setMsg("Mirrored group about its centre."); } }
+        else if (op === "del-group") { const [a, b] = groupRange(arr, i); const cnt = b - a + 1, freed = Math.round(arr.slice(a, b + 1).reduce((s, x) => s + x.w, 0)); arr.splice(a, cnt); setRow(row, reflow(arr)); setSel(null); setMsg("Deleted " + cnt + " cabinet(s) — run shortened by " + freed + " mm (gap closed)."); }
         else if (op === "similar") { const k = c.kind; let n = 0; const a2 = arr.map((x) => { if (x.kind === k && !x.locked) { n++; return { ...x, w: c.w, h: c.h }; } return x; }); setRow(row, reflow(a2)); setMsg("Applied to " + n + " similar cabinet(s)."); }
         else if (op === "shelf") { c.shelves = Math.max(0, (c.shelves != null ? c.shelves : (row === "wall" ? 2 : 3)) + arg); arr[i] = c; setRow(row, arr); setMsg("Shelves: " + c.shelves + "."); }
         else if (op === "cosmetic") { setMsg(arg + " applied (material/finish/colour/LED reflect in the production build)."); }
@@ -6845,8 +6854,9 @@ const frontendHTML = `<!DOCTYPE html>
           : (c.label || "").includes("Blind") ? { fill: "#d97706", stroke: "#92400e" }
           : { fill: "#e11d48", stroke: "#9f1239" };
         return (
-          <g key={row + i} data-kind={c.kind} data-row={row}>
+          <g key={row + i} data-kind={c.kind} data-row={row} data-group={c.groupId || ""}>
             {body}
+            {c.groupId && <rect x={x + 0.5} y={y + 0.5} width={w - 1} height={3} fill={"hsl(" + ((parseInt(String(c.groupId).slice(1), 10) * 67) % 360) + ",72%,52%)"} pointerEvents="none" />}
             {c.drawers > 0 && drawerBandsC(c).map((f, d) => <line key={d} x1={x} y1={y + h * f} x2={x + w - 1} y2={y + h * f} stroke="#2f74d0" strokeWidth="0.5" pointerEvents="none" />)}
             {shelves > 0 && Array.from({ length: shelves }, (_, k) => <line key={"s" + k} x1={x + 1} y1={y + h * (k + 1) / (shelves + 1)} x2={x + w - 2} y2={y + h * (k + 1) / (shelves + 1)} stroke="#94a3b8" strokeWidth="0.4" pointerEvents="none" />)}
             {faceEls(row, c, x, y, w, h)}
@@ -7022,6 +7032,20 @@ const frontendHTML = `<!DOCTYPE html>
               <button onClick={() => act(menu.row, menu.i, "duplicate")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Duplicate</button>
               <button onClick={() => act(menu.row, menu.i, "mirror")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Mirror row</button>
               <button onClick={() => act(menu.row, menu.i, "lock")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">{c.locked ? "Unlock" : "Lock"} cabinet</button>
+              <div className="border-t border-slate-100 my-1"></div>
+              <div className="px-3 py-0.5 text-[10px] text-slate-400">§7 Array · Group · Mirror{c.groupId ? " — in " + c.groupId : ""}</div>
+              <div className="px-3 py-1 flex items-center gap-1 flex-wrap text-[11px]">
+                <span className="text-slate-500">Array</span>
+                {[2, 3, 4].map((n) => <button key={"ar" + n} onClick={() => act(menu.row, menu.i, "array", n - 1)} className="px-1.5 py-0.5 rounded border border-indigo-200 text-indigo-700 hover:bg-indigo-50">×{n}</button>)}
+              </div>
+              <div className="px-3 py-1 flex items-center gap-1 flex-wrap text-[11px]">
+                <span className="text-slate-500">Group</span>
+                {[["2", 2], ["3", 3], ["→End", "end"]].map(([l, v]) => <button key={"gr" + l} onClick={() => act(menu.row, menu.i, "group", v)} className="px-1.5 py-0.5 rounded border border-violet-200 text-violet-700 hover:bg-violet-50">{l}</button>)}
+                <button onClick={() => act(menu.row, menu.i, "ungroup")} className="px-1.5 py-0.5 rounded border border-slate-200 text-slate-500 hover:bg-slate-50">Ungroup</button>
+              </div>
+              <button onClick={() => act(menu.row, menu.i, "dup-group")} className="block w-full text-left px-3 py-1 hover:bg-violet-50 text-slate-700">Duplicate group</button>
+              <button onClick={() => act(menu.row, menu.i, "mirror-group")} className="block w-full text-left px-3 py-1 hover:bg-violet-50 text-slate-700">Mirror group</button>
+              <button onClick={() => act(menu.row, menu.i, "del-group")} className="block w-full text-left px-3 py-1 hover:bg-rose-50 text-rose-600">Delete group</button>
               {menu.row === "wall" && <React.Fragment>
                 <button onClick={() => act(menu.row, menu.i, "cosmetic", "Material")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Material / Finish / Colour…</button>
                 <button onClick={() => act(menu.row, menu.i, "cosmetic", "LED profile")} className="block w-full text-left px-3 py-1 hover:bg-cyan-50 text-slate-700">Add LED profile</button>
