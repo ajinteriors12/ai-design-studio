@@ -11352,11 +11352,34 @@ const frontendHTML = `<!DOCTYPE html>
         let selKey = null;
         const clipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 1e7);   // §13.4 section cut (X-plane, off by default)
         let lodSkipEdges = false;   // §13 LOD: on large/busy wardrobes drop interior edge overlays + rod segments
-        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac, clippingPlanes: [clipPlane], clipShadows: true })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; g.add(m); if (!(opac != null && opac < 0.02) && !(lodSkipEdges && ud && ud.cell)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8, clippingPlanes: [clipPlane] })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; g.add(e); } return m; };
-        const buildGroup = (secsData) => {
-          while (g.children.length) { const chd = g.children.pop(); if (chd.geometry) chd.geometry.dispose(); if (chd.material) chd.material.dispose(); }
-          const cellCnt = secsData.reduce((a, s) => a + s.columns.reduce((b, c) => b + c.cells.length, 0), 0);
-          lodSkipEdges = cellCnt > 36;   // §13 LOD kicks in on busy layouts
+        let boxTarget = g;          // §20 folded L/U build routes meshes into per-wing sub-groups
+        // §20 folded L/U-shape 3D: fold the flat run into wings + corners (mirrors renderWardrobePlanShaped geometry)
+        const isFolded = (opt.shape === "l" || opt.shape === "u") && Array.isArray(opt.wings) && opt.wings.length > 0;
+        let foldCx = 0, foldCz = 0, foldBw = Wd;   // footprint centre + span for explode/section in folded mode
+        let ledMatShared = null;
+        const getLedMat = () => ledMatShared || (ledMatShared = new THREE.MeshStandardMaterial({ color: 0xfff4d6, emissive: 0xffe6a8, emissiveIntensity: 1.5, roughness: 0.4, clippingPlanes: [clipPlane] }));
+        const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac, clippingPlanes: [clipPlane], clipShadows: true })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; boxTarget.add(m); if (!(opac != null && opac < 0.02) && !(lodSkipEdges && ud && ud.cell)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8, clippingPlanes: [clipPlane] })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; boxTarget.add(e); } return m; };
+        // shared column renderer — partition + cells (+ per-column shutter & LED strip), at local run offset localX
+        const emitColumn = (col, si, ci, localX, secKind) => {
+          const cw = col.w, cxMid = localX + cw / 2, usableH = H - plinth - loftH;
+          if (localX > 0) box(T, usableH, D, localX, plinth + usableH / 2, 0, WOOD);
+          let yb = plinth;
+          col.cells.forEach((cell, k) => {
+            const ch = cell.hMM, yt = yb + ch, kind = cell.kind, kl = kind.toLowerCase(), colColor = parseInt((cell.color || "#cbd5e1").slice(1), 16) || 0xcbd5e1;
+            const key = si + "-" + ci + "-" + k, ud = { cell: true, si, ci, k, key }, hl = key === selKey;
+            if (kind === "shelf" || kind === "handbag" || kind === "shoe" || kind === "kidsShelf" || kind === "cornerShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : (kind === "cornerShelf" ? 0x5eead4 : SHELF), null, ud);
+            else if (kind === "drawer" || kind === "jewellery" || kind === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, hl ? 0x818cf8 : (finHex("drawers") || finHex(secKind) || colColor), null, ud); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
+            else if (kl.indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, lodSkipEdges ? 6 : 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4, clippingPlanes: [clipPlane] })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: cxMid, y: yt - 70, z: 0 } }); rod.castShadow = true; boxTarget.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
+            else if (kind === "cornerCarousel") { const cyl = new THREE.Mesh(new THREE.CylinderGeometry(Math.max(20, (cw - 60) / 2), Math.max(20, (cw - 60) / 2), Math.max(20, ch - 30), 20), new THREE.MeshStandardMaterial({ color: hl ? 0x818cf8 : 0x5eead4, roughness: 0.6, clippingPlanes: [clipPlane] })); cyl.position.set(cxMid, yb + ch / 2, 0); cyl.userData = Object.assign({}, ud, { base: { x: cxMid, y: yb + ch / 2, z: 0 } }); cyl.castShadow = true; boxTarget.add(cyl); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
+            else if (kind === "cornerLemans") box(cw - 20, T + 4, D - 60, cxMid - 8, yt - 10, 8, hl ? 0x818cf8 : 0x5eead4, null, ud);
+            else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
+            else box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
+            yb = yt;
+          });
+          if (shutters) { const fh = finHex(secKind); box(cw - 4, H - 20, T, cxMid, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }
+          if (led) { const stripY = (loftH > 0 ? H - loftH : H) - T - 6; const s = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, cw - 40), 6, 14), getLedMat()); s.position.set(cxMid, stripY, D / 2 - 24); s.userData = { base: { x: cxMid, y: stripY, z: D / 2 - 24 } }; boxTarget.add(s); }
+        };
+        const buildFlat = (secsData) => {
           const usableH = H - plinth - loftH;
           const floor = new THREE.Mesh(new THREE.PlaneGeometry(Wd * 2.4, D * 3.2), new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 1 })); floor.rotation.x = -Math.PI / 2; floor.position.set(Wd / 2, -1, 0); floor.receiveShadow = true; g.add(floor);
           box(Wd, T, D, Wd / 2, plinth + T / 2, 0, WOOD); box(Wd, T, D, Wd / 2, H - T / 2, 0, WOOD);
@@ -11364,28 +11387,77 @@ const frontendHTML = `<!DOCTYPE html>
           box(Wd, H, 6, Wd / 2, H / 2, -D / 2 + 3, 0xb7a488); box(Wd, plinth, D - 40, Wd / 2, plinth / 2, 0, 0x8a7b63);
           if (loftH > 0) box(Wd, T, loftD, Wd / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
           if (opt.beam && opt.beam.on) { const bh = H - opt.beam.soffit; if (bh > 20) box(opt.beam.width, bh, D + 40, opt.beam.pos + opt.beam.width / 2, opt.beam.soffit + bh / 2, 0, 0xf97316, 0.6); }
-          secsData.forEach((sec, si) => sec.columns.forEach((col, ci) => {
-            const cw = col.w, cxMid = col.x + cw / 2;
-            if (col.x > 0) box(T, usableH, D, col.x, plinth + usableH / 2, 0, WOOD);
-            let yb = plinth;
-            col.cells.forEach((cell, k) => {
-              const ch = cell.hMM, yt = yb + ch, kind = cell.kind, colColor = parseInt((cell.color || "#cbd5e1").slice(1), 16) || 0xcbd5e1;
-              const key = si + "-" + ci + "-" + k, ud = { cell: true, si, ci, k, key }, hl = key === selKey;
-              if (kind === "shelf" || kind === "handbag" || kind === "shoe" || kind === "kidsShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
-              else if (kind === "drawer" || kind === "jewellery" || kind === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, hl ? 0x818cf8 : (finHex("drawers") || finHex(sec.kind) || colColor), null, ud); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
-              else if (kind.toLowerCase().indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, lodSkipEdges ? 6 : 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4, clippingPlanes: [clipPlane] })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: cxMid, y: yt - 70, z: 0 } }); rod.castShadow = true; g.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
-              else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
-              yb = yt;
-            });
-          }));
-          if (shutters) secsData.forEach((sec) => sec.columns.forEach((col) => { const fh = finHex(sec.kind); box(col.w - 4, H - 20, T, col.x + col.w / 2, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }));
-          if (led) {   // §13 decorative warm LED strips under the top / loft rail + a couple of glow lights
-            const ledMat = new THREE.MeshStandardMaterial({ color: 0xfff4d6, emissive: 0xffe6a8, emissiveIntensity: 1.5, roughness: 0.4, clippingPlanes: [clipPlane] });
-            const stripY = (loftH > 0 ? H - loftH : H) - T - 6;
-            secsData.forEach((sec) => sec.columns.forEach((col) => { const s = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, col.w - 40), 6, 14), ledMat); s.position.set(col.x + col.w / 2, stripY, D / 2 - 24); s.userData = { base: { x: col.x + col.w / 2, y: stripY, z: D / 2 - 24 } }; g.add(s); }));
-            [0.25, 0.75].forEach((fx) => { const lp = new THREE.PointLight(0xffe1a6, 0.5, spanE * 2.4); lp.position.set(Wd * fx, stripY, D); lp.userData = { base: { x: Wd * fx, y: stripY, z: D } }; g.add(lp); });
-          }
+          secsData.forEach((sec, si) => sec.columns.forEach((col, ci) => emitColumn(col, si, ci, col.x, sec.kind)));
+          if (led) [0.25, 0.75].forEach((fx) => { const lp = new THREE.PointLight(0xffe1a6, 0.5, spanE * 2.4); lp.position.set(Wd * fx, (loftH > 0 ? H - loftH : H) - T - 6, D); lp.userData = { base: { x: Wd * fx, y: (loftH > 0 ? H - loftH : H) - T - 6, z: D } }; g.add(lp); });
           g.position.set(-Wd / 2, -H / 2, 0);
+        };
+        const buildCornerUnit = (sec, si, sq) => {   // a depth×depth corner unit at footprint square sq
+          const dep = D, grp = new THREE.Group(); grp.position.set(sq.cx, 0, sq.cz); grp.userData = { base: { x: sq.cx, y: 0, z: sq.cz } }; g.add(grp); boxTarget = grp;
+          box(dep, T, dep, 0, plinth + T / 2, 0, 0xbfeae2); box(dep, T, dep, 0, H - T / 2, 0, 0xbfeae2);
+          box(dep, plinth, dep - 40, 0, plinth / 2, 0, 0x8a7b63);
+          box(dep, H, 6, 0, H / 2, -dep / 2 + 3, 0x9fd8ce); box(6, H, dep, -dep / 2 + 3, H / 2, 0, 0x9fd8ce);
+          const col = sec.columns[0];
+          if (col) { let yb = plinth; col.cells.forEach((cell, k) => {
+            const ch = cell.hMM, yt = yb + ch, kind = cell.kind, key = si + "-0-" + k, ud = { cell: true, si, ci: 0, k, key }, hl = key === selKey;
+            if (kind === "cornerCarousel") { const cyl = new THREE.Mesh(new THREE.CylinderGeometry((dep - 80) / 2, (dep - 80) / 2, Math.max(20, ch - 30), 20), new THREE.MeshStandardMaterial({ color: hl ? 0x818cf8 : 0x5eead4, roughness: 0.6, clippingPlanes: [clipPlane] })); cyl.position.set(0, yb + ch / 2, 0); cyl.userData = Object.assign({}, ud, { base: { x: 0, y: yb + ch / 2, z: 0 } }); cyl.castShadow = true; grp.add(cyl); box(dep - 20, ch - 6, dep - 20, 0, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
+            else if (kind === "cornerHang" || kind.toLowerCase().indexOf("hang") >= 0) { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, dep - 40, 10), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4, clippingPlanes: [clipPlane] })); rod.rotation.set(0, Math.PI / 4, Math.PI / 2); rod.position.set(0, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: 0, y: yt - 70, z: 0 } }); rod.castShadow = true; grp.add(rod); box(dep - 20, ch - 6, dep - 20, 0, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
+            else if (kind === "drawer") box(dep - 40, ch - 6, T, 0, yb + ch / 2, dep / 2 - T / 2, hl ? 0x818cf8 : 0xcaa46a, null, ud);
+            else box(dep - 30, T, dep - 30, 0, yt, 0, hl ? 0x818cf8 : 0x5eead4, null, ud);
+            yb = yt;
+          }); }
+          if (shutters) { box(dep, H - 20, T, 0, H / 2, dep / 2 - T / 2, 0xbcd0e6, 0.3); box(T, H - 20, dep, dep / 2 - T / 2, H / 2, 0, 0xbcd0e6, 0.3); }
+          boxTarget = g;
+        };
+        const buildFolded = (secsData) => {
+          const dep = D, half = dep / 2;
+          const wm = opt.wings || [];
+          const wl = (i) => { const w = wm.find((x) => x.index === i); return w ? w.lengthMM : 1000; };
+          const x0of = (i) => { const w = wm.find((x) => x.index === i); return w ? w.x0 : 0; };
+          let frames = {}, corners = [], bw, bh;
+          if (opt.shape === "u") {
+            const Ll = wl(0), Lb = wl(1), Lr = wl(2);
+            bw = dep + Lb + dep; bh = dep + Math.max(Ll, Lr);
+            frames[1] = { ox: dep, oz: half, ry: 0, len: Lb };
+            frames[0] = { ox: half, oz: dep + Ll, ry: Math.PI / 2, len: Ll };
+            frames[2] = { ox: dep + Lb + half, oz: dep, ry: -Math.PI / 2, len: Lr };
+            corners = [{ cx: half, cz: half }, { cx: dep + Lb + half, cz: half }];
+          } else {
+            const La = wl(0), Lb = wl(1);
+            bw = La + dep; bh = dep + Lb;
+            frames[0] = { ox: 0, oz: half, ry: 0, len: La };
+            frames[1] = { ox: La + half, oz: dep, ry: -Math.PI / 2, len: Lb };
+            corners = [{ cx: La + half, cz: half }];
+          }
+          foldCx = bw / 2; foldCz = bh / 2; foldBw = bw;
+          const floor = new THREE.Mesh(new THREE.PlaneGeometry(bw * 1.5, bh * 1.5), new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 1 })); floor.rotation.x = -Math.PI / 2; floor.position.set(bw / 2, -1, bh / 2); floor.receiveShadow = true; floor.userData = { base: { x: bw / 2, y: -1, z: bh / 2 } }; g.add(floor);
+          const wingGroups = {}; let cornerN = 0;
+          secsData.forEach((sec, si) => {
+            if (sec.corner || sec.wing === -1) { buildCornerUnit(sec, si, corners[Math.min(cornerN, corners.length - 1)] || { cx: bw / 2, cz: bh / 2 }); cornerN++; return; }
+            const wi = sec.wing == null ? 0 : sec.wing, fr = frames[wi]; if (!fr) return;
+            let grp = wingGroups[wi];
+            if (!grp) {
+              grp = new THREE.Group(); grp.position.set(fr.ox, 0, fr.oz); grp.rotation.y = fr.ry; grp.userData = { base: { x: fr.ox, y: 0, z: fr.oz } }; g.add(grp); wingGroups[wi] = grp;
+              const len = fr.len; boxTarget = grp;
+              box(len, T, D, len / 2, plinth + T / 2, 0, WOOD); box(len, T, D, len / 2, H - T / 2, 0, WOOD);
+              box(T, H, D, T / 2, H / 2, 0, WOOD); box(T, H, D, len - T / 2, H / 2, 0, WOOD);
+              box(len, H, 6, len / 2, H / 2, -D / 2 + 3, 0xb7a488); box(len, plinth, D - 40, len / 2, plinth / 2, 0, 0x8a7b63);
+              if (loftH > 0) box(len, T, loftD, len / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
+              boxTarget = g;
+            }
+            boxTarget = grp;
+            sec.columns.forEach((col, ci) => emitColumn(col, si, ci, col.x - x0of(wi), sec.kind));
+            boxTarget = g;
+          });
+          if (led) [0.3, 0.7].forEach((fx) => { const yy = (loftH > 0 ? H - loftH : H) - 30; const lp = new THREE.PointLight(0xffe1a6, 0.5, spanE * 2.4); lp.position.set(bw * fx, yy, bh * 0.5); lp.userData = { base: { x: bw * fx, y: yy, z: bh * 0.5 } }; g.add(lp); });
+          g.position.set(-bw / 2, -H / 2, -bh / 2);
+        };
+        const buildGroup = (secsData) => {
+          g.traverse((o) => { if (o !== g) { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.dispose) o.material.dispose(); } });
+          while (g.children.length) g.remove(g.children[0]);
+          boxTarget = g; ledMatShared = null;
+          const cellCnt = secsData.reduce((a, s) => a + s.columns.reduce((b, c) => b + c.cells.length, 0), 0);
+          lodSkipEdges = cellCnt > 36;   // §13 LOD kicks in on busy layouts
+          if (isFolded) buildFolded(secsData); else buildFlat(secsData);
         };
         buildGroup(work);
         const span = Math.max(Wd, H, D);
@@ -11429,7 +11501,7 @@ const frontendHTML = `<!DOCTYPE html>
         };
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
         let drag = null, dirty = false;
-        const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, false); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
+        const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, true); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
         const worldPerPx = () => activeCam.isOrthographicCamera ? (activeCam.top - activeCam.bottom) / (activeCam.zoom || 1) / (host.clientHeight || Hv) : 2 * activeCam.position.distanceTo(controls.target) * Math.tan((45 * Math.PI / 180) / 2) / (host.clientHeight || Hv);
         const onDown = (e) => { if (e.button !== 0) return; const u = pick(e); if (!u) return; e.preventDefault(); controls.enabled = false; drag = { si: u.si, ci: u.ci, k: u.k, y: e.clientY, wpp: worldPerPx(), moved: false }; selKey = u.key; const c0 = work[u.si].columns[u.ci].cells[u.k]; setSelInfo({ label: c0.label, mm: c0.hMM }); dirty = true; };
         const onMove = (e) => { if (!drag) return; const dMM = Math.round(-(e.clientY - drag.y) * drag.wpp / 5) * 5; if (!dMM) return; const cells = work[drag.si].columns[drag.ci].cells, cur = cells[drag.k], nb = cells[drag.k + 1] || cells[drag.k - 1]; if (!nb || cur.hMM + dMM < 60 || nb.hMM - dMM < 60) return; cur.hMM += dMM; nb.hMM -= dMM; drag.y = e.clientY; drag.moved = true; dirty = true; setSelInfo({ label: cur.label, mm: cur.hMM }); };
@@ -11442,9 +11514,9 @@ const frontendHTML = `<!DOCTYPE html>
           raf = requestAnimationFrame(loop);
           if (dirty) { buildGroup(work); dirty = false; lastExpl = -1; }
           const ex = explRef.current;
-          if (ex !== lastExpl) { g.children.forEach((ch) => { const b = ch.userData && ch.userData.base; if (b) ch.position.set(b.x + (b.x - Wd / 2) * ex, b.y + (b.y - H / 2) * ex, b.z + b.z * ex * 1.8); }); lastExpl = ex; }
+          if (ex !== lastExpl) { const cX = isFolded ? foldCx : Wd / 2, cZ = isFolded ? foldCz : 0; g.children.forEach((ch) => { const b = ch.userData && ch.userData.base; if (b) ch.position.set(b.x + (b.x - cX) * ex, b.y + (b.y - H / 2) * ex, b.z + (b.z - cZ) * ex * 1.8); }); lastExpl = ex; }
           if (modeRef.current !== lastMode) { applyMode(modeRef.current); lastMode = modeRef.current; }
-          clipPlane.constant = secRef.current > 0 ? (Wd / 2 - secRef.current * Wd) : 1e7;
+          clipPlane.constant = secRef.current > 0 ? (foldBw / 2 - secRef.current * foldBw) : 1e7;
           if (dl.castShadow !== shadRef.current) dl.castShadow = shadRef.current;
           if (qualRef.current !== lastQ) { const q = qualRef.current, pr = q === "low" ? 1 : q === "high" ? Math.min(window.devicePixelRatio || 1, 2) : 1.5; renderer.setPixelRatio(pr); renderer.setSize(host.clientWidth || Wv, Hv); lastQ = q; }
           if (lightRef.current !== lastLight) { const lp = lightRef.current; if (lp === "evening") { scene.background = new THREE.Color(0x2b3040); hemi.intensity = 0.5; dl.color.set(0xffd7a0); dl.intensity = 0.95; } else if (lp === "artificial") { scene.background = new THREE.Color(0xe9edf4); hemi.intensity = 0.8; dl.color.set(0xdfe8ff); dl.intensity = 0.9; } else { scene.background = new THREE.Color(0xf1f5f9); hemi.intensity = 1.05; dl.color.set(0xffffff); dl.intensity = 0.7; } lastLight = lp; }
@@ -11474,7 +11546,7 @@ const frontendHTML = `<!DOCTYPE html>
         </div>
         <div className="text-[10px] text-slate-400 mb-1">click a shelf / drawer / rack & drag ↕ to resize · right-click for edit menu · drag empty space to orbit</div>
         <div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} />
-        {(opt.shape === "l" || opt.shape === "u") && <div style={{ position: "absolute", left: 8, bottom: 8, zIndex: 10 }} className="text-[10px] bg-white/85 border border-teal-200 text-teal-700 rounded px-2 py-1">◱ {opt.shape === "u" ? "U-shape" : "L-shape"} shown unfolded (all wings in a row) — see the <b>Top</b> view for the folded L/U plan with corner units.</div>}
+        {(opt.shape === "l" || opt.shape === "u") && <div style={{ position: "absolute", left: 8, bottom: 8, zIndex: 10 }} className="text-[10px] bg-white/85 border border-teal-200 text-teal-700 rounded px-2 py-1">◱ Folded {opt.shape === "u" ? "U-shape" : "L-shape"} — wings turn 90° at each teal corner unit. Orbit to inspect; section-cut &amp; exploded are approximate in folded view.</div>}
         {menu3d && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu3d(null)} onContextMenu={(e) => { e.preventDefault(); setMenu3d(null); }} />
           <div style={{ position: "fixed", left: Math.min(menu3d.x, window.innerWidth - 190), top: Math.min(menu3d.y, window.innerHeight - 300), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1">
