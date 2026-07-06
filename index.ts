@@ -11864,7 +11864,7 @@ const frontendHTML = `<!DOCTYPE html>
           "Estimated total (incl. GST): " + rs(o.boq.grandTotal),
         ].forEach((l) => { P.text(l, M, y); y += 13; });
         y += 8;
-        for (const v of ["Front", "Internal", "Top", "Side", "Loft"]) {
+        for (const v of ["Front", "Internal", "Shop Drawing", "Top", "Side", "Loft"]) {
           const svg = o.views[v]; if (!svg) continue;
           let png; try { png = await svgToPng(svg, 2); } catch (e) { continue; }
           const aw = png.w || 560, ah = png.h || 400, imgW = PW - 2 * M, imgH = imgW * ah / aw;
@@ -11986,7 +11986,7 @@ const frontendHTML = `<!DOCTYPE html>
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
             <h3 className="text-sm font-semibold text-slate-700">Layout Options <span className="text-xs font-normal text-slate-400">· 3 AI variants · click to select</span></h3>
-            <div className="flex gap-1">{["Front", "Internal", "Top", "Side", "Loft"].map((v) => (<button key={v} onClick={() => setView(v)} className={"px-2 py-0.5 rounded text-[11px] border " + (view === v ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{v}</button>))}</div>
+            <div className="flex gap-1">{["Front", "Internal", "Shop Drawing", "Top", "Side", "Loft"].map((v) => (<button key={v} onClick={() => setView(v)} className={"px-2 py-0.5 rounded text-[11px] border " + (view === v ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{v === "Shop Drawing" ? "📐 Shop Drawing" : v}</button>))}</div>
           </div>
           <div className="grid md:grid-cols-3 gap-3">
             {opts.map((o, i) => (<div key={o.id} onClick={() => setSelIdx(i)} className={"rounded-lg border overflow-hidden cursor-pointer transition " + (i === selIdx ? "border-indigo-400 ring-1 ring-indigo-200" : "border-slate-200 hover:border-slate-300")}>
@@ -13904,6 +13904,134 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
   return p.join("");
 }
 const renderWardrobeOptionSvg = (opt: any): string => renderWardrobeElevationSvg(opt, "front");
+// mm → architectural feet-inches label, e.g. 1067 -> 3'-6", 100 -> 4", 2743 -> 9'.
+function mmToFtIn(mm: number): string {
+  const totalIn = Math.round((+mm || 0) / 25.4);
+  const ft = Math.floor(totalIn / 12), inch = totalIn % 12;
+  if (ft > 0 && inch > 0) return ft + "'-" + inch + '"';
+  if (ft > 0) return ft + "'";
+  return inch + '"';
+}
+// Classic Indian wardrobe FRONT-ELEVATION shop drawing: every compartment illustrated
+// (hanging rods+garments, folded stacks, drawers, loft storage boxes, open shelves) and fully
+// dimensioned in feet-inches — outer + internal widths, per-cell heights, overall 9' height, 4" thada.
+function renderWardrobeShopDrawing(opt: any): string {
+  const S = WARDROBE_STD;
+  const isHang = (k: string) => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit";
+  const isDrawer = (k: string) => k === "drawer" || k === "shoe" || k === "jewellery" || k === "cosmetics" || k === "tieBelt" || k === "safe" || k === "laptop";
+  const isCorner = (k: string) => k.indexOf("corner") === 0;
+  const padL = 84, padR = 80, padT = 120, padB = 74;
+  const scale = Math.max(0.05, Math.min(700 / opt.width, 880 / opt.height));
+  const wpx = opt.width * scale, hpx = opt.height * scale;
+  const W = Math.round(wpx + padL + padR), Hh = Math.round(hpx + padT + padB);
+  const x0 = padL, y0 = padT, xOf = (mm: number) => x0 + mm * scale;
+  const INK = "#111827", THIN = "#9ca3af", MID = "#4b5563", DIMC = "#111827";
+  const esc = wardEsc;
+  const loftPx = opt.hasLoft ? opt.loftH * scale : 0, plinthPx = S.plinth * scale;
+  const floorY = y0 + hpx - plinthPx, usableTopY = y0 + loftPx;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif">`);
+  p.push(`<rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
+  // ---- architectural dimension primitives (slash ticks + ft-in text) ----
+  const slash = (x: number, y: number) => `<line x1="${(x - 3.5).toFixed(1)}" y1="${(y + 3.5).toFixed(1)}" x2="${(x + 3.5).toFixed(1)}" y2="${(y - 3.5).toFixed(1)}" stroke="${DIMC}" stroke-width="1"/>`;
+  const dimV = (x: number, yA: number, yB: number, txt: string, left = true) => {
+    const ym = (yA + yB) / 2, tx = x + (left ? -5 : 6);
+    return `<line x1="${x.toFixed(1)}" y1="${yA.toFixed(1)}" x2="${x.toFixed(1)}" y2="${yB.toFixed(1)}" stroke="${DIMC}" stroke-width="0.8"/>${slash(x, yA)}${slash(x, yB)}<text x="${tx.toFixed(1)}" y="${(ym + 3).toFixed(1)}" fill="${INK}" font-size="11" font-weight="700" text-anchor="middle" transform="rotate(-90 ${tx.toFixed(1)} ${ym.toFixed(1)})">${esc(txt)}</text>`;
+  };
+  const dimH = (xA: number, xB: number, y: number, txt: string, fs = 11) =>
+    `<line x1="${xA.toFixed(1)}" y1="${y.toFixed(1)}" x2="${xB.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${DIMC}" stroke-width="0.8"/>${slash(xA, y)}${slash(xB, y)}<text x="${((xA + xB) / 2).toFixed(1)}" y="${(y - 4).toFixed(1)}" fill="${INK}" font-size="${fs}" font-weight="700" text-anchor="middle">${esc(txt)}</text>`;
+  // ---- interior compartment illustrations ----
+  const hangGlyph = (cx: number, yt: number, cw: number, ch: number) => {
+    const rodY = yt + Math.min(15, ch * 0.15), botY = yt + ch - 5, n = Math.max(4, Math.min(30, Math.round(cw / 9)));
+    let g = `<line x1="${(cx + 5).toFixed(1)}" y1="${rodY.toFixed(1)}" x2="${(cx + cw - 5).toFixed(1)}" y2="${rodY.toFixed(1)}" stroke="${INK}" stroke-width="1.3"/>`;
+    g += `<line x1="${(cx + 5).toFixed(1)}" y1="${(rodY - 3).toFixed(1)}" x2="${(cx + 5).toFixed(1)}" y2="${(rodY + 3).toFixed(1)}" stroke="${INK}" stroke-width="1.1"/><line x1="${(cx + cw - 5).toFixed(1)}" y1="${(rodY - 3).toFixed(1)}" x2="${(cx + cw - 5).toFixed(1)}" y2="${(rodY + 3).toFixed(1)}" stroke="${INK}" stroke-width="1.1"/>`;
+    g += `<circle cx="${(cx + cw / 2).toFixed(1)}" cy="${rodY.toFixed(1)}" r="1.6" fill="${INK}"/>`;
+    for (let i = 0; i < n; i++) { const gx = cx + 7 + (cw - 14) * (n === 1 ? 0.5 : i / (n - 1)); g += `<line x1="${gx.toFixed(1)}" y1="${(rodY + 2).toFixed(1)}" x2="${gx.toFixed(1)}" y2="${botY.toFixed(1)}" stroke="${THIN}" stroke-width="0.8"/>`; }
+    return g;
+  };
+  const drawerGlyph = (cx: number, yt: number, cw: number, ch: number, shoe: boolean) => {
+    let g = `<rect x="${(cx + 5).toFixed(1)}" y="${(yt + 3).toFixed(1)}" width="${(cw - 10).toFixed(1)}" height="${(ch - 6).toFixed(1)}" rx="2" fill="none" stroke="${INK}" stroke-width="1"/>`;
+    const hy = yt + ch / 2, mid = cx + cw / 2, hw = Math.min(cw * 0.16, 16);
+    g += `<line x1="${(mid - hw).toFixed(1)}" y1="${hy.toFixed(1)}" x2="${(mid + hw).toFixed(1)}" y2="${hy.toFixed(1)}" stroke="${INK}" stroke-width="2"/>`;
+    if (shoe) g += `<line x1="${(cx + 8).toFixed(1)}" y1="${(yt + ch - 6).toFixed(1)}" x2="${(cx + cw - 8).toFixed(1)}" y2="${(yt + ch - 6).toFixed(1)}" stroke="${THIN}" stroke-width="0.7" stroke-dasharray="3 2"/>`;
+    return g;
+  };
+  const foldGlyph = (cx: number, yt: number, cw: number, ch: number) => {
+    const subs = cw > 95 ? 2 : 1, gapx = 7, sw = (cw - gapx * (subs + 1)) / subs;
+    const stackN = Math.max(2, Math.min(5, Math.floor((ch - 8) / 8))); let g = "";
+    for (let s = 0; s < subs; s++) { const sx = cx + gapx + s * (sw + gapx); for (let k = 0; k < stackN; k++) { const py = yt + ch - 6 - k * 8; g += `<rect x="${sx.toFixed(1)}" y="${(py - 6).toFixed(1)}" width="${sw.toFixed(1)}" height="5" rx="2.5" fill="#f3f4f6" stroke="${MID}" stroke-width="0.7"/>`; } }
+    return g;
+  };
+  const loftBoxes = (bandY: number, bandH: number) => {
+    const nb = Math.max(1, Math.min(10, Math.round(wpx / 175))), slot = wpx / nb; let g = "";
+    for (let i = 0; i < nb; i++) { const bw = slot * 0.66, bx = x0 + i * slot + (slot - bw) / 2, bh = Math.min(bandH * 0.62, bandH - 6), by = bandY + (bandH - bh) / 2; g += `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="#fbfbfd" stroke="${INK}" stroke-width="1"/><line x1="${bx.toFixed(1)}" y1="${(by + bh * 0.28).toFixed(1)}" x2="${(bx + bw).toFixed(1)}" y2="${(by + bh * 0.28).toFixed(1)}" stroke="${MID}" stroke-width="0.8"/><rect x="${(bx + bw / 2 - 6).toFixed(1)}" y="${(by + bh * 0.28 + 2).toFixed(1)}" width="12" height="4" fill="none" stroke="${MID}" stroke-width="0.7"/>`; }
+    return g;
+  };
+  // ---- loft band (storage boxes) ----
+  if (opt.hasLoft && loftPx > 6) {
+    p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="#ffffff" stroke="${INK}" stroke-width="1"/>`);
+    p.push(loftBoxes(y0, loftPx));
+    p.push(`<line x1="${x0.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${(x0 + wpx).toFixed(1)}" y2="${usableTopY.toFixed(1)}" stroke="${INK}" stroke-width="1.2"/>`);
+    p.push(`<text x="${(x0 + 6).toFixed(1)}" y="${(y0 + 11).toFixed(1)}" fill="${MID}" font-size="8" font-weight="600">LOFT — STORAGE</text>`);
+  }
+  // ---- columns: cells floor->up ----
+  for (const sec of opt.sections) for (const col of sec.columns) {
+    const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
+    for (let ci = 0; ci < col.cells.length; ci++) {
+      const cell = col.cells[ci], ch = cell.hMM * scale, yt = yb - ch, cxm = cx + cw / 2, k = String(cell.kind);
+      p.push(`<rect x="${cx.toFixed(1)}" y="${yt.toFixed(1)}" width="${cw.toFixed(1)}" height="${ch.toFixed(1)}" fill="#ffffff" stroke="${THIN}" stroke-width="0.6"/>`);
+      if (ch > 10) {
+        if (isHang(k)) p.push(hangGlyph(cx, yt, cw, ch));
+        else if (isDrawer(k)) p.push(drawerGlyph(cx, yt, cw, ch, k === "shoe"));
+        else if (isCorner(k)) p.push(`<line x1="${(cx + 4).toFixed(1)}" y1="${(yt + ch - 4).toFixed(1)}" x2="${(cx + cw - 4).toFixed(1)}" y2="${(yt + 4).toFixed(1)}" stroke="${MID}" stroke-width="0.9" stroke-dasharray="4 3"/>`);
+        else p.push(foldGlyph(cx, yt, cw, ch));
+        // label (uppercased) with a small white plate for legibility
+        if (ch > 20) {
+          const lbl = String(cell.label || k).toUpperCase(), lw = Math.min(cw - 6, lbl.length * 5.4 + 8);
+          p.push(`<rect x="${(cxm - lw / 2).toFixed(1)}" y="${(yt + ch / 2 - 6).toFixed(1)}" width="${lw.toFixed(1)}" height="12" rx="2" fill="#ffffff" opacity="0.86"/><text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 + 3).toFixed(1)}" fill="${INK}" font-size="8" font-weight="600" text-anchor="middle">${esc(lbl.length > Math.floor((cw - 6) / 5.4) ? lbl.slice(0, Math.floor((cw - 6) / 5.4)) : lbl)}</text>`);
+        }
+      }
+      // per-cell height dim — column 0 uses the far-left chain; others get an inside-left tag
+      if (col.x > 0 && ch > 13) {
+        const tx = cx + 8, tag = mmToFtIn(cell.hMM);
+        p.push(`<rect x="${(tx - 6).toFixed(1)}" y="${(yb - ch / 2 - tag.length * 2.6).toFixed(1)}" width="12" height="${(tag.length * 5.2).toFixed(1)}" fill="#ffffff" opacity="0.82"/><text x="${tx.toFixed(1)}" y="${(yb - ch / 2 + 3).toFixed(1)}" fill="${MID}" font-size="7.5" font-weight="600" text-anchor="middle" transform="rotate(-90 ${tx.toFixed(1)} ${(yb - ch / 2).toFixed(1)})">${esc(tag)}</text>`);
+      }
+      yb = yt;
+    }
+    // column partition
+    p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="1.1"/>`);
+  }
+  // section dividers (heavier)
+  for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${dx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="2"/>`); }
+  // thada (plinth) + outer frame
+  p.push(`<rect x="${x0.toFixed(1)}" y="${floorY.toFixed(1)}" width="${wpx.toFixed(1)}" height="${plinthPx.toFixed(1)}" fill="#eef2f6" stroke="${INK}" stroke-width="1"/>`);
+  p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(floorY + plinthPx / 2 + 4).toFixed(1)}" fill="${INK}" font-size="10" font-weight="700" text-anchor="middle">${mmToFtIn(S.plinth)} THADA</text>`);
+  p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${hpx.toFixed(1)}" fill="none" stroke="${INK}" stroke-width="2"/>`);
+  // ---- title ----
+  p.push(`<text x="${x0}" y="26" fill="${INK}" font-size="15" font-weight="800">WARDROBE — FRONT ELEVATION</text>`);
+  p.push(`<text x="${x0}" y="42" fill="${MID}" font-size="9.5">${esc(String(opt.label || ""))} · shop drawing · dimensions in feet-inches</text>`);
+  p.push(`<text x="${(W - padR).toFixed(1)}" y="26" fill="${MID}" font-size="10" text-anchor="end">Overall ${mmToFtIn(opt.width)} W × ${mmToFtIn(opt.height)} H × ${mmToFtIn(opt.depth)} D</text>`);
+  // ---- top width dim chains: outer (per column) + internal opening ----
+  const outerY = y0 - 46, innerY = y0 - 22;
+  for (const sec of opt.sections) for (const col of sec.columns) {
+    p.push(dimH(xOf(col.x), xOf(col.x + col.w), outerY, mmToFtIn(col.w)));
+    const internalW = Math.max(0, col.w - 36);
+    p.push(dimH(xOf(col.x) + 2, xOf(col.x + col.w) - 2, innerY, mmToFtIn(internalW), 10));
+  }
+  // ---- left height chain (column 0 + loft) ----
+  const leftX = x0 - 30;
+  if (opt.hasLoft && loftPx > 6) p.push(dimV(leftX, y0, usableTopY, mmToFtIn(opt.loftH)));
+  { const col0 = opt.sections[0] && opt.sections[0].columns[0]; if (col0) { let yb = floorY; for (const cell of col0.cells) { const ch = cell.hMM * scale, yt = yb - ch; if (ch > 8) p.push(dimV(leftX, yt, yb, mmToFtIn(cell.hMM))); yb = yt; } } }
+  // ---- right overall-height chain: body (9') + thada (4") ----
+  const rightX = x0 + wpx + 34;
+  p.push(dimV(rightX, y0, floorY, mmToFtIn(opt.height - S.plinth), false));
+  p.push(dimV(rightX, floorY, y0 + hpx, mmToFtIn(S.plinth), false));
+  // ---- profile-light leader (LED under loft / top shelf line) ----
+  { const ly = opt.hasLoft && loftPx > 6 ? usableTopY : y0 + Math.min(24, hpx * 0.08), lax = x0 + wpx - 8, lex = x0 + wpx + 16;
+    p.push(`<line x1="${lax.toFixed(1)}" y1="${(ly + 1).toFixed(1)}" x2="${lex.toFixed(1)}" y2="${(ly - 12).toFixed(1)}" stroke="${MID}" stroke-width="0.8"/><line x1="${lex.toFixed(1)}" y1="${(ly - 12).toFixed(1)}" x2="${(lex + 10).toFixed(1)}" y2="${(ly - 12).toFixed(1)}" stroke="${MID}" stroke-width="0.8"/><text x="${(lex + 12).toFixed(1)}" y="${(ly - 14).toFixed(1)}" fill="${MID}" font-size="8" font-weight="600">PROFILE</text><text x="${(lex + 12).toFixed(1)}" y="${(ly - 5).toFixed(1)}" fill="${MID}" font-size="8" font-weight="600">LIGHT</text>`); }
+  p.push(`</svg>`);
+  return p.join("");
+}
 // Top View (plan) — width × depth, section splits, per-column shutter door-swing arcs, dims.
 // §20 folded L/U-shape plan (top view) — wings on perpendicular walls + corner units, dimensioned.
 function renderWardrobePlanShaped(opt: any): string {
@@ -14183,7 +14311,7 @@ function wardrobeOptions(input: any): any {
     const o = buildWardrobeOption(st, input);
     o.reports = wardReports(o);
     o.scorecard = wardScorecard(o);
-    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
     o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
     return o;
@@ -14240,7 +14368,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
     const cnt = (pred: (k: string) => boolean) => allCells.filter((cc: any) => pred(cc.kind)).length;
     o.stats = { hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"), shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"), drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"), shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"), columns: o.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0), totalItems: allCells.length };
     o.reports = wardReports(o); o.scorecard = wardScorecard(o);
-    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
     o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
     return c.json({ data: o });
@@ -14263,7 +14391,7 @@ app.post("/api/wardrobe/save", async (c) => {
       runs: [],
       appliedRules: ["Wardrobe AI · " + sel.label + " · " + sel.width + "×" + sel.height + "×" + sel.depth + " mm · " + (input.maleUsers || 0) + "M/" + (input.femaleUsers || 0) + "F"],
       planSvg: sel.views.Front,
-      elevations: [{ name: "Front", svg: sel.views.Front }, { name: "Internal", svg: sel.views.Internal }],
+      elevations: [{ name: "Front", svg: sel.views.Front }, { name: "Internal", svg: sel.views.Internal }, { name: "Shop Drawing", svg: sel.views["Shop Drawing"] }],
       sections: [{ name: "Top", svg: sel.views.Top }, { name: "Side", svg: sel.views.Side }].concat(sel.hasLoft ? [{ name: "Loft", svg: sel.views.Loft }] : []),
       wardrobe: { input, data: wdata, selIdx },
     };
