@@ -103,3 +103,5 @@ Thumbs.db
 !verify-shopdraw.mjs
 
 !verify-designoptions.mjs
+
+!verify-designoptions-ui.mjs

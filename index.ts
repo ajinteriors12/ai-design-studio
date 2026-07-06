@@ -5490,6 +5490,17 @@ app.post("/api/design-options/choice", async (c) => {
     return c.json({ data: { ok: true, id } });
   } catch (err) { console.error(err); return c.json({ error: "choice log failed" }, 500); }
 });
+// POST /api/design-options/save — persist a chosen option as a new design variant (My Designs).
+app.post("/api/design-options/save", async (c) => {
+  try {
+    const b = await c.req.json().catch(() => ({} as any));
+    const layout = b.layout;
+    if (!layout || !layout.type) return c.json({ error: "no layout to save" }, 400);
+    const id = randomUUID();
+    db.insert(designs).values({ id, designType: String(b.designType || layout.type), params: JSON.stringify({ variant: String(b.label || ""), mode: "3-option" }), layout: JSON.stringify(layout), createdAt: new Date() }).run();
+    return c.json({ data: { id } });
+  } catch (err) { console.error(err); return c.json({ error: "save failed" }, 500); }
+});
 // GET /api/design-options/insights — aggregate: which option wins per type (learning signal).
 app.get("/api/design-options/insights", (c) => {
   try {
@@ -9415,6 +9426,8 @@ const frontendHTML = `<!DOCTYPE html>
       React.useEffect(() => { const HV = { "Mandir": "1050", "Wall Panel": "2700", "Wardrobe": "2400", "Crockery Unit": "2100", "LCD/TV Panel": "2400", "Vanity Unit": "1200" }; if (HV[type]) setWallB(HV[type]); }, [type]);
       const [wallC, setWallC] = useState(2400);
       const [result, setResult] = useState(null);
+      const [options3, setOptions3] = useState(null);   // universal 3-balanced-options comparison (modal)
+      const [opt3Busy, setOpt3Busy] = useState(false);
       const [liveRuns, setLiveRuns] = useState(null);   // §7.9 shared room model (edits lifted from elevations)
       const [teachMsg, setTeachMsg] = useState("");     // §14 correction-learning feedback
       const [advisor, setAdvisor] = useState(null);     // Module 4: AI Layout Advisor findings
@@ -9777,6 +9790,53 @@ const frontendHTML = `<!DOCTYPE html>
         setLoading(false);
       };
 
+      // ── Universal 3 Balanced Options (Storage / Premium / Functional) ──
+      const opt3Body = () => {
+        const body = { designType: type, wall: Number(wall) };
+        if (needsB) body.wallB = Number(wallB);
+        if (isU || isG) body.wallC = Number(wallC);
+        if (isKitchen) { body.chimneyWidth = Number(chimneyWidth); body.handle = handle; body.applianceBrand = applianceBrand; }
+        return body;
+      };
+      const generate3Options = async () => {
+        // Dimension-driven quick compare — only needs a valid width (not the full 3D room planner).
+        if (!(Number(wall) >= 600)) { setRoomWarn("Enter a valid width to compare 3 options."); return; }
+        setRoomWarn(null); setOpt3Busy(true); setOptions3(null);
+        try { const j = await api("/api/design-options", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(opt3Body()) }); setOptions3(j.data); }
+        catch (e) { alert("3-option generation failed"); }
+        setOpt3Busy(false);
+      };
+      const useOption = (o) => {
+        setResult(o.layout); setLiveRuns((o.layout.runs || []).map((r) => ({ ...r }))); setActiveView(0);
+        const recoKey = options3 && options3.options[options3.recommendation.bestIndex] ? options3.options[options3.recommendation.bestIndex].key : "";
+        fetch("/api/design-options/choice", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ designType: type, category: (options3 && options3.category) || "", wall: Number(wall), wallB: Number(wallB), wallC: Number(wallC), chosenKey: o.key, chosenLabel: o.label, recommendedKey: recoKey, edited: false, metrics: o.metrics }) }).catch(() => {});
+        setOptions3(null);
+      };
+      const saveVariant = async (o) => {
+        try { const j = await api("/api/design-options/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ designType: type, label: o.label, layout: o.layout }) }); if (j.data && j.data.id) alert("Saved " + o.label + " as a new variant — open it from 📂 My Designs."); }
+        catch (e) { alert("Save failed"); }
+      };
+      const COMPARE_ROWS = [
+        { k: "storageScorePct", label: "Storage score", fmt: (v) => v + "%" },
+        { k: "spaceUtilPct", label: "Space utilisation", fmt: (v) => v + "%" },
+        { k: "manufacturingComplexity", label: "Mfg complexity", fmt: (v) => String(v) },
+        { k: "estCostInr", label: "Est. cost", fmt: (v) => "₹" + Number(v).toLocaleString("en-IN") },
+        { k: "hardwareCostInr", label: "Hardware cost", fmt: (v) => "₹" + Number(v).toLocaleString("en-IN") },
+        { k: "materialBoardSqft", label: "Board material", fmt: (v) => v + " sq.ft" },
+        { k: "installDifficulty", label: "Install difficulty", fmt: (v) => String(v) },
+        { k: "installTimeHrs", label: "Install time", fmt: (v) => v + " hrs" },
+        { k: "weightKg", label: "Weight", fmt: (v) => v + " kg" },
+        { k: "panels", label: "Panels", fmt: (v) => String(v) },
+        { k: "shutters", label: "Shutters", fmt: (v) => String(v) },
+        { k: "drawers", label: "Drawers", fmt: (v) => String(v) },
+        { k: "shelves", label: "Shelves", fmt: (v) => String(v) },
+        { k: "edgeBandM", label: "Edge banding", fmt: (v) => v + " m" },
+        { k: "plywoodUtilPct", label: "Plywood utilisation", fmt: (v) => v + "%" },
+        { k: "wastePct", label: "Waste", fmt: (v) => v + "%" },
+        { k: "aiRating", label: "AI design rating", fmt: (v) => v + " / 5" },
+        { k: "customerRating", label: "Customer rating", fmt: (v) => v == null ? "—" : v + " / 5" },
+      ];
+
       // 📂 My Designs — list / reopen / delete saved designs.
       const [gallery, setGallery] = useState(null);   // null = closed; [] = open
       const refreshGallery = async () => { try { const j = await fetch("/api/designs").then((r) => r.json()); setGallery(j.data || []); } catch (e) { setGallery([]); } };
@@ -10048,6 +10108,52 @@ const frontendHTML = `<!DOCTYPE html>
               className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg font-medium disabled:opacity-50">
               {loading ? "Generating…" : (designMode === "consensus" ? "Generate (AI Consensus)" : "Generate Design")}
             </button>
+            <button onClick={generate3Options} disabled={opt3Busy || loading}
+              className="w-full px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium disabled:opacity-50">
+              {opt3Busy ? "Designing 3 options…" : "⚖️ Generate 3 Balanced Options"}
+            </button>
+            {options3 && (
+              <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-start justify-center overflow-auto p-4" onClick={() => setOptions3(null)}>
+                <div className="bg-white rounded-xl shadow-2xl w-full my-6" style={{ maxWidth: 1100 }} onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
+                    <div>
+                      <h3 className="text-base font-bold text-slate-800">3 Balanced Design Options — {type}</h3>
+                      <p className="text-xs text-slate-500">All three are production-ready. Choose the trade-off that fits: maximum storage, premium aesthetics, or everyday practicality.</p>
+                    </div>
+                    <button onClick={() => setOptions3(null)} className="text-slate-400 hover:text-slate-700 text-2xl leading-none">×</button>
+                  </div>
+                  <div className="p-5">
+                    <div className="rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 mb-4 text-sm text-emerald-800"><span className="font-semibold">⭐ AI recommends {options3.recommendation.bestLabel}.</span> {options3.recommendation.explanation}</div>
+                    <div className="grid md:grid-cols-3 gap-3 mb-4">
+                      {options3.options.map((o, i) => (
+                        <div key={o.id} className={"rounded-lg border overflow-hidden " + (i === options3.recommendation.bestIndex ? "border-emerald-400 ring-1 ring-emerald-200" : "border-slate-200")}>
+                          <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200"><span className="text-sm font-semibold text-slate-800">{o.label}</span>{i === options3.recommendation.bestIndex ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 font-semibold">⭐ Recommended</span> : <span className="text-[10px] text-slate-400">{o.tag}</span>}</div>
+                          <div className="p-2 bg-white overflow-auto" style={{ maxHeight: 210 }} dangerouslySetInnerHTML={{ __html: o.svg }} />
+                          <div className="px-3 py-1.5 text-[11px] text-slate-500 border-t border-slate-100" style={{ minHeight: 52 }}>{o.description}</div>
+                          <div className="grid grid-cols-4 gap-1 px-3 py-1.5 text-[10px] text-center border-t border-slate-100 bg-slate-50">
+                            <div><div className="text-slate-400">Store</div><div className="font-semibold text-slate-700">{o.metrics.storageScorePct}%</div></div>
+                            <div><div className="text-slate-400">Drawers</div><div className="font-semibold text-slate-700">{o.metrics.drawers}</div></div>
+                            <div><div className="text-slate-400">Cost</div><div className="font-semibold text-slate-700">₹{Math.round(o.metrics.estCostInr / 1000)}k</div></div>
+                            <div><div className="text-slate-400">AI</div><div className="font-semibold text-slate-700">{o.metrics.aiRating}</div></div>
+                          </div>
+                          <div className="flex gap-1 px-3 py-2 border-t border-slate-100">
+                            <button onClick={() => useOption(o)} className="flex-1 px-2 py-1 text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded font-medium">Use this design</button>
+                            <button onClick={() => saveVariant(o)} className="px-2 py-1 text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 rounded">Save variant</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="text-xs font-semibold text-slate-600 mb-1">Intelligent comparison</div>
+                    <div className="overflow-x-auto rounded-lg border border-slate-200">
+                      <table className="w-full text-[11px]">
+                        <thead><tr className="bg-slate-50 text-slate-500 text-left"><th className="py-1.5 px-3">Metric</th>{options3.options.map((o, i) => <th key={o.id} className={"py-1.5 px-3 text-right " + (i === options3.recommendation.bestIndex ? "text-emerald-700" : "")}>{o.label.replace("Balanced ", "")}</th>)}</tr></thead>
+                        <tbody>{COMPARE_ROWS.map((row) => (<tr key={row.k} className="border-t border-slate-100"><td className="py-1 px-3 text-slate-500">{row.label}</td>{options3.options.map((o, i) => <td key={o.id} className={"py-1 px-3 text-right " + (i === options3.recommendation.bestIndex ? "text-emerald-700 font-semibold" : "text-slate-800")}>{row.fmt(o.metrics[row.k], o.metrics)}</td>)}</tr>))}</tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
             <button onClick={toggleGallery}
               className="w-full px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium">
               📂 My Designs{gallery === null ? "" : " ✕"}
