@@ -2890,6 +2890,143 @@ function buildConsensus(type: string, dims: any, extra: any[] = []): { candidate
   return { candidates, winner, winnerLayout: layouts[winner] };
 }
 
+// ── UNIVERSAL MULTI-OPTION DESIGN ENGINE ──────────────────────────────────────
+// Every furniture module gets THREE professionally balanced options — never one.
+// The three differ by measurable trade-offs (storage / premium aesthetics / daily
+// practicality), NOT by quality: all are production-ready. Each option carries a
+// full layout + a rich comparison-metric block + drawings, mirroring the wardrobe
+// options shape so the client renders one universal comparison UI for all types.
+const DESIGN_PROFILES: any[] = [
+  { key: "storage", label: "Balanced Storage", tag: "Recommended default",
+    desc: "Maximum storage with a clean look, standard Indian modular sizes, best value for money and the simplest to manufacture.",
+    kOpts: { hiunit: "yes", utility: "yes", dishwasher: "optional", handle: "D Handle" },
+    fOpts: { storageMode: "storage", colTarget: 450, handle: "D Handle" } },
+  { key: "premium", label: "Balanced Premium", tag: "Premium aesthetics",
+    desc: "More premium finish and hardware, better symmetry and shutter alignment, more drawers and accessories, hidden storage where practical.",
+    kOpts: { hiunit: "yes", utility: "no", dishwasher: "yes", handle: "Gola Profile" },
+    fOpts: { storageMode: "display", colTarget: 520, handle: "Gola Profile" } },
+  { key: "functional", label: "Balanced Functional", tag: "Everyday practicality",
+    desc: "Focus on ease of daily use and accessibility — wider drawers, fewer partitions, easier installation and long-term maintenance.",
+    kOpts: { hiunit: "no", utility: "yes", dishwasher: "optional", handle: "Handleless" },
+    fOpts: { storageMode: "balanced", colTarget: 640, handle: "Handleless" } },
+];
+// Extract the universal comparison metrics from any generated layout (kitchen OR furniture).
+function designMetrics(layout: any): any {
+  const sc = layout.scorecard || {};
+  const isFurn = !!layout.furniture;
+  const SHEET = 2440 * 1220;
+  let shutters = 0, drawers = 0, shelves = 0, cabinets = 0, panels = 0, panelAreaMm2 = 0;
+  if (isFurn) {
+    const cols = layout.furniture.columns || [];
+    const bodyH = layout.furniture.bodyMM || layout.furniture.heightMM || 2100;
+    cabinets = cols.length;
+    for (const col of cols) {
+      const w = col.wMM || 500;
+      panelAreaMm2 += w * bodyH * 2.6;   // front face + carcass/back/shelf factor
+      shutters += 1;                       // ~one shutter face per column
+      for (const cell of (col.cells || [])) {
+        const k = String(cell.kind || "").toLowerCase();
+        if (k.indexOf("drawer") >= 0) drawers++;
+        else if (k.indexOf("shelf") >= 0 || k.indexOf("fold") >= 0 || k.indexOf("loft") >= 0) shelves++;
+      }
+    }
+    panels = cabinets * 5 + shelves + drawers * 5;
+  } else {
+    const SKIP = new Set(["filler", "sidepanel", "chimney"]);
+    for (const r of (layout.runs || [])) {
+      for (const c of (r.base || [])) { if (SKIP.has(c.kind)) continue; cabinets++; if ((c.drawers || 0) > 0) drawers += c.drawers; else shutters++; }
+      for (const c of (r.wallCabs || [])) { if (SKIP.has(c.kind)) continue; cabinets++; shutters++; }
+    }
+    for (const row of (layout.cutList || [])) { const q = row.qty || 1; panels += q; if (/shelf/i.test(row.desc || "")) shelves += q; panelAreaMm2 += (row.h || 0) * (row.w || 0) * q; }
+  }
+  const boardSqft = Math.round(panelAreaMm2 / 92903 * 10) / 10;
+  const sheetsNeeded = Math.max(1, Math.ceil(panelAreaMm2 * 1.15 / SHEET));
+  const plywoodUtilPct = Math.max(40, Math.min(94, Math.round(panelAreaMm2 / (sheetsNeeded * SHEET) * 100)));
+  const wastePct = Math.max(6, 100 - plywoodUtilPct);
+  const edgeRow = (layout.boq || []).find((r: any) => /edge band/i.test(r.item));
+  const edgeBandM = edgeRow ? Math.round(+edgeRow.qty) : Math.round(panels * 1.6);
+  const weightKg = Math.round(boardSqft * 1.05 + drawers * 2 + shutters * 1.2);
+  const carcassCostInr = Math.round(sc.estimatedCostInr || boardSqft * 1.9 * 850);
+  const hardwareCostInr = Math.round(drawers * 950 + shutters * 180 + cabinets * 120);   // runner sets cost more than hinges → cost tracks the drawer mix
+  const estCost = carcassCostInr + hardwareCostInr;
+  return {
+    storageScorePct: Math.round(sc.storageEfficiencyPct || 0),
+    spaceUtilPct: Math.round(sc.materialUtilizationPct || 0),
+    manufacturingScorePct: Math.round(sc.manufacturingScorePct || 0),
+    manufacturingComplexity: sc.difficultyLevel || "Moderate",
+    estCostInr: estCost, carcassCostInr, materialBoardSqft: boardSqft, hardwareCostInr,
+    installDifficulty: sc.difficultyLevel || "Moderate", installTimeHrs: sc.installationTimeHrs || 0,
+    weightKg, panels, shutters, drawers, shelves, cabinets,
+    edgeBandM, plywoodUtilPct, wastePct,
+    aiRating: Math.round(((sc.overallConfidence || 70) / 20) * 10) / 10,   // 0..5
+    customerRating: null,
+    deadSpacePct: Math.round(sc.deadSpacePct || 0),
+    accessibilityPct: Math.round(sc.accessibilityPct || 0),
+    overallConfidence: Math.round(sc.overallConfidence || 0),
+  };
+}
+// Build a measurable, non-arbitrary recommendation sentence.
+function recommendExplanation(options: any[], bestIndex: number): string {
+  const best = options[bestIndex], base = options.find((o) => o.key === "storage") || options[0];
+  const rup = (a: number, b: number) => b ? Math.round(((a - b) / b) * 100) : 0;
+  if (best.key === base.key) {
+    return best.label + " is recommended — it delivers the highest usable storage (" + best.metrics.storageScorePct + "%) with strong space-utilisation (" + best.metrics.spaceUtilPct + "%) and " + String(best.metrics.manufacturingComplexity).toLowerCase() + " manufacturing at Rs." + best.metrics.estCostInr.toLocaleString("en-IN") + ": the best all-round value for most customers.";
+  }
+  const sD = rup(best.metrics.storageScorePct, base.metrics.storageScorePct);
+  const cD = rup(best.metrics.estCostInr, base.metrics.estCostInr);
+  const drD = best.metrics.drawers - base.metrics.drawers;
+  const parts: string[] = [];
+  if (sD > 0) parts.push(sD + "% more storage"); else if (sD < 0) parts.push(Math.abs(sD) + "% cleaner, more open storage"); else parts.push("comparable storage");
+  if (drD > 0) parts.push(drD + " more drawer" + (drD > 1 ? "s" : "") + " for better access");
+  parts.push(cD > 0 ? "for only " + cD + "% more cost" : cD < 0 ? "at " + Math.abs(cD) + "% lower cost" : "at the same cost");
+  return best.label + " is recommended because it provides " + parts.join(", ") + " versus " + base.label + ", while keeping installation " + String(best.metrics.installDifficulty).toLowerCase() + ".";
+}
+// Kitchen profile transform — makes the 3 options genuinely distinct in the cabinet mix
+// (Storage = as-generated · Premium = shutter bases become 3-drawer stacks · Functional =
+// 3-drawer stacks become 2 wider drawers). Re-derives docs + drawings after mutation.
+function applyKitchenProfile(layout: any, key: string): void {
+  if (key === "storage") return;   // baseline maximises tall/shutter storage — unchanged
+  const APPL = new Set(["sink", "hob", "oven", "dishwasher", "fridge", "corner", "filler", "sidepanel", "chimney"]);
+  const skip = (k: string) => APPL.has(k) || k.indexOf("tall") >= 0;
+  let changed = false;
+  for (const r of (layout.runs || [])) for (const c of (r.base || [])) {
+    if (skip(c.kind)) continue;
+    if (key === "premium") { if (c.kind === "shutter" && (c.w || 0) >= 350) { c.kind = "drawer3"; c.drawers = 3; c.dh = undefined; c.label = "3-Drawer"; changed = true; } }
+    else if (key === "functional") { if ((c.drawers || 0) >= 3) { c.drawers = 2; c.dh = undefined; c.label = "2-Drawer (wide)"; changed = true; } }
+  }
+  if (!changed) return;
+  try { layout.cutList = cutList(layout); } catch { /* advisory */ }
+  try { layout.hardware = hardwareSchedule(layout); } catch { /* advisory */ }
+  try { layout.boq = boq(layout); } catch { /* advisory */ }
+  try { layout.planSvg = renderPlan(layout.type, layout.runs, layout.dims); } catch { /* keep prior */ }
+  try { layout.elevations = (layout.runs || []).map((r: any) => ({ name: r.name, svg: renderRunElevation(r) })); } catch { /* keep prior */ }
+  try { layout.scorecard = buildScorecard(layout, { ...layout.dims, type: layout.type }); } catch { /* advisory */ }
+}
+// The engine: 3 balanced options + comparison + measurable recommendation, for ANY type.
+function designOptions(type: string, dims: any): any {
+  const isKitchen = String(type).toLowerCase().includes("kitchen");
+  const options = DESIGN_PROFILES.map((pr) => {
+    const opts = { ...dims, ...(isKitchen ? pr.kOpts : pr.fOpts) };
+    const layout = buildLayout(type, opts as any);
+    if (isKitchen) applyKitchenProfile(layout, pr.key);
+    const metrics = designMetrics(layout);
+    return {
+      id: "opt-" + pr.key, key: pr.key, label: pr.label, tag: pr.tag, description: pr.desc,
+      metrics, scorecard: layout.scorecard, svg: layout.planSvg,
+      views: { Plan: layout.planSvg, Elevation: (layout.elevations && layout.elevations[0] && layout.elevations[0].svg) || layout.planSvg },
+      layout,
+    };
+  });
+  const bal = (o: any) => Math.round(0.32 * o.metrics.storageScorePct + 0.20 * o.metrics.spaceUtilPct + 0.16 * o.metrics.manufacturingScorePct + 0.16 * o.metrics.accessibilityPct + 0.16 * o.metrics.overallConfidence);
+  const ranked = options.map((o, i) => ({ index: i, id: o.id, label: o.label, score: bal(o) })).sort((a, b) => b.score - a.score);
+  const bestIndex = ranked[0].index;
+  return {
+    type, dims, category: isKitchen ? "kitchen" : "furniture", options,
+    recommendation: { bestIndex, bestId: options[bestIndex].id, bestLabel: options[bestIndex].label, ranked, explanation: recommendExplanation(options, bestIndex) },
+    metricOrder: ["storageScorePct", "spaceUtilPct", "manufacturingComplexity", "estCostInr", "materialBoardSqft", "hardwareCostInr", "installDifficulty", "installTimeHrs", "weightKg", "panels", "shutters", "drawers", "shelves", "edgeBandM", "plywoodUtilPct", "wastePct", "aiRating", "customerRating"],
+  };
+}
+
 // ── Dispatcher: kitchens go to the run engine, everything else to furniture. ──
 function buildLayout(type: string, dims: { wall: number; wallB?: number; wallC?: number; chimneyWidth?: number; hob?: string; dishwasher?: string; hiunit?: string; utility?: string; handle?: string; applianceBrand?: string; points?: any[]; windows?: any[]; structures?: any[] }): Layout {
   refreshLearnedStandards();   // pull the latest active learned standards from the KB first
@@ -5319,6 +5456,47 @@ app.post("/api/generate-consensus", zValidator("json", generateSchema), async (c
     reinforceStandards(exercisedCategories(designType));
     return c.json({ data: { id, mode: "consensus", missing, autoMode, brief, candidates, winner, externalReviews, ...winnerLayout } });
   } catch (err) { console.error(err); return c.json({ error: "Internal server error" }, 500); }
+});
+
+// ── UNIVERSAL 3-OPTION ENGINE routes ─────────────────────────────────────────
+// Continuous-learning store: which of the 3 balanced options a customer chose + edits.
+sqlite.exec(`CREATE TABLE IF NOT EXISTS option_choices(
+  id TEXT PRIMARY KEY, design_type TEXT, category TEXT,
+  wall INTEGER, wall_b INTEGER, wall_c INTEGER,
+  chosen_key TEXT, chosen_label TEXT, recommended_key TEXT,
+  followed_reco INTEGER, edited INTEGER, metrics TEXT, created_at INTEGER)`);
+// POST /api/design-options — generate THREE balanced options (Storage/Premium/Functional)
+// with a full comparison-metric block + measurable recommendation, for ANY furniture type.
+app.post("/api/design-options", async (c) => {
+  try {
+    const b = await c.req.json().catch(() => ({} as any));
+    const designType = String(b.designType || b.type || "Straight Kitchen");
+    const wall = Math.max(600, Math.round(+b.wall || 3600));
+    const dims: any = { wall, wallB: b.wallB != null ? Math.round(+b.wallB) : undefined, wallC: b.wallC != null ? Math.round(+b.wallC) : undefined, chimneyWidth: b.chimneyWidth, hob: b.hob, dishwasher: b.dishwasher, hiunit: b.hiunit, utility: b.utility, handle: b.handle, applianceBrand: b.applianceBrand, points: b.points, windows: b.windows, structures: b.structures };
+    return c.json({ data: designOptions(designType, dims) });
+  } catch (err) { console.error(err); return c.json({ error: "design-options failed" }, 500); }
+});
+// POST /api/design-options/choice — record which option the customer picked (continuous learning).
+app.post("/api/design-options/choice", async (c) => {
+  try {
+    const b = await c.req.json().catch(() => ({} as any));
+    const id = randomUUID();
+    sqlite.prepare(`INSERT INTO option_choices(id,design_type,category,wall,wall_b,wall_c,chosen_key,chosen_label,recommended_key,followed_reco,edited,metrics,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id, String(b.designType || ""), String(b.category || ""),
+      Math.round(+b.wall || 0), b.wallB != null ? Math.round(+b.wallB) : null, b.wallC != null ? Math.round(+b.wallC) : null,
+      String(b.chosenKey || ""), String(b.chosenLabel || ""), String(b.recommendedKey || ""),
+      (b.chosenKey && b.recommendedKey && b.chosenKey === b.recommendedKey) ? 1 : 0,
+      b.edited ? 1 : 0, JSON.stringify(b.metrics || {}), Date.now());
+    return c.json({ data: { ok: true, id } });
+  } catch (err) { console.error(err); return c.json({ error: "choice log failed" }, 500); }
+});
+// GET /api/design-options/insights — aggregate: which option wins per type (learning signal).
+app.get("/api/design-options/insights", (c) => {
+  try {
+    const rows = sqlite.prepare(`SELECT design_type,chosen_key,COUNT(*) n,SUM(followed_reco) followed,SUM(edited) edited FROM option_choices GROUP BY design_type,chosen_key ORDER BY n DESC`).all();
+    const total = sqlite.prepare(`SELECT COUNT(*) n FROM option_choices`).get() as any;
+    return c.json({ data: { total: total ? total.n : 0, byTypeAndOption: rows } });
+  } catch (err) { console.error(err); return c.json({ error: "insights failed" }, 500); }
 });
 
 // External-AI key management (15.pdf Stage 3). Keys are stored locally in ai-keys.json (NOT in source,
