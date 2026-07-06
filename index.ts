@@ -12148,7 +12148,7 @@ const frontendHTML = `<!DOCTYPE html>
           "Estimated total (incl. GST): " + rs(o.boq.grandTotal),
         ].forEach((l) => { P.text(l, M, y); y += 13; });
         y += 8;
-        for (const v of ["Front", "Internal", "Shop Drawing", "Top", "Side", "Loft"]) {
+        for (const v of ["Front", "Internal", "Shop Drawing", "Shutters", "Top", "Side", "Loft"]) {
           const svg = o.views[v]; if (!svg) continue;
           let png; try { png = await svgToPng(svg, 2); } catch (e) { continue; }
           const aw = png.w || 560, ah = png.h || 400, imgW = PW - 2 * M, imgH = imgW * ah / aw;
@@ -12270,7 +12270,7 @@ const frontendHTML = `<!DOCTYPE html>
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
             <h3 className="text-sm font-semibold text-slate-700">Layout Options <span className="text-xs font-normal text-slate-400">· 3 AI variants · click to select</span></h3>
-            <div className="flex gap-1">{["Front", "Internal", "Shop Drawing", "Top", "Side", "Loft"].map((v) => (<button key={v} onClick={() => setView(v)} className={"px-2 py-0.5 rounded text-[11px] border " + (view === v ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{v === "Shop Drawing" ? "📐 Shop Drawing" : v}</button>))}</div>
+            <div className="flex gap-1 flex-wrap">{["Front", "Internal", "Shop Drawing", "Shutters", "Top", "Side", "Loft"].map((v) => (<button key={v} onClick={() => setView(v)} className={"px-2 py-0.5 rounded text-[11px] border " + (view === v ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{v === "Shop Drawing" ? "📐 Shop Drawing" : v === "Shutters" ? "🚪 Shutters ⇄ Open" : v}</button>))}</div>
           </div>
           <div className="grid md:grid-cols-3 gap-3">
             {opts.map((o, i) => (<div key={o.id} onClick={() => setSelIdx(i)} className={"rounded-lg border overflow-hidden cursor-pointer transition " + (i === selIdx ? "border-indigo-400 ring-1 ring-indigo-200" : "border-slate-200 hover:border-slate-300")}>
@@ -14316,6 +14316,74 @@ function renderWardrobeShopDrawing(opt: any): string {
   p.push(`</svg>`);
   return p.join("");
 }
+// WITH-shutters (closed) vs WITHOUT-shutters (internal) — two aligned front elevations side by
+// side, every dimension in millimetres. Shutters are hinged leaves (<=600 mm each) per column.
+function renderWardrobeShutterCompareSvg(opt: any): string {
+  const S = WARDROBE_STD;
+  const isHang = (k: string) => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit";
+  const isDrawer = (k: string) => k === "drawer" || k === "shoe" || k === "jewellery" || k === "cosmetics" || k === "tieBelt" || k === "safe" || k === "laptop";
+  const gap = 96, padL = 62, padR = 30, padT = 104, padB = 48;
+  const scale = Math.max(0.05, Math.min(430 / opt.width, 720 / opt.height));
+  const wpx = opt.width * scale, hpx = opt.height * scale;
+  const W = Math.round(padL + wpx + gap + wpx + padR), Hh = Math.round(padT + hpx + padB);
+  const y0 = padT, loftPx = opt.hasLoft ? opt.loftH * scale : 0, plinthPx = S.plinth * scale;
+  const floorY = y0 + hpx - plinthPx, usableTopY = y0 + loftPx;
+  const INK = "#111827", THIN = "#9ca3af", MID = "#4b5563";
+  const esc = wardEsc;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif"><rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
+  p.push(`<text x="${padL}" y="22" fill="${INK}" font-size="14" font-weight="800">WARDROBE — 2D ELEVATIONS · all dimensions in mm</text>`);
+  p.push(`<text x="${padL}" y="38" fill="${MID}" font-size="9.5">${esc(String(opt.label || ""))} · overall ${opt.width} × ${opt.height} × ${opt.depth} mm · hinged shutters (≤600 mm leaf)</text>`);
+  // hinged shutter leaves inside a cell rect
+  const leaves = (x: number, y: number, w: number, h: number) => {
+    const n = Math.max(1, Math.round(w / 550)), lw = w / n; let g = "";
+    for (let i = 0; i < n; i++) { const lx = x + i * lw; g += `<rect x="${(lx + 1.5).toFixed(1)}" y="${(y + 1.5).toFixed(1)}" width="${(lw - 3).toFixed(1)}" height="${(h - 3).toFixed(1)}" fill="#fbfbfd" stroke="${INK}" stroke-width="1.1"/>`; const hx = lx + (i % 2 === 0 ? lw - 7 : 7); g += `<line x1="${hx.toFixed(1)}" y1="${(y + h / 2 - 12).toFixed(1)}" x2="${hx.toFixed(1)}" y2="${(y + h / 2 + 12).toFixed(1)}" stroke="${MID}" stroke-width="2"/>`; g += `<line x1="${(lx + 2.5).toFixed(1)}" y1="${(y + 10).toFixed(1)}" x2="${(lx + 6).toFixed(1)}" y2="${(y + 10).toFixed(1)}" stroke="${THIN}" stroke-width="0.8"/><line x1="${(lx + 2.5).toFixed(1)}" y1="${(y + h - 10).toFixed(1)}" x2="${(lx + 6).toFixed(1)}" y2="${(y + h - 10).toFixed(1)}" stroke="${THIN}" stroke-width="0.8"/>`; }
+    return g;
+  };
+  const elevation = (x0: number, mode: string, title: string) => {
+    const xOf = (mm: number) => x0 + mm * scale;
+    p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(y0 - 40).toFixed(1)}" fill="${INK}" font-size="10.5" font-weight="700" text-anchor="middle">${esc(title)}</text>`);
+    if (loftPx > 4) {
+      p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="#ffffff" stroke="${INK}" stroke-width="1"/>`);
+      if (mode === "shutter") for (const sec of opt.sections) for (const col of sec.columns) p.push(leaves(xOf(col.x), y0, col.w * scale, loftPx));
+      p.push(`<text x="${(x0 + 5).toFixed(1)}" y="${(y0 + 11).toFixed(1)}" fill="${MID}" font-size="7.5" font-weight="600">LOFT</text>`);
+    }
+    for (const sec of opt.sections) for (const col of sec.columns) {
+      const cx = xOf(col.x), cw = col.w * scale;
+      if (mode === "shutter") { p.push(leaves(cx, usableTopY, cw, floorY - usableTopY)); }
+      else {
+        let yb = floorY;
+        for (const cell of col.cells) {
+          const ch = cell.hMM * scale, yt = yb - ch, cxm = cx + cw / 2, k = String(cell.kind);
+          p.push(`<rect x="${cx.toFixed(1)}" y="${yt.toFixed(1)}" width="${cw.toFixed(1)}" height="${ch.toFixed(1)}" fill="#ffffff" stroke="${THIN}" stroke-width="0.6"/>`);
+          if (ch > 9) {
+            if (isHang(k)) { const rodY = yt + Math.min(13, ch * 0.14), n = Math.max(3, Math.min(22, Math.round(cw / 10))); p.push(`<line x1="${(cx + 4).toFixed(1)}" y1="${rodY.toFixed(1)}" x2="${(cx + cw - 4).toFixed(1)}" y2="${rodY.toFixed(1)}" stroke="${INK}" stroke-width="1.1"/>`); for (let i = 0; i < n; i++) { const gx = cx + 6 + (cw - 12) * (n === 1 ? 0.5 : i / (n - 1)); p.push(`<line x1="${gx.toFixed(1)}" y1="${(rodY + 2).toFixed(1)}" x2="${gx.toFixed(1)}" y2="${(yt + ch - 5).toFixed(1)}" stroke="${THIN}" stroke-width="0.7"/>`); } }
+            else if (isDrawer(k)) { p.push(`<rect x="${(cx + 4).toFixed(1)}" y="${(yt + 3).toFixed(1)}" width="${(cw - 8).toFixed(1)}" height="${(ch - 6).toFixed(1)}" fill="none" stroke="${INK}" stroke-width="0.9"/><line x1="${(cx + cw / 2 - 9).toFixed(1)}" y1="${(yt + ch / 2).toFixed(1)}" x2="${(cx + cw / 2 + 9).toFixed(1)}" y2="${(yt + ch / 2).toFixed(1)}" stroke="${INK}" stroke-width="1.8"/>`); }
+            else { const rows = Math.max(1, Math.min(4, Math.floor(ch / 12))); for (let r = 1; r <= rows; r++) { const ly = yt + (ch * r) / (rows + 1); p.push(`<line x1="${(cx + 5).toFixed(1)}" y1="${ly.toFixed(1)}" x2="${(cx + cw - 5).toFixed(1)}" y2="${ly.toFixed(1)}" stroke="${THIN}" stroke-width="0.7"/>`); } }
+            if (ch > 18) { const lbl = String(cell.label || k); p.push(`<rect x="${(cxm - Math.min(cw - 6, lbl.length * 4 + 6) / 2).toFixed(1)}" y="${(yt + ch / 2 - 9).toFixed(1)}" width="${Math.min(cw - 6, lbl.length * 4 + 6).toFixed(1)}" height="10" fill="#ffffff" opacity="0.85"/><text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 - 1).toFixed(1)}" fill="${INK}" font-size="6.6" text-anchor="middle">${esc(lbl.length > (cw - 6) / 4 ? lbl.slice(0, Math.max(3, Math.floor((cw - 6) / 4))) : lbl)}</text><text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 + 7).toFixed(1)}" fill="${MID}" font-size="6" text-anchor="middle">${Math.round(cell.hMM)}</text>`); }
+          }
+          yb = yt;
+        }
+      }
+      p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="1"/>`);
+    }
+    for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${dx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="1.8"/>`); }
+    p.push(`<rect x="${x0.toFixed(1)}" y="${floorY.toFixed(1)}" width="${wpx.toFixed(1)}" height="${plinthPx.toFixed(1)}" fill="#eef2f6" stroke="${INK}" stroke-width="1"/><text x="${(x0 + wpx / 2).toFixed(1)}" y="${(floorY + plinthPx / 2 + 3.5).toFixed(1)}" fill="${INK}" font-size="8" font-weight="600" text-anchor="middle">PLINTH ${S.plinth}</text>`);
+    p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${hpx.toFixed(1)}" fill="none" stroke="${INK}" stroke-width="1.8"/>`);
+    // width dims (mm) per column + overall
+    for (const sec of opt.sections) for (const col of sec.columns) p.push(wardHDim(xOf(col.x), xOf(col.x + col.w), y0 - 12, Math.round(col.w) + ""));
+    p.push(wardHDim(x0, x0 + wpx, y0 - 24, opt.width + ""));
+    // height dims (mm) on the left of this elevation
+    const dimX = x0 - 26;
+    if (loftPx > 4) p.push(wardVDim(dimX, y0, usableTopY, opt.loftH + ""));
+    p.push(wardVDim(dimX, usableTopY, floorY, Math.round(opt.usableH || (opt.height - opt.plinth - opt.loftH)) + ""));
+    p.push(wardVDim(dimX, floorY, y0 + hpx, S.plinth + ""));
+  };
+  elevation(padL, "shutter", "WITH SHUTTERS (closed)");
+  elevation(padL + wpx + gap, "internal", "WITHOUT SHUTTERS (internal)");
+  p.push(`</svg>`);
+  return p.join("");
+}
 // Top View (plan) — width × depth, section splits, per-column shutter door-swing arcs, dims.
 // §20 folded L/U-shape plan (top view) — wings on perpendicular walls + corner units, dimensioned.
 function renderWardrobePlanShaped(opt: any): string {
@@ -14595,7 +14663,7 @@ function wardrobeOptions(input: any): any {
     const o = buildWardrobeOption(st, input);
     o.reports = wardReports(o);
     o.scorecard = wardScorecard(o);
-    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
     o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
     return o;
@@ -14652,7 +14720,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
     const cnt = (pred: (k: string) => boolean) => allCells.filter((cc: any) => pred(cc.kind)).length;
     o.stats = { hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"), shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"), drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"), shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"), columns: o.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0), totalItems: allCells.length };
     o.reports = wardReports(o); o.scorecard = wardScorecard(o);
-    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
     o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
     return c.json({ data: o });

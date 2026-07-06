@@ -19,10 +19,15 @@ ok(/THADA/.test(sd), "4\" thada labelled");
 ok(/PROFILE/.test(sd), "profile-light annotation");
 ok(/FRONT ELEVATION/.test(sd), "title present");
 ok((sd.match(/rotate\(-90/g) || []).length >= 4, "vertical dim chain (rotated ticks)");
-// also confirm rerender keeps it
+// Shutters ⇄ Open side-by-side view (all mm)
+const shut = opt.views["Shutters"];
+ok(!!shut && shut.startsWith("<svg"), "Shutters (with/without) view exists");
+ok(/WITH SHUTTERS/.test(shut) && /WITHOUT SHUTTERS/.test(shut), "shows both closed + internal elevations");
+ok(/all dimensions in mm/.test(shut) && !/'-/.test(shut), "measurements in mm (no feet-inches)");
+// also confirm rerender keeps them
 const rr = await fetch(B + "/api/wardrobe/rerender", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ option: opt }) });
 const rj = await rr.json();
-ok(rj.data && rj.data.views && !!rj.data.views["Shop Drawing"], "rerender preserves Shop Drawing");
+ok(rj.data && rj.data.views && !!rj.data.views["Shop Drawing"] && !!rj.data.views["Shutters"], "rerender preserves Shop Drawing + Shutters");
 
 const b = await puppeteer.launch({ executablePath: CHROME, headless: "new", args: ["--use-gl=angle", "--use-angle=swiftshader", "--ignore-gpu-blocklist", "--no-sandbox"] });
 const pg = await b.newPage();
