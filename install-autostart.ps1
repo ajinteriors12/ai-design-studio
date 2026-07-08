@@ -13,7 +13,7 @@
 #
 #  Remove it any time with:  uninstall-autostart.ps1
 # ============================================================
-param([switch]$AtBoot, [switch]$OpenBrowser)
+param([switch]$AtBoot, [switch]$OpenBrowser, [string]$StartDelay = "PT20S")
 $ErrorActionPreference = "Stop"
 $dir = $PSScriptRoot
 $vbs = Join-Path $dir "autostart-run.vbs"
@@ -33,8 +33,11 @@ if ($AtBoot) {
   Write-Host "Registered '$taskName' to start at BOOT (as SYSTEM)." -ForegroundColor Green
 } else {
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+  # Stagger the start so the server boot doesn't collide with the logon rush
+  # (other apps auto-starting at the same time saturate the CPU). ISO-8601 duration.
+  if ($StartDelay) { $trigger.Delay = $StartDelay }
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Force -Description "Starts the AI Design Studio server at logon." | Out-Null
-  Write-Host "Registered '$taskName' to start at YOUR logon." -ForegroundColor Green
+  Write-Host "Registered '$taskName' to start at YOUR logon (delay $StartDelay)." -ForegroundColor Green
 }
 
 if ($OpenBrowser) {
