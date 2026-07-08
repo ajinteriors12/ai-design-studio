@@ -12305,8 +12305,14 @@ const frontendHTML = `<!DOCTYPE html>
             <h3 className="text-sm font-semibold text-slate-700">✏️ Edit — <span className="text-indigo-600">Option {selIdx + 1} · {sel.label}</span> <span className="text-xs font-normal text-slate-400">· drag dividers (↕ bands · ↔ partitions · ↔ male/female split) · right-click for add / delete / convert / lock</span></h3>
             {edited && <button onClick={() => setEdited(null)} className="text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Reset edits</button>}
           </div>
-          <div className="overflow-auto"><WardrobeDrawEditor opt={sel} onCommit={commitEdit} /></div>
-          <div className="text-[11px] mt-1">{edited ? <span className="text-emerald-600">Edited · cutting list &amp; cost below reflect your changes.</span> : <span className="text-slate-400">Tip: use the Male section % slider above to change the split; drag dividers here to resize bands.</span>}</div>
+          <div className="grid lg:grid-cols-2 gap-3">
+            <div className="overflow-auto"><WardrobeDrawEditor opt={sel} onCommit={commitEdit} /></div>
+            <div className="min-w-0">
+              <div className="text-[11px] text-slate-400 mb-1">{(view === "Shop Drawing" ? "📐 Shop Drawing" : view === "Shutters" ? "🚪 Shutters ⇄ Open" : view) + " — same design as shown above (updates live as you edit)"}</div>
+              <div className="overflow-auto rounded-lg border border-slate-100 bg-slate-50/40 p-1" dangerouslySetInnerHTML={{ __html: (sel.views && sel.views[view]) || sel.svg }} />
+            </div>
+          </div>
+          <div className="text-[11px] mt-1">{edited ? <span className="text-emerald-600">Edited · the drawing on the right, cutting list &amp; cost below all reflect your changes.</span> : <span className="text-slate-400">Tip: use the Male section % slider above to change the split; drag dividers here to resize bands.</span>}</div>
         </div>)}
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -13871,9 +13877,13 @@ function wardSectionRecipes(sec: string, n: number, strategy: string, L: any): s
   const out: string[] = [], prof = +L.professionals > 0;
   let pool: string[] = [];
   if (sec === "male") {
-    // maxHanging = every column hangs · maxFolding = every column folds/drawers · balanced = alternate
-    if (strategy === "maxHanging") { pool = ["hang-long", "hang-short-double", "hang-long", "pant+shelves", "accessories"]; if (prof) pool.unshift("hang-long"); }
-    else if (strategy === "maxFolding") pool = ["shelves", "shoe+drawers", "pant+shelves", "accessories", "hang-long"];
+    // Three BALANCED variants — all keep a healthy mix of hanging + folding/drawers,
+    // they differ only in emphasis & column order so the user gets 3 real choices:
+    //   balanced       (Everyday)     = even hang/fold alternation (the classic mix)
+    //   balanced-hang  (Hanging-Led)  = same mix but leans to hanging, hang columns first
+    //   balanced-fold  (Storage-Led)  = same mix but leans to shelves/drawers first
+    if (strategy === "balanced-hang") { pool = ["hang-long", "hang-short-double", "pant+shelves", "shoe+drawers", "accessories"]; if (prof) pool.unshift("hang-long"); }
+    else if (strategy === "balanced-fold") pool = ["shelves", "shoe+drawers", "hang-long", "pant+shelves", "accessories"];
     else pool = ["hang-long", "shoe+drawers", "pant+shelves", "accessories", "hang-short-double"];
   } else if (sec === "female") {
     const hangItems: string[] = [], foldItems: string[] = [];
@@ -13881,8 +13891,8 @@ function wardSectionRecipes(sec: string, n: number, strategy: string, L: any): s
     if (L.western !== "low") hangItems.push("dress");
     if (L.traditional === "high") hangItems.push("lehenga");
     if (!hangItems.length) hangItems.push("dress");
-    if (strategy === "maxHanging") pool = [...hangItems, ...hangItems, "female-acc"];
-    else if (strategy === "maxFolding") pool = [...foldItems, "shelves", "female-acc", "shoe+drawers", ...(foldItems.length ? [] : ["shelves"])];
+    if (strategy === "balanced-hang") pool = [hangItems[0], ...(hangItems[1] ? [hangItems[1]] : []), "female-acc", ...foldItems, "shoe+drawers"];
+    else if (strategy === "balanced-fold") pool = [...foldItems, "shelves", hangItems[0], "female-acc", "shoe+drawers"];
     else pool = [hangItems[0], "female-acc", ...(hangItems[1] ? [hangItems[1]] : []), ...foldItems, "shoe+drawers"];
     if (!pool.length) pool = ["shelves"];
   } else {
@@ -13959,7 +13969,7 @@ function buildWardrobeOption(strategy: string, input: any): any {
     shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"),
     columns: sections.reduce((a: number, s: any) => a + s.columns.length, 0), totalItems: allCells.length,
   };
-  const label = strategy === "maxHanging" ? "Max Hanging" : strategy === "maxFolding" ? "Max Folding" : "Balanced";
+  const label = strategy === "balanced-hang" ? "Balanced · Hanging-Led" : strategy === "balanced-fold" ? "Balanced · Storage-Led" : "Balanced · Everyday";
   const finishes = (input.finishes && typeof input.finishes === "object") ? input.finishes : {};
   const corners = shapeMeta ? shapeMeta.corners.length : 0;
   const cornerNote = shapeMeta ? (shapeMeta.shape === "u" ? "U-shape" : "L-shape") + " · " + corners + " corner unit(s) — " + (WARD_CORNERS[cornerSol] || WARD_CORNERS.lemans).label + " (" + (WARD_CORNERS[cornerSol] || WARD_CORNERS.lemans).note + ")" : null;
@@ -14108,9 +14118,11 @@ function wardScorecard(opt: any): any {
   const s = opt.stats, tot = Math.max(1, s.totalItems), cl = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
   const hangingCap = cl(45 + (s.hanging / tot) * 130), shelfCap = cl(45 + (s.shelves / tot) * 150), drawerCap = cl(45 + (s.drawers / tot) * 150);
   const storageEff = cl(78 + (opt.hasLoft ? 8 : 0) + (tot > 10 ? 6 : 0));
-  const spaceUtil = cl(82 + (opt.hasLoft ? 8 : 0) + (opt.strategy === "maxFolding" ? 4 : 0));
-  const easeOfUse = cl(opt.strategy === "balanced" ? 94 : opt.strategy === "maxHanging" ? 88 : 82);
-  const mfg = cl(opt.strategy === "maxFolding" ? 62 : opt.strategy === "balanced" ? 45 : 34);
+  // Three balanced variants: storage-led packs space best but is slightly more complex to build;
+  // everyday is the easiest daily-use mix; hanging-led is the simplest to manufacture.
+  const spaceUtil = cl(82 + (opt.hasLoft ? 8 : 0) + (opt.strategy === "balanced-fold" ? 4 : 0));
+  const easeOfUse = cl(opt.strategy === "balanced" ? 94 : opt.strategy === "balanced-hang" ? 91 : 88);
+  const mfg = cl(opt.strategy === "balanced-fold" ? 55 : opt.strategy === "balanced-hang" ? 38 : 45);
   const overall = cl(storageEff * 0.3 + easeOfUse * 0.25 + spaceUtil * 0.2 + (100 - mfg) * 0.15 + ((hangingCap + shelfCap + drawerCap) / 3) * 0.1);
   return { storageEff, hangingCap, shelfCap, drawerCap, spaceUtil, easeOfUse, mfgComplexityPct: mfg, mfgComplexity: mfg < 40 ? "Low" : mfg < 60 ? "Medium" : "High", materialCostInr: (opt.reports || {}).estCostInr || 0, overallConfidence: overall };
 }
@@ -14251,6 +14263,48 @@ function renderWardrobeShopDrawing(opt: any): string {
     for (let i = 0; i < nb; i++) { const bw = slot * 0.66, bx = x0 + i * slot + (slot - bw) / 2, bh = Math.min(bandH * 0.62, bandH - 6), by = bandY + (bandH - bh) / 2; g += `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="#fbfbfd" stroke="${INK}" stroke-width="1"/><line x1="${bx.toFixed(1)}" y1="${(by + bh * 0.28).toFixed(1)}" x2="${(bx + bw).toFixed(1)}" y2="${(by + bh * 0.28).toFixed(1)}" stroke="${MID}" stroke-width="0.8"/><rect x="${(bx + bw / 2 - 6).toFixed(1)}" y="${(by + bh * 0.28 + 2).toFixed(1)}" width="12" height="4" fill="none" stroke="${MID}" stroke-width="0.7"/>`; }
     return g;
   };
+  // ---- REAL ITEM silhouettes drawn inside each compartment (garments on the rod, goods on shelves) ----
+  const f1 = (v: number) => v.toFixed(1);
+  const gHook = (gx: number, rodY: number, topY: number) => `<line x1="${f1(gx)}" y1="${f1(rodY)}" x2="${f1(gx)}" y2="${f1(topY)}" stroke="${MID}" stroke-width="0.6"/><path d="M${f1(gx - 3)},${f1(topY)} L${f1(gx)},${f1(topY - 2.5)} L${f1(gx + 3)},${f1(topY)}" fill="none" stroke="${MID}" stroke-width="0.6"/>`;
+  const gShirt = (gx: number, topY: number, gh: number, gw: number, fill = "#eef2ff") => `<path d="M${f1(gx - gw / 2)},${f1(topY + gh * 0.18)} L${f1(gx - gw * 0.16)},${f1(topY)} L${f1(gx + gw * 0.16)},${f1(topY)} L${f1(gx + gw / 2)},${f1(topY + gh * 0.18)} L${f1(gx + gw * 0.34)},${f1(topY + gh)} L${f1(gx - gw * 0.34)},${f1(topY + gh)} Z" fill="${fill}" stroke="${MID}" stroke-width="0.6"/><path d="M${f1(gx - gw * 0.16)},${f1(topY)} L${f1(gx)},${f1(topY + gh * 0.15)} L${f1(gx + gw * 0.16)},${f1(topY)}" fill="none" stroke="${MID}" stroke-width="0.5"/>`;
+  const gCoat = (gx: number, topY: number, gh: number, gw: number) => { const w = gw * 1.05; return `<path d="M${f1(gx - w / 2)},${f1(topY + gh * 0.16)} L${f1(gx - w * 0.16)},${f1(topY)} L${f1(gx + w * 0.16)},${f1(topY)} L${f1(gx + w / 2)},${f1(topY + gh * 0.16)} L${f1(gx + w * 0.42)},${f1(topY + gh)} L${f1(gx - w * 0.42)},${f1(topY + gh)} Z" fill="#dbe3f4" stroke="${MID}" stroke-width="0.6"/><path d="M${f1(gx)},${f1(topY + gh * 0.15)} L${f1(gx - w * 0.13)},${f1(topY + gh * 0.5)} M${f1(gx)},${f1(topY + gh * 0.15)} L${f1(gx + w * 0.13)},${f1(topY + gh * 0.5)} M${f1(gx)},${f1(topY + gh * 0.15)} L${f1(gx)},${f1(topY + gh)}" fill="none" stroke="${MID}" stroke-width="0.5"/>`; };
+  const gSaree = (gx: number, topY: number, gh: number, gw: number) => { const w = gw * 0.9; let s = `<path d="M${f1(gx - w * 0.32)},${f1(topY)} L${f1(gx + w * 0.32)},${f1(topY)} L${f1(gx + w / 2)},${f1(topY + gh)} L${f1(gx - w / 2)},${f1(topY + gh)} Z" fill="#fce7f3" stroke="#db2777" stroke-width="0.55"/>`; for (let i = 1; i < 4; i++) { const px = gx - w * 0.32 + (w * 0.64) * (i / 4); s += `<line x1="${f1(px)}" y1="${f1(topY + 2)}" x2="${f1(px + (i - 2) * 2.2)}" y2="${f1(topY + gh - 2)}" stroke="#db2777" stroke-width="0.4"/>`; } return s + `<rect x="${f1(gx - w / 2)}" y="${f1(topY + gh - 3)}" width="${f1(w)}" height="2.3" fill="#be185d"/>`; };
+  const gDress = (gx: number, topY: number, gh: number, gw: number) => { const wt = topY + gh * 0.32; return `<path d="M${f1(gx - gw * 0.2)},${f1(topY)} L${f1(gx + gw * 0.2)},${f1(topY)} L${f1(gx + gw * 0.16)},${f1(wt)} L${f1(gx + gw / 2)},${f1(topY + gh)} L${f1(gx - gw / 2)},${f1(topY + gh)} L${f1(gx - gw * 0.16)},${f1(wt)} Z" fill="#fdecf5" stroke="#db2777" stroke-width="0.6"/>`; };
+  const gLehenga = (gx: number, topY: number, gh: number, gw: number) => { const wt = topY + gh * 0.3; return `<rect x="${f1(gx - gw * 0.18)}" y="${f1(topY)}" width="${f1(gw * 0.36)}" height="${f1(gh * 0.3)}" fill="#fbcfe8" stroke="#be185d" stroke-width="0.5"/><path d="M${f1(gx - gw * 0.18)},${f1(wt)} L${f1(gx + gw * 0.18)},${f1(wt)} L${f1(gx + gw / 2)},${f1(topY + gh)} L${f1(gx - gw / 2)},${f1(topY + gh)} Z" fill="#f9a8d4" stroke="#be185d" stroke-width="0.6"/>`; };
+  const drawGarment = (t: string, gx: number, topY: number, gh: number, gw: number) =>
+    t === "coat" ? gCoat(gx, topY, gh, gw) : t === "saree" ? gSaree(gx, topY, gh, gw) : t === "dress" ? gDress(gx, topY, gh, gw) : t === "lehenga" ? gLehenga(gx, topY, gh, gw) : t === "kid" ? gShirt(gx, topY, gh * 0.7, gw * 0.8, "#e0f2fe") : gShirt(gx, topY, gh, gw);
+  const HANG_SET: Record<string, string[]> = { longHang: ["shirt", "coat", "shirt", "shirt"], shortHang: ["shirt", "shirt", "shirt"], suit: ["coat", "coat"], saree: ["saree", "saree", "saree"], dress: ["dress", "dress", "dress"], lehenga: ["lehenga", "lehenga"], dupatta: ["saree", "dress"], kidsHang: ["kid", "kid", "kid"], hang: ["shirt", "coat", "shirt"] };
+  const hangItems = (k: string, cx: number, yt: number, cw: number, ch: number) => {
+    const rodY = yt + Math.min(13, ch * 0.13), botY = yt + ch - 4;
+    let g = `<line x1="${f1(cx + 5)}" y1="${f1(rodY)}" x2="${f1(cx + cw - 5)}" y2="${f1(rodY)}" stroke="${INK}" stroke-width="1.3"/><line x1="${f1(cx + 5)}" y1="${f1(rodY - 3)}" x2="${f1(cx + 5)}" y2="${f1(rodY + 3)}" stroke="${INK}" stroke-width="1.1"/><line x1="${f1(cx + cw - 5)}" y1="${f1(rodY - 3)}" x2="${f1(cx + cw - 5)}" y2="${f1(rodY + 3)}" stroke="${INK}" stroke-width="1.1"/>`;
+    const set = HANG_SET[k] || (k.toLowerCase().indexOf("kids") >= 0 ? ["kid", "kid"] : ["shirt", "coat", "shirt"]);
+    const gh = Math.max(10, Math.min(botY - (rodY + 4), ch * 0.74));
+    const n = Math.max(1, Math.min(set.length > 1 ? 5 : 4, Math.floor(cw / 16)));
+    const gw = Math.min(((cw - 16) / n) * 0.92, set[0] === "saree" || set.indexOf("dress") >= 0 ? 15 : 17);
+    for (let i = 0; i < n; i++) { const gx = cx + 9 + (cw - 18) * (n === 1 ? 0.5 : i / (n - 1)); g += gHook(gx, rodY, rodY + 3) + drawGarment(set[i % set.length], gx, rodY + 3, gh, gw); }
+    return g;
+  };
+  const iHandbag = (cx: number, yt: number, cw: number, ch: number) => { const n = cw > 90 ? 2 : 1, slot = cw / n; let g = ""; for (let i = 0; i < n; i++) { const bcx = cx + i * slot + slot * 0.5, bw = Math.min(slot * 0.5, ch * 0.5), bh = Math.min(ch * 0.56, bw * 0.85), by = yt + ch / 2 - bh / 2 + 2; g += `<path d="M${f1(bcx - bw / 2)},${f1(by)} q${f1(bw / 2)},${f1(-bh * 0.55)} ${f1(bw)},0" fill="none" stroke="#7c3aed" stroke-width="0.7"/><rect x="${f1(bcx - bw / 2)}" y="${f1(by)}" width="${f1(bw)}" height="${f1(bh)}" rx="2" fill="#ede9fe" stroke="#7c3aed" stroke-width="0.7"/><line x1="${f1(bcx - bw / 2)}" y1="${f1(by + bh * 0.3)}" x2="${f1(bcx + bw / 2)}" y2="${f1(by + bh * 0.3)}" stroke="#7c3aed" stroke-width="0.4"/>`; } return g; };
+  const iShoe = (cx: number, yt: number, cw: number, ch: number) => { const n = Math.max(2, Math.min(4, Math.round(cw / 22))), by = yt + ch - 5; let g = ""; for (let i = 0; i < n; i++) { const sx = cx + 8 + (cw - 20) * (n === 1 ? 0.5 : i / (n - 1)) - 6; g += `<path d="M${f1(sx)},${f1(by)} l0,-3.5 q0.6,-3 5,-3 l3.5,0 q3.5,0 4.5,3 l0,3.5 Z" fill="#f5ead9" stroke="#a1712f" stroke-width="0.6"/>`; } return g; };
+  const iJewel = (cx: number, yt: number, cw: number, ch: number) => { const r = Math.min(cw * 0.28, ch * 0.26), my = yt + ch * 0.34; return `<path d="M${f1(cx + cw / 2 - r)},${f1(my)} q${f1(r)},${f1(r * 1.1)} ${f1(2 * r)},0" fill="none" stroke="#d97706" stroke-width="0.8"/><circle cx="${f1(cx + cw / 2)}" cy="${f1(my + r * 0.9)}" r="2" fill="#f59e0b"/><circle cx="${f1(cx + cw / 2 - r * 0.6)}" cy="${f1(my + r * 0.55)}" r="1.2" fill="#fcd34d"/><circle cx="${f1(cx + cw / 2 + r * 0.6)}" cy="${f1(my + r * 0.55)}" r="1.2" fill="#fcd34d"/>`; };
+  const iCosmetic = (cx: number, yt: number, cw: number, ch: number) => { const n = Math.max(2, Math.min(4, Math.round(cw / 16))), by = yt + ch - 5; let g = ""; for (let i = 0; i < n; i++) { const bx = cx + 7 + (cw - 14) * (n === 1 ? 0.5 : i / (n - 1)), bh = ch * 0.42 + (i % 2) * 4; g += `<rect x="${f1(bx - 2.2)}" y="${f1(by - bh)}" width="4.4" height="${f1(bh)}" rx="1" fill="#fecaca" stroke="#ef4444" stroke-width="0.5"/><rect x="${f1(bx - 1)}" y="${f1(by - bh - 2.2)}" width="2" height="2.4" fill="#ef4444"/>`; } return g; };
+  const iSafe = (cx: number, yt: number, cw: number, ch: number) => { const m = 6, bx = cx + m, by = yt + m, bw = cw - 2 * m, bh = ch - 2 * m; return `<rect x="${f1(bx)}" y="${f1(by)}" width="${f1(bw)}" height="${f1(bh)}" rx="2" fill="#fee2e2" stroke="#b91c1c" stroke-width="0.8"/><circle cx="${f1(bx + bw * 0.66)}" cy="${f1(by + bh / 2)}" r="${f1(Math.min(bw * 0.16, bh * 0.28))}" fill="none" stroke="#b91c1c" stroke-width="0.8"/><line x1="${f1(bx + bw * 0.66)}" y1="${f1(by + bh / 2)}" x2="${f1(bx + bw * 0.66)}" y2="${f1(by + bh * 0.26)}" stroke="#b91c1c" stroke-width="0.7"/>`; };
+  const iTie = (cx: number, yt: number, cw: number, ch: number) => { const railY = yt + 5, n = Math.max(3, Math.min(7, Math.round(cw / 10))); let g = `<line x1="${f1(cx + 4)}" y1="${f1(railY)}" x2="${f1(cx + cw - 4)}" y2="${f1(railY)}" stroke="${INK}" stroke-width="0.9"/>`; for (let i = 0; i < n; i++) { const px = cx + 7 + (cw - 14) * (n === 1 ? 0.5 : i / (n - 1)); g += `<path d="M${f1(px - 1.6)},${f1(railY)} L${f1(px + 1.6)},${f1(railY)} L${f1(px + 1)},${f1(yt + ch - 6)} L${f1(px - 1)},${f1(yt + ch - 6)} Z" fill="#fde68a" stroke="#b45309" stroke-width="0.4"/>`; } return g; };
+  const iPants = (cx: number, yt: number, cw: number, ch: number) => { const railY = yt + 6, n = Math.max(2, Math.min(6, Math.round(cw / 14))); let g = `<line x1="${f1(cx + 4)}" y1="${f1(railY)}" x2="${f1(cx + cw - 4)}" y2="${f1(railY)}" stroke="${INK}" stroke-width="1"/>`; for (let i = 0; i < n; i++) { const px = cx + 8 + (cw - 16) * (n === 1 ? 0.5 : i / (n - 1)); g += `<path d="M${f1(px - 3)},${f1(railY)} L${f1(px - 3)},${f1(yt + ch - 4)} M${f1(px + 3)},${f1(railY)} L${f1(px + 3)},${f1(yt + ch - 4)}" stroke="${MID}" stroke-width="0.7" fill="none"/>`; } return g; };
+  // dispatch a cell kind → its item illustration
+  const cellArt = (k: string, cx: number, yt: number, cw: number, ch: number) => {
+    if (isHang(k)) return hangItems(k, cx, yt, cw, ch);
+    if (k === "pantRack") return iPants(cx, yt, cw, ch);
+    if (k === "handbag") return iHandbag(cx, yt, cw, ch);
+    if (k === "shoe") return iShoe(cx, yt, cw, ch);
+    if (k === "jewellery") return iJewel(cx, yt, cw, ch);
+    if (k === "cosmetics") return iCosmetic(cx, yt, cw, ch);
+    if (k === "safe") return iSafe(cx, yt, cw, ch);
+    if (k === "tieBelt") return iTie(cx, yt, cw, ch);
+    if (k === "drawer" || k === "laptop") return drawerGlyph(cx, yt, cw, ch, false);
+    if (isCorner(k)) return `<line x1="${f1(cx + 4)}" y1="${f1(yt + ch - 4)}" x2="${f1(cx + cw - 4)}" y2="${f1(yt + 4)}" stroke="${MID}" stroke-width="0.9" stroke-dasharray="4 3"/>`;
+    return foldGlyph(cx, yt, cw, ch);
+  };
   // ---- loft band (storage boxes) ----
   if (opt.hasLoft && loftPx > 6) {
     p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="#ffffff" stroke="${INK}" stroke-width="1"/>`);
@@ -14265,14 +14319,11 @@ function renderWardrobeShopDrawing(opt: any): string {
       const cell = col.cells[ci], ch = cell.hMM * scale, yt = yb - ch, cxm = cx + cw / 2, k = String(cell.kind);
       p.push(`<rect x="${cx.toFixed(1)}" y="${yt.toFixed(1)}" width="${cw.toFixed(1)}" height="${ch.toFixed(1)}" fill="#ffffff" stroke="${THIN}" stroke-width="0.6"/>`);
       if (ch > 10) {
-        if (isHang(k)) p.push(hangGlyph(cx, yt, cw, ch));
-        else if (isDrawer(k)) p.push(drawerGlyph(cx, yt, cw, ch, k === "shoe"));
-        else if (isCorner(k)) p.push(`<line x1="${(cx + 4).toFixed(1)}" y1="${(yt + ch - 4).toFixed(1)}" x2="${(cx + cw - 4).toFixed(1)}" y2="${(yt + 4).toFixed(1)}" stroke="${MID}" stroke-width="0.9" stroke-dasharray="4 3"/>`);
-        else p.push(foldGlyph(cx, yt, cw, ch));
-        // label (uppercased) with a small white plate for legibility
-        if (ch > 20) {
-          const lbl = String(cell.label || k).toUpperCase(), lw = Math.min(cw - 6, lbl.length * 5.4 + 8);
-          p.push(`<rect x="${(cxm - lw / 2).toFixed(1)}" y="${(yt + ch / 2 - 6).toFixed(1)}" width="${lw.toFixed(1)}" height="12" rx="2" fill="#ffffff" opacity="0.86"/><text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 + 3).toFixed(1)}" fill="${INK}" font-size="8" font-weight="600" text-anchor="middle">${esc(lbl.length > Math.floor((cw - 6) / 5.4) ? lbl.slice(0, Math.floor((cw - 6) / 5.4)) : lbl)}</text>`);
+        p.push(cellArt(k, cx, yt, cw, ch));
+        // label (uppercased) on a small white plate near the TOP so it never hides the item art
+        if (ch > 22) {
+          const lbl = String(cell.label || k).toUpperCase(), maxc = Math.max(3, Math.floor((cw - 6) / 5.0)), shown = lbl.length > maxc ? lbl.slice(0, maxc) : lbl, lw = Math.min(cw - 4, shown.length * 5.0 + 8), lY = yt + 8;
+          p.push(`<rect x="${(cxm - lw / 2).toFixed(1)}" y="${(lY - 6).toFixed(1)}" width="${lw.toFixed(1)}" height="11" rx="2" fill="#ffffff" opacity="0.9"/><text x="${cxm.toFixed(1)}" y="${(lY + 2.5).toFixed(1)}" fill="${INK}" font-size="7.5" font-weight="600" text-anchor="middle">${esc(shown)}</text>`);
         }
       }
       // per-cell height dim — column 0 uses the far-left chain; others get an inside-left tag
@@ -14659,7 +14710,7 @@ app.post("/api/wardrobe/photoreal-board", async (c) => {
   } catch (err) { console.error(err); return c.json({ error: "Photoreal board failed" }, 500); }
 });
 function wardrobeOptions(input: any): any {
-  const options = ["maxHanging", "balanced", "maxFolding"].map((st) => {
+  const options = ["balanced", "balanced-hang", "balanced-fold"].map((st) => {
     const o = buildWardrobeOption(st, input);
     o.reports = wardReports(o);
     o.scorecard = wardScorecard(o);
