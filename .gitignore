@@ -91,6 +91,10 @@ Thumbs.db
 
 !verify-module7.mjs
 
+!verify-wardmerge-api.mjs
+
+!verify-wardmerge-ui.mjs
+
 !verify-gshape.mjs
 
 !verify-wardrobe-shape.mjs

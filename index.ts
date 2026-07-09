@@ -2629,6 +2629,7 @@ function mathEngineShelves(input: any): any[] {
     for (const sec of opt.sections) for (const col of (sec.columns || [])) {
       const span = Math.max(200, (col.w || 500) - 36);
       for (const cell of (col.cells || [])) {
+        if (cell.covered) continue;
         if (/shelf|shoe|handbag|loft/i.test(cell.kind)) out.push({ span, depth, thk: 18, load: shelfLoadKgPerM(cell.kind, "wardrobe"), label: (sec.label || "") + " · " + (cell.label || cell.kind), mat: "18mm BWP ply" });
       }
       // loft shelf — full column-width top shelf carrying seasonal / luggage (heavier)
@@ -11695,12 +11696,15 @@ const frontendHTML = `<!DOCTYPE html>
         const getLedMat = () => ledMatShared || (ledMatShared = new THREE.MeshStandardMaterial({ color: 0xfff4d6, emissive: 0xffe6a8, emissiveIntensity: 1.5, roughness: 0.4, clippingPlanes: [clipPlane] }));
         const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac, clippingPlanes: [clipPlane], clipShadows: true })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; boxTarget.add(m); if (!(opac != null && opac < 0.02) && !(lodSkipEdges && ud && ud.cell)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8, clippingPlanes: [clipPlane] })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; boxTarget.add(e); } return m; };
         // shared column renderer — partition + cells (+ per-column shutter & LED strip), at local run offset localX
-        const emitColumn = (col, si, ci, localX, secKind) => {
-          const cw = col.w, cxMid = localX + cw / 2, usableH = H - plinth - loftH;
-          if (localX > 0) box(T, usableH, D, localX, plinth + usableH / 2, 0, WOOD);
+        const emitColumn = (col, si, ci, localX, secKind, cols) => {
+          const colCw = col.w, colMid = localX + colCw / 2, usableH = H - plinth - loftH;
+          const clist = cols || [col];
           let yb = plinth;
           col.cells.forEach((cell, k) => {
-            const ch = cell.hMM, yt = yb + ch, kind = cell.kind, kl = kind.toLowerCase(), colColor = parseInt((cell.color || "#cbd5e1").slice(1), 16) || 0xcbd5e1;
+            const ch = cell.hMM, yt = yb + ch;
+            if (cell.covered) { yb = yt; return; }   // absorbed into a merge on the left — no geometry
+            const kind = cell.kind, kl = kind.toLowerCase(), colColor = parseInt((cell.color || "#cbd5e1").slice(1), 16) || 0xcbd5e1;
+            const spanN = Math.max(1, Math.round(cell.span || 1)); let cw = colCw; for (let j = 1; j < spanN && (ci + j) < clist.length; j++) cw += clist[ci + j].w; const cxMid = localX + cw / 2;
             const key = si + "-" + ci + "-" + k, ud = { cell: true, si, ci, k, key }, hl = key === selKey;
             if (kind === "shelf" || kind === "handbag" || kind === "shoe" || kind === "kidsShelf" || kind === "cornerShelf") box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : (kind === "cornerShelf" ? 0x5eead4 : SHELF), null, ud);
             else if (kind === "drawer" || kind === "jewellery" || kind === "cosmetics") { box(cw - 6, ch - 6, T, cxMid, yb + ch / 2, D / 2 - T / 2, hl ? 0x818cf8 : (finHex("drawers") || finHex(secKind) || colColor), null, ud); box(cw - 22, Math.max(20, ch - 24), D - 60, cxMid, yb + ch / 2, -10, 0xe8ddc9, 0.5); }
@@ -11711,8 +11715,10 @@ const frontendHTML = `<!DOCTYPE html>
             else box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
             yb = yt;
           });
-          if (shutters) { const fh = finHex(secKind); box(cw - 4, H - 20, T, cxMid, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }
-          if (led) { const stripY = (loftH > 0 ? H - loftH : H) - T - 6; const s = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, cw - 40), 6, 14), getLedMat()); s.position.set(cxMid, stripY, D / 2 - 24); s.userData = { base: { x: cxMid, y: stripY, z: D / 2 - 24 } }; boxTarget.add(s); }
+          // left partition — drawn in segments so a covered (merged) band leaves the opening clear
+          if (localX > 0) { let yp = plinth; col.cells.forEach((cell) => { const ch = cell.hMM; if (!cell.covered) box(T, ch, D, localX, yp + ch / 2, 0, WOOD); yp += ch; }); }
+          if (shutters) { const fh = finHex(secKind); box(colCw - 4, H - 20, T, colMid, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }
+          if (led) { const stripY = (loftH > 0 ? H - loftH : H) - T - 6; const s = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, colCw - 40), 6, 14), getLedMat()); s.position.set(colMid, stripY, D / 2 - 24); s.userData = { base: { x: colMid, y: stripY, z: D / 2 - 24 } }; boxTarget.add(s); }
         };
         const buildFlat = (secsData) => {
           const usableH = H - plinth - loftH;
@@ -11722,7 +11728,7 @@ const frontendHTML = `<!DOCTYPE html>
           box(Wd, H, 6, Wd / 2, H / 2, -D / 2 + 3, 0xb7a488); box(Wd, plinth, D - 40, Wd / 2, plinth / 2, 0, 0x8a7b63);
           if (loftH > 0) box(Wd, T, loftD, Wd / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
           if (opt.beam && opt.beam.on) { const bh = H - opt.beam.soffit; if (bh > 20) box(opt.beam.width, bh, D + 40, opt.beam.pos + opt.beam.width / 2, opt.beam.soffit + bh / 2, 0, 0xf97316, 0.6); }
-          secsData.forEach((sec, si) => sec.columns.forEach((col, ci) => emitColumn(col, si, ci, col.x, sec.kind)));
+          secsData.forEach((sec, si) => sec.columns.forEach((col, ci) => emitColumn(col, si, ci, col.x, sec.kind, sec.columns)));
           if (led) [0.25, 0.75].forEach((fx) => { const lp = new THREE.PointLight(0xffe1a6, 0.5, spanE * 2.4); lp.position.set(Wd * fx, (loftH > 0 ? H - loftH : H) - T - 6, D); lp.userData = { base: { x: Wd * fx, y: (loftH > 0 ? H - loftH : H) - T - 6, z: D } }; g.add(lp); });
           g.position.set(-Wd / 2, -H / 2, 0);
         };
@@ -11780,7 +11786,7 @@ const frontendHTML = `<!DOCTYPE html>
               boxTarget = g;
             }
             boxTarget = grp;
-            sec.columns.forEach((col, ci) => emitColumn(col, si, ci, col.x - x0of(wi), sec.kind));
+            sec.columns.forEach((col, ci) => emitColumn(col, si, ci, col.x - x0of(wi), sec.kind, sec.columns));
             boxTarget = g;
           });
           if (led) [0.3, 0.7].forEach((fx) => { const yy = (loftH > 0 ? H - loftH : H) - 30; const lp = new THREE.PointLight(0xffe1a6, 0.5, spanE * 2.4); lp.position.set(bw * fx, yy, bh * 0.5); lp.userData = { base: { x: bw * fx, y: yy, z: bh * 0.5 } }; g.add(lp); });
@@ -11913,8 +11919,59 @@ const frontendHTML = `<!DOCTYPE html>
       const [secs, setSecs] = useState(() => JSON.parse(JSON.stringify(opt.sections || [])));
       const [menu, setMenu] = useState(null);   // {x,y,si,ci,k} right-click context menu
       const [tip, setTip] = useState(null);      // live drag dimension tooltip
-      React.useEffect(() => { setSecs(JSON.parse(JSON.stringify(opt.sections || []))); }, [opt]);
+      // A stable fingerprint of the DESIGN (content), not the opt object reference — the parent
+      // re-renders periodically (SSE / live preview) and hands us a fresh opt with identical content;
+      // keying the re-seed + selection-reset on the signature keeps in-progress edits + merge
+      // selection alive across those benign re-renders, and still reacts to real design changes.
+      const optSig = JSON.stringify(opt ? [opt.id, opt.width, opt.height, opt.depth, opt.hasLoft, opt.loftH, opt.sections] : null);
+      React.useEffect(() => { setSecs(JSON.parse(JSON.stringify(opt.sections || []))); }, [optSig]);
       const dragRef = React.useRef(null);
+      const [mergeMode, setMergeMode] = useState(false);   // select-and-merge compartments
+      const [msel, setMsel] = useState([]);                 // selected cell keys "si-ci-k"
+      const [mmsg, setMmsg] = useState("");
+      React.useEffect(() => { setMsel([]); setMergeMode(false); setMmsg(""); }, [optSig]);
+      const spanWmm = (cols, ci, cell) => { const nn = Math.max(1, Math.round((cell && cell.span) || 1)); let w = 0; for (let j = 0; j < nn && ci + j < cols.length; j++) w += cols[ci + j].w; return w; };
+      const toggleSel = (si, ci, k) => { const key = si + "-" + ci + "-" + k; setMmsg(""); setMsel((p) => p.indexOf(key) >= 0 ? p.filter((x) => x !== key) : p.concat([key])); };
+      const mergeSelected = () => {
+        if (msel.length < 2) { setMmsg("Pick at least two compartments."); return; }
+        const items = msel.map((s) => { const a = s.split("-"); return { si: +a[0], ci: +a[1], k: +a[2] }; });
+        const si = items[0].si;
+        if (items.some((it) => it.si !== si)) { setMmsg("Select compartments in the same section."); return; }
+        const n = JSON.parse(JSON.stringify(secs)); const sec = n[si]; const cols = sec.columns;
+        const byCol = {}; items.forEach((it) => { (byCol[it.ci] = byCol[it.ci] || []).push(it.k); });
+        const cis = Object.keys(byCol).map(Number).sort((a, b) => a - b);
+        for (let i = 1; i < cis.length; i++) if (cis[i] !== cis[i - 1] + 1) { setMmsg("Selected columns must be next to each other."); return; }
+        const info = {};
+        for (const ci of cis) {
+          const ks = byCol[ci].slice().sort((a, b) => a - b);
+          for (let i = 1; i < ks.length; i++) if (ks[i] !== ks[i - 1] + 1) { setMmsg("In each column pick compartments that touch."); return; }
+          const cells = cols[ci].cells, k0 = ks[0], k1 = ks[ks.length - 1];
+          let runH = 0; for (let k = k0; k <= k1; k++) runH += cells[k].hMM;
+          info[ci] = { k0, k1, runH, cells };
+        }
+        const leftCi = cis[0], base = info[leftCi];
+        const bandBelow = base.cells.slice(0, base.k0).reduce((a, c) => a + c.hMM, 0), bandH = base.runH;
+        const mid = "m" + si + "-" + leftCi + "-" + base.k0;
+        for (let idx = 0; idx < cis.length; idx++) {
+          const ci = cis[idx], f = info[ci], cells = f.cells;
+          const below = cells.slice(0, f.k0), above = cells.slice(f.k1 + 1);
+          const belowSum = below.reduce((a, c) => a + c.hMM, 0), aboveSum = above.reduce((a, c) => a + c.hMM, 0);
+          const colTotal = cells.reduce((a, c) => a + c.hMM, 0), remAbove = colTotal - bandBelow - bandH;
+          if (bandBelow > 0) { if (belowSum <= 0) { setMmsg("These compartments do not line up — pick ones at the same height."); return; } const s = bandBelow / belowSum; below.forEach((c) => c.hMM = Math.round(c.hMM * s)); }
+          else if (below.length) { setMmsg("These compartments do not line up — pick ones at the same height."); return; }
+          if (remAbove > 0) { if (aboveSum <= 0) { setMmsg("These compartments do not line up — pick ones at the same height."); return; } const s = remAbove / aboveSum; above.forEach((c) => c.hMM = Math.round(c.hMM * s)); }
+          else if (above.length) { setMmsg("These compartments do not line up — pick ones at the same height."); return; }
+          const src = cells[f.k0];
+          const merged = idx === 0
+            ? { kind: src.kind, label: src.label, color: src.color, hMM: bandH, span: cis.length, mergeId: mid }
+            : { kind: src.kind, label: src.label, color: src.color, hMM: bandH, covered: true, mergeId: mid };
+          const arr = below.concat([merged], above);
+          const d = colTotal - arr.reduce((a, c) => a + c.hMM, 0);
+          if (d !== 0) { const fix = above.length ? arr[arr.length - 1] : (below.length ? arr[0] : merged); fix.hMM += d; }
+          cols[ci].cells = arr;
+        }
+        setSecs(n); onCommit(n); setMsel([]); setMergeMode(false); setMmsg("");
+      };
       const padL = 26, padR = 18, padT = 40, padB = 28;
       const scale = Math.max(0.08, Math.min((700 - padL - padR) / opt.width, (440 - padT - padB) / opt.height));
       const wpx = opt.width * scale, hpx = opt.height * scale, W = Math.round(wpx + padL + padR), H = Math.round(hpx + padT + padB);
@@ -11952,6 +12009,7 @@ const frontendHTML = `<!DOCTYPE html>
         else if (kind === "equal") { const tot = cells.reduce((a, c) => a + c.hMM, 0), ev = Math.round(tot / cells.length); cells.forEach((c) => c.hMM = ev); }
         else if (kind === "split") { const nw = Math.round(col.w / 2); if (nw < 250) { setMenu(null); return; } const newCol = JSON.parse(JSON.stringify(col)); col.w = nw; newCol.w = nw; sec.columns.splice(menu.ci + 1, 0, newCol); reflowX(sec); }
         else if (kind === "merge") { const ri = sec.columns[menu.ci + 1] ? menu.ci + 1 : menu.ci - 1; const r = sec.columns[ri]; if (!r) { setMenu(null); return; } col.w += r.w; sec.columns.splice(ri, 1); reflowX(sec); }
+        else if (kind === "unmerge") { const cur = cells[k]; const mid = cur.mergeId; delete cur.span; delete cur.mergeId; if (mid != null) { for (const cc of sec.columns) for (const cl of (cc.cells || [])) if (cl.mergeId === mid) { delete cl.covered; delete cl.mergeId; } } }
         else if (kind === "reassign") { // §8.2 move this column across the Male/Female/Kids split
           if (sec.kind === arg) { setMenu(null); return; }
           const moving = sec.columns.splice(menu.ci, 1)[0]; if (!moving) { setMenu(null); return; }
@@ -11974,17 +12032,19 @@ const frontendHTML = `<!DOCTYPE html>
       if (opt.hasLoft) { els.push(<rect key="loft" x={x0} y={y0} width={wpx} height={loftPx} fill="#fcd34d55" stroke="#a16207" strokeWidth="0.8" />); els.push(<text key="loftt" x={x0 + wpx / 2} y={y0 + loftPx / 2 + 3} fill="#a16207" fontSize="9" fontWeight="600" textAnchor="middle">{"LOFT " + opt.loftH + " mm"}</text>); }
       secs.forEach((sec, si) => {
         sec.columns.forEach((col, ci) => {
-          const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
+          const cx = xOf(col.x); let yb = floorY;
           col.cells.forEach((cell, k) => {
             const ch = cell.hMM * scale, yt = yb - ch;
-            els.push(<rect key={"c" + si + "-" + ci + "-" + k} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={(cell.color || "#cbd5e1") + "33"} stroke={cell.color || "#cbd5e1"} strokeWidth="0.7" style={{ cursor: "context-menu" }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
-            if (ch > 12) els.push(<text key={"cl" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
-            if (ch > 22) els.push(<text key={"cd" + si + "-" + ci + "-" + k} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.hMM + " mm"}</text>);
-            if (cell.locked && ch > 10) els.push(<text key={"lk" + si + "-" + ci + "-" + k} x={cx + cw - 7} y={yt + 9} fontSize="8" textAnchor="middle" style={{ pointerEvents: "none" }}>🔒</text>);
-            if (k < col.cells.length - 1 && !cell.locked && !col.cells[k + 1].locked) { els.push(<line key={"hl" + si + "-" + ci + "-" + k} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" style={{ pointerEvents: "none" }} />); els.push(<rect key={"hh" + si + "-" + ci + "-" + k} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
+            if (cell.covered) { yb = yt; return; }   // absorbed into a merge on the left
+            const selK = si + "-" + ci + "-" + k, isSel = msel.indexOf(selK) >= 0, cw = spanWmm(sec.columns, ci, cell) * scale, nxt = col.cells[k + 1];
+            els.push(<rect key={"c" + selK} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={isSel ? "rgba(79,70,229,0.30)" : (cell.color || "#cbd5e1") + "33"} stroke={isSel ? "#4338ca" : (cell.color || "#cbd5e1")} strokeWidth={isSel ? 2 : (cell.span > 1 ? 1.1 : 0.7)} style={{ cursor: mergeMode ? "pointer" : "context-menu" }} onClick={(e) => { if (mergeMode) { e.stopPropagation(); toggleSel(si, ci, k); } }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
+            if (ch > 12) els.push(<text key={"cl" + selK} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
+            if (ch > 22) els.push(<text key={"cd" + selK} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.hMM + " mm"}</text>);
+            if (cell.locked && ch > 10) els.push(<text key={"lk" + selK} x={cx + cw - 7} y={yt + 9} fontSize="8" textAnchor="middle" style={{ pointerEvents: "none" }}>🔒</text>);
+            if (k < col.cells.length - 1 && !cell.locked && !nxt.locked && !mergeMode && !(cell.span > 1) && !nxt.covered && !(nxt.span > 1)) { els.push(<line key={"hl" + selK} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" style={{ pointerEvents: "none" }} />); els.push(<rect key={"hh" + selK} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
             yb = yt;
           });
-          els.push(<line key={"cp" + si + "-" + ci} x1={cx} y1={usableTopY} x2={cx} y2={floorY} stroke="#94a3b8" strokeWidth="0.7" style={{ pointerEvents: "none" }} />);
+          { let yb2 = floorY; col.cells.forEach((cell, k2) => { const ch = cell.hMM * scale, yt = yb2 - ch; if (!cell.covered) els.push(<line key={"cp" + si + "-" + ci + "-" + k2} x1={cx} y1={yt} x2={cx} y2={yb2} stroke="#94a3b8" strokeWidth="0.7" style={{ pointerEvents: "none" }} />); yb2 = yt; }); }
         });
         for (let ci = 0; ci < sec.columns.length - 1; ci++) { const bx = xOf(sec.columns[ci + 1].x); els.push(<rect key={"vh" + si + "-" + ci} x={bx - 4} y={usableTopY} width={8} height={floorY - usableTopY} fill="rgba(59,130,246,0.001)" style={{ cursor: "ew-resize" }} onPointerDown={(e) => startCol(e, si, ci)} />); }
       });
@@ -11995,6 +12055,12 @@ const frontendHTML = `<!DOCTYPE html>
       const mLocked = mCol && mCol.cells[menu.k] && mCol.cells[menu.k].locked;
       const mi = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
       return (<div style={{ position: "relative" }}>
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <button onClick={() => { setMergeMode((v) => !v); setMsel([]); setMmsg(""); }} className={"px-2 py-0.5 rounded border text-[11px] font-medium " + (mergeMode ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-700 border-indigo-300")}>{mergeMode ? "✓ Selecting — click compartments" : "⧉ Select & Merge"}</button>
+          {mergeMode && <button onClick={mergeSelected} disabled={msel.length < 2} className={"px-2 py-0.5 rounded text-[11px] font-medium " + (msel.length < 2 ? "bg-slate-200 text-slate-400" : "bg-emerald-600 text-white")}>Merge {msel.length} selected → one</button>}
+          {mergeMode && <button onClick={() => { setMsel([]); setMmsg(""); }} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[11px]">Clear</button>}
+          {mmsg ? <span className="text-[11px] text-rose-600">{mmsg}</span> : (mergeMode && <span className="text-[11px] text-slate-500">Pick 2+ compartments side by side (or stacked) at the same height, then Merge. Right-click a merged cell to Unmerge.</span>)}
+        </div>
         <svg width={W} height={H} viewBox={"0 0 " + W + " " + H} style={{ maxWidth: "100%", touchAction: "none", userSelect: "none" }} onPointerMove={onMove} onPointerUp={endDrag} onPointerLeave={endDrag}>{els}</svg>
         {menu && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
@@ -12016,6 +12082,7 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="border-t border-slate-100 my-1" />
               {mi("⊟ Split column", () => op("split"))}
               {mi("⊞ Merge with next", () => op("merge"))}
+              {mCol && mCol.cells[menu.k] && mCol.cells[menu.k].span > 1 && mi("⤫ Unmerge wide compartment", () => op("unmerge"))}
               <div className="border-t border-slate-100 my-1" />
               <div className="px-3 py-0.5 text-slate-400">Move column to…</div>
               {[["male", "♂ Male section"], ["female", "♀ Female section"], ["kids", "🧒 Kids section"]].filter((t) => t[0] !== (secs[menu.si] && secs[menu.si].kind)).map((t) => mi("→ " + t[1], () => op("reassign", t[0])))}
@@ -13960,7 +14027,7 @@ function buildWardrobeOption(strategy: string, input: any): any {
   }
   const beamCols = sections.reduce((a: number, s: any) => a + s.columns.filter((c: any) => c.underBeam).length, 0);
   const beamNote = beam.on ? "Beam " + beam.proj + " mm proj · soffit " + beam.soffit + " mm · " + beam.pos + "–" + (beam.pos + beam.width) + " mm: " + beamCols + " column(s) lowered to the soffit · loft split to clear the beam · beam-boxed with a filler above." : null;
-  const allCells = sections.flatMap((s: any) => s.columns.flatMap((c: any) => c.cells));
+  const allCells = sections.flatMap((s: any) => s.columns.flatMap((c: any) => (c.cells || []).filter((x: any) => !x.covered)));
   const cnt = (pred: (k: string) => boolean) => allCells.filter((c: any) => pred(c.kind)).length;
   const stats = {
     hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"),
@@ -13977,6 +14044,13 @@ function buildWardrobeOption(strategy: string, input: any): any {
 }
 // §14 resolve a section/scope's applied catalog finish (falls back to the whole-project "all").
 function wardFinishFor(finishes: any, scope: string): any { return (finishes && (finishes[scope] || finishes.all)) || null; }
+// ── Merged compartments (user "select & merge"): a MASTER cell carries span:n (n>1) and covers
+// the next n-1 columns at the same vertical band; the absorbed neighbour cells carry covered:true
+// (kept in the model so column-height math stays valid, but they render nothing / cost no parts).
+// Both master + covered share a mergeId so a rerender can re-snap the band. Helpers below let every
+// renderer widen the master and skip the covered twins.
+function wardCellSpan(cell: any): number { const n = Math.round(+((cell && cell.span) || 1)); return n > 1 ? n : 1; }
+function wardSpanWmm(cols: any[], ci: number, cell: any): number { const n = wardCellSpan(cell); let w = 0; for (let j = 0; j < n && ci + j < cols.length; j++) w += (+cols[ci + j].w || 0); return w; }
 function wardReports(opt: any): any {
   const S = WARDROBE_STD, sqft = (mm2: number) => mm2 / 92903;
   const H = opt.height, D = opt.depth, W = opt.width;
@@ -13990,6 +14064,7 @@ function wardReports(opt: any): any {
     for (const col of sec.columns) {
       shutters++;
       for (const cell of col.cells) {
+        if (cell.covered) continue;
         if (cell.kind === "shelf" || cell.kind === "handbag" || cell.kind === "shoe" || cell.kind === "kidsShelf") shelfCount++;
         else if (cell.kind === "drawer" || cell.kind === "jewellery" || cell.kind === "cosmetics") drawerFronts++;
         else if (cell.kind.toLowerCase().indexOf("hang") >= 0 || cell.kind === "saree" || cell.kind === "dress" || cell.kind === "lehenga") hangRods++;
@@ -14028,7 +14103,7 @@ function wardPanels(opt: any): { panels: any[]; counts: any } {
   let partitions = 0, shelves = 0, drawerFronts = 0, shutters = 0, hangRods = 0;
   for (const sec of opt.sections) {
     partitions += Math.max(0, (sec.columns || []).length - 1);
-    for (const col of (sec.columns || [])) { shutters++; for (const cell of col.cells) { const k = cell.kind; if (k === "shelf" || k === "handbag" || k === "shoe" || k === "kidsShelf") shelves++; else if (k === "drawer" || k === "jewellery" || k === "cosmetics") drawerFronts++; else if (k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga") hangRods++; } }
+    for (const col of (sec.columns || [])) { shutters++; for (const cell of col.cells) { if (cell.covered) continue; const k = cell.kind; if (k === "shelf" || k === "handbag" || k === "shoe" || k === "kidsShelf") shelves++; else if (k === "drawer" || k === "jewellery" || k === "cosmetics") drawerFronts++; else if (k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga") hangRods++; } }
   }
   add("Side panel", D, H, 2);
   add("Top / bottom", W, D, 2);
@@ -14155,10 +14230,13 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
     const hc = sec.kind === "male" ? "#2563eb" : sec.kind === "female" ? "#db2777" : "#ca8a04";
     p.push(`<text x="${(sx + sw / 2).toFixed(1)}" y="${y0 - 8}" fill="${hc}" font-size="11" font-weight="700" text-anchor="middle">${esc(sec.label)}</text>`);
   }
-  for (const sec of opt.sections) for (const col of sec.columns) {
-    const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
+  for (const sec of opt.sections) { const cols = sec.columns;
+  for (let cix = 0; cix < cols.length; cix++) { const col = cols[cix];
+    const cx = xOf(col.x); let yb = floorY;
     for (const cell of col.cells) {
-      const ch = cell.hMM * scale, yt = yb - ch, cxm = cx + cw / 2;
+      const ch = cell.hMM * scale, yt = yb - ch;
+      if (cell.covered) { yb = yt; continue; }   // absorbed into a merge on the left
+      const cw = wardSpanWmm(cols, cix, cell) * scale, cxm = cx + cw / 2;
       const fill = internal ? "#f1f5f9" : cell.color + "33", stroke = internal ? "#64748b" : cell.color;
       p.push(`<rect x="${(cx + 1).toFixed(1)}" y="${yt.toFixed(1)}" width="${(cw - 2).toFixed(1)}" height="${(ch - 1).toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${internal ? 0.9 : 0.7}"/>`);
       if (ch > 12) {
@@ -14168,8 +14246,8 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
       }
       yb = yt;
     }
-    p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="#94a3b8" stroke-width="0.7"/>`);
-  }
+    { let yb2 = floorY; for (const cc of col.cells) { const chh = cc.hMM * scale, yt2 = yb2 - chh; if (!cc.covered) p.push(`<line x1="${cx.toFixed(1)}" y1="${yt2.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yb2.toFixed(1)}" stroke="#94a3b8" stroke-width="0.7"/>`); yb2 = yt2; } }
+  } }
   const beam = opt.beam && opt.beam.on ? opt.beam : null;
   const ubOf = (cx: number, cw: number) => beam && cx < beam.pos + beam.width && cx + cw > beam.pos;
   if (opt.hasLoft) {
@@ -14319,11 +14397,14 @@ function renderWardrobeShopDrawing(opt: any): string {
     p.push(`<line x1="${x0.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${(x0 + wpx).toFixed(1)}" y2="${usableTopY.toFixed(1)}" stroke="${INK}" stroke-width="1.2"/>`);
     p.push(`<text x="${(x0 + 6).toFixed(1)}" y="${(y0 + 11).toFixed(1)}" fill="${MID}" font-size="8" font-weight="600">LOFT — STORAGE</text>`);
   }
-  // ---- columns: cells floor->up ----
-  for (const sec of opt.sections) for (const col of sec.columns) {
-    const cx = xOf(col.x), cw = col.w * scale; let yb = floorY;
+  // ---- columns: cells floor->up (a merged MASTER cell widens across its covered twins) ----
+  for (const sec of opt.sections) { const cols = sec.columns;
+  for (let cix = 0; cix < cols.length; cix++) { const col = cols[cix];
+    const cx = xOf(col.x); let yb = floorY;
     for (let ci = 0; ci < col.cells.length; ci++) {
-      const cell = col.cells[ci], ch = cell.hMM * scale, yt = yb - ch, cxm = cx + cw / 2, k = String(cell.kind);
+      const cell = col.cells[ci], ch = cell.hMM * scale, yt = yb - ch, k = String(cell.kind);
+      if (cell.covered) { yb = yt; continue; }   // absorbed into a merge on the left — draws nothing
+      const cw = wardSpanWmm(cols, cix, cell) * scale, cxm = cx + cw / 2;
       p.push(`<rect x="${cx.toFixed(1)}" y="${yt.toFixed(1)}" width="${cw.toFixed(1)}" height="${ch.toFixed(1)}" fill="#ffffff" stroke="${THIN}" stroke-width="0.6"/>`);
       if (ch > 10) {
         p.push(cellArt(k, cx, yt, cw, ch));
@@ -14340,9 +14421,9 @@ function renderWardrobeShopDrawing(opt: any): string {
       }
       yb = yt;
     }
-    // column partition
-    p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="1.1"/>`);
-  }
+    // column partition — broken across any covered band so a merged cell reads as one opening
+    { let yb2 = floorY; for (let ci = 0; ci < col.cells.length; ci++) { const chh = col.cells[ci].hMM * scale, yt2 = yb2 - chh; if (!col.cells[ci].covered) p.push(`<line x1="${cx.toFixed(1)}" y1="${yt2.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yb2.toFixed(1)}" stroke="${INK}" stroke-width="1.1"/>`); yb2 = yt2; } }
+  } }
   // section dividers (heavier)
   for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${dx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="2"/>`); }
   // thada (plinth) + outer frame
@@ -14406,13 +14487,16 @@ function renderWardrobeShutterCompareSvg(opt: any): string {
       if (mode === "shutter") for (const sec of opt.sections) for (const col of sec.columns) p.push(leaves(xOf(col.x), y0, col.w * scale, loftPx));
       p.push(`<text x="${(x0 + 5).toFixed(1)}" y="${(y0 + 11).toFixed(1)}" fill="${MID}" font-size="7.5" font-weight="600">LOFT</text>`);
     }
-    for (const sec of opt.sections) for (const col of sec.columns) {
-      const cx = xOf(col.x), cw = col.w * scale;
-      if (mode === "shutter") { p.push(leaves(cx, usableTopY, cw, floorY - usableTopY)); }
+    for (const sec of opt.sections) { const cols = sec.columns;
+    for (let cix = 0; cix < cols.length; cix++) { const col = cols[cix];
+      const cx = xOf(col.x), cwCol = col.w * scale;
+      if (mode === "shutter") { p.push(leaves(cx, usableTopY, cwCol, floorY - usableTopY)); p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="1"/>`); }
       else {
         let yb = floorY;
         for (const cell of col.cells) {
-          const ch = cell.hMM * scale, yt = yb - ch, cxm = cx + cw / 2, k = String(cell.kind);
+          const ch = cell.hMM * scale, yt = yb - ch, k = String(cell.kind);
+          if (cell.covered) { yb = yt; continue; }   // absorbed into a merge on the left
+          const cw = wardSpanWmm(cols, cix, cell) * scale, cxm = cx + cw / 2;
           p.push(`<rect x="${cx.toFixed(1)}" y="${yt.toFixed(1)}" width="${cw.toFixed(1)}" height="${ch.toFixed(1)}" fill="#ffffff" stroke="${THIN}" stroke-width="0.6"/>`);
           if (ch > 9) {
             if (isHang(k)) { const rodY = yt + Math.min(13, ch * 0.14), n = Math.max(3, Math.min(22, Math.round(cw / 10))); p.push(`<line x1="${(cx + 4).toFixed(1)}" y1="${rodY.toFixed(1)}" x2="${(cx + cw - 4).toFixed(1)}" y2="${rodY.toFixed(1)}" stroke="${INK}" stroke-width="1.1"/>`); for (let i = 0; i < n; i++) { const gx = cx + 6 + (cw - 12) * (n === 1 ? 0.5 : i / (n - 1)); p.push(`<line x1="${gx.toFixed(1)}" y1="${(rodY + 2).toFixed(1)}" x2="${gx.toFixed(1)}" y2="${(yt + ch - 5).toFixed(1)}" stroke="${THIN}" stroke-width="0.7"/>`); } }
@@ -14422,9 +14506,9 @@ function renderWardrobeShutterCompareSvg(opt: any): string {
           }
           yb = yt;
         }
+        { let yb2 = floorY; for (const cc of col.cells) { const chh = cc.hMM * scale, yt2 = yb2 - chh; if (!cc.covered) p.push(`<line x1="${cx.toFixed(1)}" y1="${yt2.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yb2.toFixed(1)}" stroke="${INK}" stroke-width="1"/>`); yb2 = yt2; } }
       }
-      p.push(`<line x1="${cx.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="1"/>`);
-    }
+    } }
     for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${dx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="1.8"/>`); }
     p.push(`<rect x="${x0.toFixed(1)}" y="${floorY.toFixed(1)}" width="${wpx.toFixed(1)}" height="${plinthPx.toFixed(1)}" fill="#eef2f6" stroke="${INK}" stroke-width="1"/><text x="${(x0 + wpx / 2).toFixed(1)}" y="${(floorY + plinthPx / 2 + 3.5).toFixed(1)}" fill="${INK}" font-size="8" font-weight="600" text-anchor="middle">PLINTH ${S.plinth}</text>`);
     p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${hpx.toFixed(1)}" fill="none" stroke="${INK}" stroke-width="1.8"/>`);
@@ -14768,13 +14852,16 @@ app.post("/api/wardrobe/rerender", async (c) => {
     for (const sec of o.sections) for (const col of (sec.columns || [])) {
       const ub = beam && col.x < beam.pos + beam.width && col.x + col.w > beam.pos;
       const target = Math.max(300, (ub ? beam.soffit : o.height) - o.plinth - (ub ? 0 : o.loftH));
-      let cells = (col.cells || []).filter((cc: any) => cc && +cc.hMM > 0).map((cc: any) => ({ kind: String(cc.kind || "shelf"), label: String(cc.label || ""), hMM: Math.max(40, Math.round(+cc.hMM)), color: WARD_COLORS[String(cc.kind)] || "#cbd5e1", locked: !!cc.locked }));
+      let cells = (col.cells || []).filter((cc: any) => cc && +cc.hMM > 0).map((cc: any) => { const oc: any = { kind: String(cc.kind || "shelf"), label: String(cc.label || ""), hMM: Math.max(40, Math.round(+cc.hMM)), color: WARD_COLORS[String(cc.kind)] || "#cbd5e1", locked: !!cc.locked }; if (+cc.span > 1) oc.span = Math.round(+cc.span); if (cc.covered) oc.covered = true; if (cc.mergeId != null) oc.mergeId = String(cc.mergeId); return oc; });
       if (!cells.length) cells = [{ kind: "shelf", label: "Shelf", hMM: target, color: WARD_COLORS.shelf }];
       const sum = cells.reduce((a: number, cc: any) => a + cc.hMM, 0) || 1, f = target / sum;
       cells.forEach((cc: any) => cc.hMM = Math.round(cc.hMM * f));
       col.cells = cells;
     }
-    const allCells = o.sections.flatMap((s: any) => (s.columns || []).flatMap((cc: any) => cc.cells));
+    // keep merged bands aligned after the per-column rescale: each covered twin re-snaps to its master's height
+    { const masters: Record<string, any> = {}; for (const sec of o.sections) for (const col of (sec.columns || [])) for (const cc of col.cells) if (+cc.span > 1 && cc.mergeId != null) masters[String(cc.mergeId)] = cc;
+      for (const sec of o.sections) for (const col of (sec.columns || [])) for (const cc of col.cells) if (cc.covered && cc.mergeId != null && masters[String(cc.mergeId)]) cc.hMM = masters[String(cc.mergeId)].hMM; }
+    const allCells = o.sections.flatMap((s: any) => (s.columns || []).flatMap((cc: any) => (cc.cells || []).filter((x: any) => !x.covered)));
     const cnt = (pred: (k: string) => boolean) => allCells.filter((cc: any) => pred(cc.kind)).length;
     o.stats = { hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"), shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"), drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"), shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"), columns: o.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0), totalItems: allCells.length };
     o.reports = wardReports(o); o.scorecard = wardScorecard(o);
