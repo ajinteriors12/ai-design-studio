@@ -14278,17 +14278,11 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
   return p.join("");
 }
 const renderWardrobeOptionSvg = (opt: any): string => renderWardrobeElevationSvg(opt, "front");
-// mm → architectural feet-inches label, e.g. 1067 -> 3'-6", 100 -> 4", 2743 -> 9'.
-function mmToFtIn(mm: number): string {
-  const totalIn = Math.round((+mm || 0) / 25.4);
-  const ft = Math.floor(totalIn / 12), inch = totalIn % 12;
-  if (ft > 0 && inch > 0) return ft + "'-" + inch + '"';
-  if (ft > 0) return ft + "'";
-  return inch + '"';
-}
+// mm dimension label — everything on drawings + printouts is in millimetres, e.g. 1067 -> "1067".
+function wardMm(mm: number): string { return Math.round(+mm || 0) + ""; }
 // Classic Indian wardrobe FRONT-ELEVATION shop drawing: every compartment illustrated
 // (hanging rods+garments, folded stacks, drawers, loft storage boxes, open shelves) and fully
-// dimensioned in feet-inches — outer + internal widths, per-cell heights, overall 9' height, 4" thada.
+// dimensioned in millimetres — outer + internal widths, per-cell heights, overall body height, thada.
 function renderWardrobeShopDrawing(opt: any): string {
   const S = WARDROBE_STD;
   const isHang = (k: string) => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit";
@@ -14306,7 +14300,7 @@ function renderWardrobeShopDrawing(opt: any): string {
   const p: string[] = [];
   p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif">`);
   p.push(`<rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
-  // ---- architectural dimension primitives (slash ticks + ft-in text) ----
+  // ---- architectural dimension primitives (slash ticks + mm text) ----
   const slash = (x: number, y: number) => `<line x1="${(x - 3.5).toFixed(1)}" y1="${(y + 3.5).toFixed(1)}" x2="${(x + 3.5).toFixed(1)}" y2="${(y - 3.5).toFixed(1)}" stroke="${DIMC}" stroke-width="1"/>`;
   const dimV = (x: number, yA: number, yB: number, txt: string, left = true) => {
     const ym = (yA + yB) / 2, tx = x + (left ? -5 : 6);
@@ -14416,7 +14410,7 @@ function renderWardrobeShopDrawing(opt: any): string {
       }
       // per-cell height dim — column 0 uses the far-left chain; others get an inside-left tag
       if (col.x > 0 && ch > 13) {
-        const tx = cx + 8, tag = mmToFtIn(cell.hMM);
+        const tx = cx + 8, tag = wardMm(cell.hMM);
         p.push(`<rect x="${(tx - 6).toFixed(1)}" y="${(yb - ch / 2 - tag.length * 2.6).toFixed(1)}" width="12" height="${(tag.length * 5.2).toFixed(1)}" fill="#ffffff" opacity="0.82"/><text x="${tx.toFixed(1)}" y="${(yb - ch / 2 + 3).toFixed(1)}" fill="${MID}" font-size="7.5" font-weight="600" text-anchor="middle" transform="rotate(-90 ${tx.toFixed(1)} ${(yb - ch / 2).toFixed(1)})">${esc(tag)}</text>`);
       }
       yb = yt;
@@ -14428,27 +14422,27 @@ function renderWardrobeShopDrawing(opt: any): string {
   for (let i = 0; i < opt.sections.length - 1; i++) { const dx = xOf(opt.sections[i].x + opt.sections[i].width); p.push(`<line x1="${dx.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${dx.toFixed(1)}" y2="${floorY.toFixed(1)}" stroke="${INK}" stroke-width="2"/>`); }
   // thada (plinth) + outer frame
   p.push(`<rect x="${x0.toFixed(1)}" y="${floorY.toFixed(1)}" width="${wpx.toFixed(1)}" height="${plinthPx.toFixed(1)}" fill="#eef2f6" stroke="${INK}" stroke-width="1"/>`);
-  p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(floorY + plinthPx / 2 + 4).toFixed(1)}" fill="${INK}" font-size="10" font-weight="700" text-anchor="middle">${mmToFtIn(S.plinth)} THADA</text>`);
+  p.push(`<text x="${(x0 + wpx / 2).toFixed(1)}" y="${(floorY + plinthPx / 2 + 4).toFixed(1)}" fill="${INK}" font-size="10" font-weight="700" text-anchor="middle">${wardMm(S.plinth)} THADA</text>`);
   p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${hpx.toFixed(1)}" fill="none" stroke="${INK}" stroke-width="2"/>`);
   // ---- title ----
   p.push(`<text x="${x0}" y="26" fill="${INK}" font-size="15" font-weight="800">WARDROBE — FRONT ELEVATION</text>`);
-  p.push(`<text x="${x0}" y="42" fill="${MID}" font-size="9.5">${esc(String(opt.label || ""))} · shop drawing · dimensions in feet-inches</text>`);
-  p.push(`<text x="${(W - padR).toFixed(1)}" y="26" fill="${MID}" font-size="10" text-anchor="end">Overall ${mmToFtIn(opt.width)} W × ${mmToFtIn(opt.height)} H × ${mmToFtIn(opt.depth)} D</text>`);
+  p.push(`<text x="${x0}" y="42" fill="${MID}" font-size="9.5">${esc(String(opt.label || ""))} · shop drawing · all dimensions in mm</text>`);
+  p.push(`<text x="${(W - padR).toFixed(1)}" y="26" fill="${MID}" font-size="10" text-anchor="end">Overall ${wardMm(opt.width)} × ${wardMm(opt.height)} × ${wardMm(opt.depth)} mm (W×H×D)</text>`);
   // ---- top width dim chains: outer (per column) + internal opening ----
   const outerY = y0 - 46, innerY = y0 - 22;
   for (const sec of opt.sections) for (const col of sec.columns) {
-    p.push(dimH(xOf(col.x), xOf(col.x + col.w), outerY, mmToFtIn(col.w)));
+    p.push(dimH(xOf(col.x), xOf(col.x + col.w), outerY, wardMm(col.w)));
     const internalW = Math.max(0, col.w - 36);
-    p.push(dimH(xOf(col.x) + 2, xOf(col.x + col.w) - 2, innerY, mmToFtIn(internalW), 10));
+    p.push(dimH(xOf(col.x) + 2, xOf(col.x + col.w) - 2, innerY, wardMm(internalW), 10));
   }
   // ---- left height chain (column 0 + loft) ----
   const leftX = x0 - 30;
-  if (opt.hasLoft && loftPx > 6) p.push(dimV(leftX, y0, usableTopY, mmToFtIn(opt.loftH)));
-  { const col0 = opt.sections[0] && opt.sections[0].columns[0]; if (col0) { let yb = floorY; for (const cell of col0.cells) { const ch = cell.hMM * scale, yt = yb - ch; if (ch > 8) p.push(dimV(leftX, yt, yb, mmToFtIn(cell.hMM))); yb = yt; } } }
+  if (opt.hasLoft && loftPx > 6) p.push(dimV(leftX, y0, usableTopY, wardMm(opt.loftH)));
+  { const col0 = opt.sections[0] && opt.sections[0].columns[0]; if (col0) { let yb = floorY; for (const cell of col0.cells) { const ch = cell.hMM * scale, yt = yb - ch; if (ch > 8) p.push(dimV(leftX, yt, yb, wardMm(cell.hMM))); yb = yt; } } }
   // ---- right overall-height chain: body (9') + thada (4") ----
   const rightX = x0 + wpx + 34;
-  p.push(dimV(rightX, y0, floorY, mmToFtIn(opt.height - S.plinth), false));
-  p.push(dimV(rightX, floorY, y0 + hpx, mmToFtIn(S.plinth), false));
+  p.push(dimV(rightX, y0, floorY, wardMm(opt.height - S.plinth), false));
+  p.push(dimV(rightX, floorY, y0 + hpx, wardMm(S.plinth), false));
   // ---- profile-light leader (LED under loft / top shelf line) ----
   { const ly = opt.hasLoft && loftPx > 6 ? usableTopY : y0 + Math.min(24, hpx * 0.08), lax = x0 + wpx - 8, lex = x0 + wpx + 16;
     p.push(`<line x1="${lax.toFixed(1)}" y1="${(ly + 1).toFixed(1)}" x2="${lex.toFixed(1)}" y2="${(ly - 12).toFixed(1)}" stroke="${MID}" stroke-width="0.8"/><line x1="${lex.toFixed(1)}" y1="${(ly - 12).toFixed(1)}" x2="${(lex + 10).toFixed(1)}" y2="${(ly - 12).toFixed(1)}" stroke="${MID}" stroke-width="0.8"/><text x="${(lex + 12).toFixed(1)}" y="${(ly - 14).toFixed(1)}" fill="${MID}" font-size="8" font-weight="600">PROFILE</text><text x="${(lex + 12).toFixed(1)}" y="${(ly - 5).toFixed(1)}" fill="${MID}" font-size="8" font-weight="600">LIGHT</text>`); }
