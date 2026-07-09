@@ -11943,6 +11943,10 @@ const frontendHTML = `<!DOCTYPE html>
       const [msel, setMsel] = useState([]);                 // selected cell keys "si-ci-k"
       const [mmsg, setMmsg] = useState("");
       const lastSel = React.useRef(null);                   // for Shift+Click range selection
+      const svgRef = React.useRef(null);
+      const [box, setBox] = useState(null);                 // rubber-band selection box (SVG coords)
+      const suppressClick = React.useRef(false);            // ignore the click that ends a box-drag
+      const clip = React.useRef(null);                      // copied compartment properties (Copy/Paste)
       // commit a new sections state → push to history + notify parent (auto-updates all views/BOQ/CNC/3D)
       const commit = (newSecs, label) => {
         setHistory((h) => { const list = h.list.slice(0, h.ptr + 1).concat([{ secs: clone(newSecs), label }]).slice(-120); return { list, ptr: list.length - 1 }; });
@@ -12038,6 +12042,7 @@ const frontendHTML = `<!DOCTYPE html>
       const rescaleCols = (sec, nw) => { const old = sec.width || nw, f = nw / old; let acc = 0; sec.columns.forEach((c, i) => { c.w = i === sec.columns.length - 1 ? nw - acc : Math.max(200, Math.round(c.w * f)); acc += c.w; }); sec.width = nw; reflowX(sec); };
       const onMove = (e) => {
         const d = dragRef.current; if (!d) return;
+        if (d.kind === "box") { const p = toSvg(e); d.moved = true; d.x1 = p.x; d.y1 = p.y; setBox({ x: Math.min(d.x0, p.x), y: Math.min(d.y0, p.y), w: Math.abs(p.x - d.x0), h: Math.abs(p.y - d.y0), cross: p.x < d.x0 }); return; }
         if (d.kind === "sect") {
           const dxMM = Math.round((e.clientX - d.x) / scale / 5) * 5; if (!dxMM) return;
           setSecs((prev) => { const n = JSON.parse(JSON.stringify(prev)); const L = n[d.i], R = n[d.i + 1]; if (!L || !R) return prev; const nLw = L.width + dxMM, nRw = R.width - dxMM; if (nLw < 500 || nRw < 500) return prev; rescaleCols(L, nLw); R.x = L.x + L.width; rescaleCols(R, nRw); setTip({ x: e.clientX, y: e.clientY, text: L.width + " / " + R.width + " mm" }); return n; });
@@ -12052,10 +12057,31 @@ const frontendHTML = `<!DOCTYPE html>
         setSecs((prev) => { const n = JSON.parse(JSON.stringify(prev)); const cells = n[d.si].columns[d.ci].cells, below = cells[d.k], above = cells[d.k + 1]; if (!below || !above || below.hMM - delta < 60 || above.hMM + delta < 60) return prev; below.hMM -= delta; above.hMM += delta; setTip({ x: e.clientX, y: e.clientY, text: below.hMM + " / " + above.hMM + " mm" }); return n; });
         d.y = e.clientY;
       };
-      const endDrag = () => { const d = dragRef.current; dragRef.current = null; setTip(null); if (d) commit(secs, d.kind === "col" ? "Resize columns" : d.kind === "sect" ? "Resize sections" : "Resize compartment"); };
+      const endDrag = () => { const d = dragRef.current; dragRef.current = null; setTip(null);
+        if (d && d.kind === "box") { if (d.moved && d.x1 != null) { suppressClick.current = true; selectByBox({ x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1), w: Math.abs(d.x1 - d.x0), h: Math.abs(d.y1 - d.y0), cross: d.x1 < d.x0 }); } setBox(null); return; }
+        if (d) commit(secs, d.kind === "col" ? "Resize columns" : d.kind === "sect" ? "Resize sections" : "Resize compartment"); };
       const startCell = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "cell", si, ci, k, y: e.clientY }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
       const startCol = (e, si, ci) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "col", si, ci, x: e.clientX }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
       const startSect = (e, i) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "sect", i, x: e.clientX }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
+      // rubber-band (drag-a-box) selection — only in Select mode; drag L→R = window (fully enclosed),
+      // R→L = crossing (any touching), matching AutoCAD/CAD convention.
+      const toSvg = (e) => { const r = svgRef.current && svgRef.current.getBoundingClientRect(); if (!r || !r.width) return { x: 0, y: 0 }; return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H }; };
+      const onDown = (e) => { if (!mergeMode || (e.button != null && e.button !== 0)) return; const p = toSvg(e); dragRef.current = { kind: "box", x0: p.x, y0: p.y, moved: false }; setBox({ x: p.x, y: p.y, w: 0, h: 0, cross: false }); };
+      const selectByBox = (b) => {
+        if (!b) return; const bx1 = b.x, by1 = b.y, bx2 = b.x + b.w, by2 = b.y + b.h, cross = b.cross; const keys = [];
+        secs.forEach((sec, si) => sec.columns.forEach((col, ci) => {
+          const cx = xOf(col.x); let yb = floorY;
+          col.cells.forEach((cell, k) => {
+            const ch = cell.hMM * scale, yt = yb - ch;
+            if (!cell.covered) { const cw = spanWmm(sec.columns, ci, cell) * scale, rx2 = cx + cw;
+              const inside = cx >= bx1 && rx2 <= bx2 && yt >= by1 && yb <= by2;
+              const hits = cx < bx2 && rx2 > bx1 && yt < by2 && yb > by1;
+              if (cross ? hits : inside) keys.push(si + "-" + ci + "-" + k); }
+            yb = yt;
+          });
+        }));
+        setMsel(keys); setMmsg(keys.length ? "" : "Nothing inside the box.");
+      };
       const op = (kind, arg) => {
         if (!menu) return;
         const n = JSON.parse(JSON.stringify(secs)); const sec = n[menu.si], col = sec.columns[menu.ci], cells = col.cells, k = menu.k;
@@ -12081,6 +12107,10 @@ const frontendHTML = `<!DOCTYPE html>
         }
         else if (kind === "lock") { cells[k].locked = true; }
         else if (kind === "unlock") { cells[k].locked = false; }
+        else if (kind === "dup") { const c = cells[k]; if (c.hMM < 120) { setMenu(null); return; } const half = Math.round(c.hMM / 2); c.hMM = c.hMM - half; const cp = { kind: c.kind, label: c.label, color: c.color, hMM: half }; if (c.locked) cp.locked = true; cells.splice(k + 1, 0, cp); }
+        else if (kind === "copyProps") { const c = cells[k]; clip.current = { kind: c.kind, label: c.label, color: c.color }; setMenu(null); return; }   // copy only — no commit
+        else if (kind === "pasteProps") { if (!clip.current) { setMenu(null); return; } cells[k].kind = clip.current.kind; cells[k].label = clip.current.label; cells[k].color = clip.current.color; }
+        else if (kind === "insert") { const cv = CONVERT_KINDS.find((c) => c.kind === arg) || { kind: arg, label: String(arg), color: "#94a3b8" }; const take = Math.min(cells[k].hMM - 60, arg === "drawer" ? 200 : 300); if (take < 60) { setMenu(null); return; } cells[k].hMM -= take; cells.splice(k + 1, 0, { kind: cv.kind, label: cv.label, color: cv.color, hMM: take }); }
         else if (kind === "splitV") {   // split one compartment into N stacked compartments of the same kind
           const N = Math.max(2, Math.min(6, +arg || 2)), cur = cells[k];
           if (cur.span > 1) { const mid = cur.mergeId; delete cur.span; delete cur.mergeId; if (mid != null) for (const cc of sec.columns) for (const cl of (cc.cells || [])) if (cl.mergeId === mid) { delete cl.covered; delete cl.mergeId; } }
@@ -12094,7 +12124,7 @@ const frontendHTML = `<!DOCTYPE html>
           const clones = []; for (let i = 1; i < N; i++) { const nc = JSON.parse(JSON.stringify(col)); nc.w = nw; clones.push(nc); } col.w = col.w - nw * (N - 1);
           sec.columns.splice(menu.ci + 1, 0, ...clones); reflowX(sec);
         }
-        const LBL = { convert: "Convert → " + arg, add: "Add " + arg, delete: "Delete compartment", inc: "Resize +50", dec: "Resize −50", equal: "Equal-divide column", split: "Split column", splitColN: "Split column into " + arg, splitV: "Split into " + arg, merge: "Merge column", unmerge: "Unmerge compartment", reassign: "Move column → " + arg, lock: "Lock", unlock: "Unlock" };
+        const LBL = { convert: "Convert → " + arg, add: "Add " + arg, insert: "Insert " + arg, dup: "Duplicate compartment", pasteProps: "Paste properties", delete: "Delete compartment", inc: "Resize +50", dec: "Resize −50", equal: "Equal-divide column", split: "Split column", splitColN: "Split column into " + arg, splitV: "Split into " + arg, merge: "Merge column", unmerge: "Unmerge compartment", reassign: "Move column → " + arg, lock: "Lock", unlock: "Unlock" };
         commit(n, LBL[kind] || "Edit"); setMenu(null);
       };
       const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, si, ci, k }); };
@@ -12108,7 +12138,7 @@ const frontendHTML = `<!DOCTYPE html>
             const ch = cell.hMM * scale, yt = yb - ch;
             if (cell.covered) { yb = yt; return; }   // absorbed into a merge on the left
             const selK = si + "-" + ci + "-" + k, isSel = msel.indexOf(selK) >= 0, cw = spanWmm(sec.columns, ci, cell) * scale, nxt = col.cells[k + 1];
-            els.push(<rect key={"c" + selK} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={isSel ? "rgba(79,70,229,0.30)" : (cell.color || "#cbd5e1") + "33"} stroke={isSel ? "#4338ca" : (cell.color || "#cbd5e1")} strokeWidth={isSel ? 2 : (cell.span > 1 ? 1.1 : 0.7)} style={{ cursor: mergeMode ? "pointer" : "context-menu" }} onClick={(e) => { if (mergeMode) { e.stopPropagation(); toggleSel(si, ci, k, e); } }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
+            els.push(<rect key={"c" + selK} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={isSel ? "rgba(79,70,229,0.30)" : (cell.color || "#cbd5e1") + "33"} stroke={isSel ? "#4338ca" : (cell.color || "#cbd5e1")} strokeWidth={isSel ? 2 : (cell.span > 1 ? 1.1 : 0.7)} style={{ cursor: mergeMode ? "pointer" : "context-menu" }} onClick={(e) => { if (suppressClick.current) { suppressClick.current = false; return; } if (mergeMode) { e.stopPropagation(); toggleSel(si, ci, k, e); } }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
             if (ch > 12) els.push(<text key={"cl" + selK} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
             if (ch > 22) els.push(<text key={"cd" + selK} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.hMM + " mm"}</text>);
             if (cell.locked && ch > 10) els.push(<text key={"lk" + selK} x={cx + cw - 7} y={yt + 9} fontSize="8" textAnchor="middle" style={{ pointerEvents: "none" }}>🔒</text>);
@@ -12117,11 +12147,13 @@ const frontendHTML = `<!DOCTYPE html>
           });
           { let yb2 = floorY; col.cells.forEach((cell, k2) => { const ch = cell.hMM * scale, yt = yb2 - ch; if (!cell.covered) els.push(<line key={"cp" + si + "-" + ci + "-" + k2} x1={cx} y1={yt} x2={cx} y2={yb2} stroke="#94a3b8" strokeWidth="0.7" style={{ pointerEvents: "none" }} />); yb2 = yt; }); }
         });
-        for (let ci = 0; ci < sec.columns.length - 1; ci++) { const bx = xOf(sec.columns[ci + 1].x); els.push(<rect key={"vh" + si + "-" + ci} x={bx - 4} y={usableTopY} width={8} height={floorY - usableTopY} fill="rgba(59,130,246,0.001)" style={{ cursor: "ew-resize" }} onPointerDown={(e) => startCol(e, si, ci)} />); }
+        if (!mergeMode) for (let ci = 0; ci < sec.columns.length - 1; ci++) { const bx = xOf(sec.columns[ci + 1].x); els.push(<rect key={"vh" + si + "-" + ci} x={bx - 4} y={usableTopY} width={8} height={floorY - usableTopY} fill="rgba(59,130,246,0.001)" style={{ cursor: "ew-resize" }} onPointerDown={(e) => startCol(e, si, ci)} />); }
       });
       els.push(<rect key="pl" x={x0} y={floorY} width={wpx} height={plinthPx} fill="#e2e8f0" stroke="#94a3b8" strokeWidth="0.6" style={{ pointerEvents: "none" }} />);
       els.push(<rect key="fr" x={x0} y={y0} width={wpx} height={hpx} fill="none" stroke="#334155" strokeWidth="1.4" style={{ pointerEvents: "none" }} />);
-      for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); els.push(<rect key={"sdh" + i} x={dx - 5} y={usableTopY} width={10} height={floorY - usableTopY} fill="rgba(71,85,105,0.001)" style={{ cursor: "ew-resize" }} onPointerDown={(e) => startSect(e, i)} />); }
+      if (!mergeMode) for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); els.push(<rect key={"sdh" + i} x={dx - 5} y={usableTopY} width={10} height={floorY - usableTopY} fill="rgba(71,85,105,0.001)" style={{ cursor: "ew-resize" }} onPointerDown={(e) => startSect(e, i)} />); }
+      else for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); }
+      if (box) els.push(<rect key="selbox" x={box.x} y={box.y} width={box.w} height={box.h} fill={box.cross ? "rgba(34,197,94,0.14)" : "rgba(59,130,246,0.14)"} stroke={box.cross ? "#16a34a" : "#2563eb"} strokeWidth="1" strokeDasharray={box.cross ? "5 3" : "0"} style={{ pointerEvents: "none" }} />);
       const mCol = menu && secs[menu.si] && secs[menu.si].columns[menu.ci];
       const mLocked = mCol && mCol.cells[menu.k] && mCol.cells[menu.k].locked;
       const mi = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
@@ -12144,13 +12176,13 @@ const frontendHTML = `<!DOCTYPE html>
             <button onClick={() => selectKind((k) => k === "shelf" || k === "handbag" || k === "kidsShelf")} className="px-1.5 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[10px]">Shelves</button>
             <button onClick={() => selectKind((k) => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga")} className="px-1.5 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[10px]">Hanging</button>
           </React.Fragment>)}
-          {mmsg ? <span className="text-[11px] text-rose-600">{mmsg}</span> : (mergeMode && <span className="text-[11px] text-slate-500">Click to select · Shift+Click for a range · then Merge / Convert / Delete. Ctrl+Z = undo.</span>)}
+          {mmsg ? <span className="text-[11px] text-rose-600">{mmsg}</span> : (mergeMode && <span className="text-[11px] text-slate-500">Click · Shift+Click range · or drag a box (drag → = enclose, ← = touch) · then Merge / Convert / Delete · Ctrl+Z undo.</span>)}
         </div>
         {showHist && (<div className="absolute z-40 bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] max-h-64 overflow-auto" style={{ top: 28, left: 0, minWidth: 220 }}>
           <div className="px-3 py-1 text-slate-400 border-b border-slate-100 sticky top-0 bg-white">History — click any step to restore</div>
           {history.list.map((h, i) => <button key={i} onClick={() => { restore(i); setShowHist(false); }} className={"block w-full text-left px-3 py-1 hover:bg-indigo-50 " + (i === history.ptr ? "bg-indigo-50 text-indigo-700 font-medium" : (i < history.ptr ? "text-slate-600" : "text-slate-400"))}>{(i === history.ptr ? "● " : (i < history.ptr ? "○ " : "· ")) + (i + 1) + ". " + h.label}</button>)}
         </div>)}
-        <svg width={W} height={H} viewBox={"0 0 " + W + " " + H} style={{ maxWidth: "100%", touchAction: "none", userSelect: "none" }} onPointerMove={onMove} onPointerUp={endDrag} onPointerLeave={endDrag}>{els}</svg>
+        <svg ref={svgRef} width={W} height={H} viewBox={"0 0 " + W + " " + H} style={{ maxWidth: "100%", touchAction: "none", userSelect: "none" }} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={endDrag} onPointerLeave={endDrag}>{els}</svg>
         {menu && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
           <div style={{ position: "fixed", left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 460), zIndex: 50, maxHeight: "90vh", overflowY: "auto" }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1" >
@@ -12158,9 +12190,13 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="px-3 py-1 text-slate-500">🔒 Locked section</div>
               {mi("🔓 Unlock section", () => op("unlock"))}
             </React.Fragment>) : (<React.Fragment>
-              {mi("+ Add shelf", () => op("add", "shelf"))}
-              {mi("+ Add drawer", () => op("add", "drawer"))}
-              {mi("🗑 Delete section", () => op("delete"))}
+              <div className="px-3 py-0.5 text-slate-400">Insert below…</div>
+              {[["drawer", "Drawer"], ["shelf", "Shelf"], ["longHang", "Hanging"], ["shoe", "Shoe Rack"], ["jewellery", "Jewellery"], ["safe", "Safe"]].map((t) => mi("+ " + t[1], () => op("insert", t[0])))}
+              {mi("⧉ Duplicate", () => op("dup"))}
+              {mi("🗑 Delete", () => op("delete"))}
+              <div className="border-t border-slate-100 my-1" />
+              {mi("⧉→ Copy properties", () => op("copyProps"))}
+              {clip.current && mi("→⧉ Paste properties", () => op("pasteProps"))}
               <div className="border-t border-slate-100 my-1" />
               <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
               {WARD_CONVERTS.map((c) => mi("• " + c.label, () => op("convert", c.kind)))}

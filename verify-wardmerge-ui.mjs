@@ -65,7 +65,7 @@ const dispatchCol = (colIndex) => page.evaluate((colIndex) => {
 const waitHi = (n) => page.waitForFunction((n) => { const h3 = [...document.querySelectorAll("h3")].find((e) => /✏️ Edit/.test(e.textContent)); const svg = h3 && (h3.closest("div").parentElement || h3.parentElement).querySelector("svg"); return svg && [...svg.querySelectorAll("rect")].filter((r) => /79, ?70, ?229/.test(r.getAttribute("fill") || "")).length >= n; }, { timeout: 2500 }, n).then(() => true).catch(() => false);
 
 await enableMerge(); await sleep(600);
-const tipSeen = await page.evaluate(() => /Shift\+Click for a range|Click to select/.test(document.body.innerText));
+const tipSeen = await page.evaluate(() => /drag a box|Shift\+Click/.test(document.body.innerText));
 ok(tipSeen, "merge mode shows the selection hint");
 // select two compartments in adjacent columns (cols 2 & 3) and confirm the selection ACCUMULATES —
 // this exercises the interactive select path end-to-end in a real browser.
