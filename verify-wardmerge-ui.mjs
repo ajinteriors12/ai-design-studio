@@ -27,14 +27,14 @@ await page.evaluate(() => { const b = [...document.querySelectorAll("button")].f
 
 // wait for the editor's Select & Merge button to appear
 let found = false;
-for (let i = 0; i < 40; i++) { found = await page.evaluate(() => [...document.querySelectorAll("button")].some((e) => /Select & Merge/.test(e.textContent))); if (found) break; await sleep(600); }
+for (let i = 0; i < 40; i++) { found = await page.evaluate(() => [...document.querySelectorAll("button")].some((e) => /⧉ Select/.test(e.textContent))); if (found) break; await sleep(600); }
 ok(found, "wardrobe editor mounted with the 'Select & Merge' button");
 
 // let any initial auto-regeneration settle — the editor's [opt] effect resets merge mode whenever
 // the design object changes, so we only interact once opt is stable.
 await sleep(3000);
 
-const enableMerge = () => page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((e) => /Select & Merge/.test(e.textContent)); if (b) b.click(); });
+const enableMerge = () => page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((e) => /⧉ Select/.test(e.textContent)); if (b) b.click(); });
 // count selected compartments DIRECTLY from the DOM highlight (indigo fill), independent of button-text timing
 const mergeCount = () => page.evaluate(() => {
   const h3 = [...document.querySelectorAll("h3")].find((e) => /✏️ Edit/.test(e.textContent));
@@ -65,7 +65,7 @@ const dispatchCol = (colIndex) => page.evaluate((colIndex) => {
 const waitHi = (n) => page.waitForFunction((n) => { const h3 = [...document.querySelectorAll("h3")].find((e) => /✏️ Edit/.test(e.textContent)); const svg = h3 && (h3.closest("div").parentElement || h3.parentElement).querySelector("svg"); return svg && [...svg.querySelectorAll("rect")].filter((r) => /79, ?70, ?229/.test(r.getAttribute("fill") || "")).length >= n; }, { timeout: 2500 }, n).then(() => true).catch(() => false);
 
 await enableMerge(); await sleep(600);
-const tipSeen = await page.evaluate(() => /Pick 2\+ compartments/.test(document.body.innerText));
+const tipSeen = await page.evaluate(() => /Shift\+Click for a range|Click to select/.test(document.body.innerText));
 ok(tipSeen, "merge mode shows the selection hint");
 // select two compartments in adjacent columns (cols 2 & 3) and confirm the selection ACCUMULATES —
 // this exercises the interactive select path end-to-end in a real browser.
@@ -79,7 +79,7 @@ ok(got2, "selecting a second compartment ACCUMULATES to two highlighted (survive
 // covered by verify-wardmerge-api.mjs; the two picked columns may span the male/female boundary,
 // which the engine correctly refuses, so we log rather than hard-assert the widen here).
 const wBefore = await widestCell();
-await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((e) => /Merge \d+ selected/.test(e.textContent) && !e.disabled); if (b) b.click(); });
+await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((e) => /⊞ Merge \d+/.test(e.textContent) && !e.disabled); if (b) b.click(); });
 await sleep(2000);
 const wAfter = await widestCell();
 console.log("    merge committed — widest editor cell: before=" + Math.round(wBefore) + " after=" + Math.round(wAfter) + (wAfter > wBefore * 1.3 ? " (widened ✓)" : " (same section merge or cross-section refused)"));

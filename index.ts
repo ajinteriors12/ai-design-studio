@@ -11916,22 +11916,79 @@ const frontendHTML = `<!DOCTYPE html>
       { kind: "safe", label: "Safe Locker", color: "#ef4444" },
     ];
     function WardrobeDrawEditor({ opt, onCommit }) {
-      const [secs, setSecs] = useState(() => JSON.parse(JSON.stringify(opt.sections || [])));
+      const clone = (x) => JSON.parse(JSON.stringify(x));
+      const [secs, setSecs] = useState(() => clone(opt.sections || []));
       const [menu, setMenu] = useState(null);   // {x,y,si,ci,k} right-click context menu
       const [tip, setTip] = useState(null);      // live drag dimension tooltip
-      // A stable fingerprint of the DESIGN (content), not the opt object reference — the parent
-      // re-renders periodically (SSE / live preview) and hands us a fresh opt with identical content;
-      // keying the re-seed + selection-reset on the signature keeps in-progress edits + merge
-      // selection alive across those benign re-renders, and still reacts to real design changes.
+      // ── Undo/Redo history (records EVERY edit; Ctrl+Z / Ctrl+Y + toolbar + timeline panel) ──
+      const [history, setHistory] = useState(() => ({ list: [{ secs: clone(opt.sections || []), label: "Opened design" }], ptr: 0 }));
+      const [showHist, setShowHist] = useState(false);
+      // A STRUCTURAL fingerprint (kinds + span/covered + counts) of the design. Our own commit round-trips
+      // through the parent as (a) an immediate setEdited and (b) an async /rerender echo — both share this
+      // structure, so they don't reset. Only a genuinely different design (new option / regenerate) changes
+      // the structure → then we re-seed + reset history. Benign SSE re-renders keep it identical.
+      const structSig = (arr) => JSON.stringify((arr || []).map((s) => (s.columns || []).map((c) => (c.cells || []).map((cell) => String(cell.kind) + (cell.span > 1 ? "s" + cell.span : "") + (cell.covered ? "x" : "")))));
+      const lastStruct = React.useRef(structSig(opt.sections));
       const optSig = JSON.stringify(opt ? [opt.id, opt.width, opt.height, opt.depth, opt.hasLoft, opt.loftH, opt.sections] : null);
-      React.useEffect(() => { setSecs(JSON.parse(JSON.stringify(opt.sections || []))); }, [optSig]);
+      React.useEffect(() => {
+        const cur = structSig(opt.sections);
+        if (cur === lastStruct.current) return;   // benign re-render or the server echo of our own commit
+        lastStruct.current = cur;                  // a genuinely different design was loaded → start fresh
+        const fresh = clone(opt.sections || []);
+        setSecs(fresh); setHistory({ list: [{ secs: clone(fresh), label: "Opened design" }], ptr: 0 });
+        setMsel([]); setMergeMode(false); setMmsg("");
+      }, [optSig]);
       const dragRef = React.useRef(null);
       const [mergeMode, setMergeMode] = useState(false);   // select-and-merge compartments
       const [msel, setMsel] = useState([]);                 // selected cell keys "si-ci-k"
       const [mmsg, setMmsg] = useState("");
-      React.useEffect(() => { setMsel([]); setMergeMode(false); setMmsg(""); }, [optSig]);
+      const lastSel = React.useRef(null);                   // for Shift+Click range selection
+      // commit a new sections state → push to history + notify parent (auto-updates all views/BOQ/CNC/3D)
+      const commit = (newSecs, label) => {
+        setHistory((h) => { const list = h.list.slice(0, h.ptr + 1).concat([{ secs: clone(newSecs), label }]).slice(-120); return { list, ptr: list.length - 1 }; });
+        setSecs(newSecs); lastStruct.current = structSig(newSecs); onCommit(newSecs);
+      };
+      const restore = (idx) => { if (idx < 0 || idx >= history.list.length) return; const s = clone(history.list[idx].secs); setHistory((h) => ({ ...h, ptr: idx })); setSecs(s); setMsel([]); lastStruct.current = structSig(s); onCommit(s); };
+      const undo = () => { if (history.ptr > 0) restore(history.ptr - 1); };
+      const redo = () => { if (history.ptr < history.list.length - 1) restore(history.ptr + 1); };
+      React.useEffect(() => {
+        const onKey = (e) => {
+          const t = e.target; if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || "")) return;
+          if (!(e.ctrlKey || e.metaKey)) return;
+          const k = (e.key || "").toLowerCase();
+          if (k === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+          else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); redo(); }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+      }, [history]);
+      const CONVERT_KINDS = WARD_CONVERTS.concat([{ kind: "jewellery", label: "Jewellery", color: "#f59e0b" }, { kind: "cosmetics", label: "Cosmetics", color: "#fb7185" }, { kind: "hanging", label: "Hanging", color: "#3b82f6" }]);
       const spanWmm = (cols, ci, cell) => { const nn = Math.max(1, Math.round((cell && cell.span) || 1)); let w = 0; for (let j = 0; j < nn && ci + j < cols.length; j++) w += cols[ci + j].w; return w; };
-      const toggleSel = (si, ci, k) => { const key = si + "-" + ci + "-" + k; setMmsg(""); setMsel((p) => p.indexOf(key) >= 0 ? p.filter((x) => x !== key) : p.concat([key])); };
+      const toggleSel = (si, ci, k, e) => {
+        const key = si + "-" + ci + "-" + k; setMmsg("");
+        if (e && e.shiftKey && lastSel.current && lastSel.current.si === si && lastSel.current.ci === ci) {
+          const a = Math.min(lastSel.current.k, k), b = Math.max(lastSel.current.k, k);
+          setMsel((p) => { const add = []; for (let kk = a; kk <= b; kk++) { const key2 = si + "-" + ci + "-" + kk; if (p.indexOf(key2) < 0) add.push(key2); } return p.concat(add); });
+        } else { setMsel((p) => p.indexOf(key) >= 0 ? p.filter((x) => x !== key) : p.concat([key])); }
+        lastSel.current = { si, ci, k };
+      };
+      // select every visible compartment matching a predicate (Select-all-of-kind)
+      const selectKind = (pred) => { const keys = []; secs.forEach((sec, si) => sec.columns.forEach((col, ci) => col.cells.forEach((cell, k) => { if (!cell.covered && pred(String(cell.kind))) keys.push(si + "-" + ci + "-" + k); }))); setMergeMode(true); setMsel(keys); setMmsg(keys.length ? "" : "None found."); };
+      // batch operation over the current selection (convert / delete / lock / unlock)
+      const batch = (kind, arg) => {
+        if (!msel.length) { setMmsg("Select compartments first."); return; }
+        const n = clone(secs);
+        const unmergeCell = (cols, cell) => { if (cell.span > 1) { const mid = cell.mergeId; delete cell.span; delete cell.mergeId; if (mid != null) for (const cc of cols) for (const cl of cc.cells) if (cl.mergeId === mid) { delete cl.covered; delete cl.mergeId; } } };
+        if (kind === "delete") {
+          const byCol = {}; msel.forEach((s) => { const p = s.split("-").map(Number); (byCol[p[0] + ":" + p[1]] = byCol[p[0] + ":" + p[1]] || []).push(p[2]); });
+          for (const key of Object.keys(byCol)) { const p = key.split(":").map(Number), cols = n[p[0]].columns, cells = cols[p[1]].cells; const ks = byCol[key].sort((a, b) => b - a); for (const k of ks) { if (cells.length < 2 || !cells[k]) continue; unmergeCell(cols, cells[k]); const h = cells[k].hMM; cells.splice(k, 1); cells[Math.min(k, cells.length - 1)].hMM += h; } }
+          commit(n, "Delete " + msel.length + " compartment(s)"); setMsel([]); return;
+        }
+        msel.forEach((s) => { const p = s.split("-").map(Number); const cell = n[p[0]] && n[p[0]].columns[p[1]] && n[p[0]].columns[p[1]].cells[p[2]]; if (!cell) return;
+          if (kind === "convert") { const cv = CONVERT_KINDS.find((c) => c.kind === arg); if (cv) { cell.kind = cv.kind; cell.label = cv.label; cell.color = cv.color; } }
+          else if (kind === "lock") cell.locked = true; else if (kind === "unlock") cell.locked = false; });
+        commit(n, kind === "convert" ? "Convert " + msel.length + " → " + arg : (kind === "lock" ? "Lock " : "Unlock ") + msel.length + " compartment(s)"); setMsel([]);
+      };
       const mergeSelected = () => {
         if (msel.length < 2) { setMmsg("Pick at least two compartments."); return; }
         const items = msel.map((s) => { const a = s.split("-"); return { si: +a[0], ci: +a[1], k: +a[2] }; });
@@ -11970,7 +12027,7 @@ const frontendHTML = `<!DOCTYPE html>
           if (d !== 0) { const fix = above.length ? arr[arr.length - 1] : (below.length ? arr[0] : merged); fix.hMM += d; }
           cols[ci].cells = arr;
         }
-        setSecs(n); onCommit(n); setMsel([]); setMergeMode(false); setMmsg("");
+        commit(n, "Merge " + cis.length + " compartments"); setMsel([]); setMergeMode(false); setMmsg("");
       };
       const padL = 26, padR = 18, padT = 40, padB = 28;
       const scale = Math.max(0.08, Math.min((700 - padL - padR) / opt.width, (440 - padT - padB) / opt.height));
@@ -11995,7 +12052,7 @@ const frontendHTML = `<!DOCTYPE html>
         setSecs((prev) => { const n = JSON.parse(JSON.stringify(prev)); const cells = n[d.si].columns[d.ci].cells, below = cells[d.k], above = cells[d.k + 1]; if (!below || !above || below.hMM - delta < 60 || above.hMM + delta < 60) return prev; below.hMM -= delta; above.hMM += delta; setTip({ x: e.clientX, y: e.clientY, text: below.hMM + " / " + above.hMM + " mm" }); return n; });
         d.y = e.clientY;
       };
-      const endDrag = () => { const d = dragRef.current; dragRef.current = null; setTip(null); if (d) onCommit(secs); };
+      const endDrag = () => { const d = dragRef.current; dragRef.current = null; setTip(null); if (d) commit(secs, d.kind === "col" ? "Resize columns" : d.kind === "sect" ? "Resize sections" : "Resize compartment"); };
       const startCell = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "cell", si, ci, k, y: e.clientY }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
       const startCol = (e, si, ci) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "col", si, ci, x: e.clientX }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
       const startSect = (e, i) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "sect", i, x: e.clientX }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
@@ -12024,7 +12081,21 @@ const frontendHTML = `<!DOCTYPE html>
         }
         else if (kind === "lock") { cells[k].locked = true; }
         else if (kind === "unlock") { cells[k].locked = false; }
-        setSecs(n); onCommit(n); setMenu(null);
+        else if (kind === "splitV") {   // split one compartment into N stacked compartments of the same kind
+          const N = Math.max(2, Math.min(6, +arg || 2)), cur = cells[k];
+          if (cur.span > 1) { const mid = cur.mergeId; delete cur.span; delete cur.mergeId; if (mid != null) for (const cc of sec.columns) for (const cl of (cc.cells || [])) if (cl.mergeId === mid) { delete cl.covered; delete cl.mergeId; } }
+          const total = cur.hMM; if (total < N * 60) { setMenu(null); return; }
+          const each = Math.round(total / N), made = [];
+          for (let i = 0; i < N; i++) made.push({ kind: cur.kind, label: cur.label, color: cur.color, hMM: i === N - 1 ? total - each * (N - 1) : each });
+          cells.splice(k, 1, ...made);
+        }
+        else if (kind === "splitColN") {   // split a column into N equal sub-columns
+          const N = Math.max(2, Math.min(4, +arg || 2)), nw = Math.round(col.w / N); if (nw < 250) { setMenu(null); return; }
+          const clones = []; for (let i = 1; i < N; i++) { const nc = JSON.parse(JSON.stringify(col)); nc.w = nw; clones.push(nc); } col.w = col.w - nw * (N - 1);
+          sec.columns.splice(menu.ci + 1, 0, ...clones); reflowX(sec);
+        }
+        const LBL = { convert: "Convert → " + arg, add: "Add " + arg, delete: "Delete compartment", inc: "Resize +50", dec: "Resize −50", equal: "Equal-divide column", split: "Split column", splitColN: "Split column into " + arg, splitV: "Split into " + arg, merge: "Merge column", unmerge: "Unmerge compartment", reassign: "Move column → " + arg, lock: "Lock", unlock: "Unlock" };
+        commit(n, LBL[kind] || "Edit"); setMenu(null);
       };
       const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, si, ci, k }); };
       const els = [];
@@ -12037,7 +12108,7 @@ const frontendHTML = `<!DOCTYPE html>
             const ch = cell.hMM * scale, yt = yb - ch;
             if (cell.covered) { yb = yt; return; }   // absorbed into a merge on the left
             const selK = si + "-" + ci + "-" + k, isSel = msel.indexOf(selK) >= 0, cw = spanWmm(sec.columns, ci, cell) * scale, nxt = col.cells[k + 1];
-            els.push(<rect key={"c" + selK} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={isSel ? "rgba(79,70,229,0.30)" : (cell.color || "#cbd5e1") + "33"} stroke={isSel ? "#4338ca" : (cell.color || "#cbd5e1")} strokeWidth={isSel ? 2 : (cell.span > 1 ? 1.1 : 0.7)} style={{ cursor: mergeMode ? "pointer" : "context-menu" }} onClick={(e) => { if (mergeMode) { e.stopPropagation(); toggleSel(si, ci, k); } }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
+            els.push(<rect key={"c" + selK} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={isSel ? "rgba(79,70,229,0.30)" : (cell.color || "#cbd5e1") + "33"} stroke={isSel ? "#4338ca" : (cell.color || "#cbd5e1")} strokeWidth={isSel ? 2 : (cell.span > 1 ? 1.1 : 0.7)} style={{ cursor: mergeMode ? "pointer" : "context-menu" }} onClick={(e) => { if (mergeMode) { e.stopPropagation(); toggleSel(si, ci, k, e); } }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
             if (ch > 12) els.push(<text key={"cl" + selK} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
             if (ch > 22) els.push(<text key={"cd" + selK} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.hMM + " mm"}</text>);
             if (cell.locked && ch > 10) els.push(<text key={"lk" + selK} x={cx + cw - 7} y={yt + 9} fontSize="8" textAnchor="middle" style={{ pointerEvents: "none" }}>🔒</text>);
@@ -12055,16 +12126,34 @@ const frontendHTML = `<!DOCTYPE html>
       const mLocked = mCol && mCol.cells[menu.k] && mCol.cells[menu.k].locked;
       const mi = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
       return (<div style={{ position: "relative" }}>
-        <div className="flex items-center gap-2 mb-1 flex-wrap">
-          <button onClick={() => { setMergeMode((v) => !v); setMsel([]); setMmsg(""); }} className={"px-2 py-0.5 rounded border text-[11px] font-medium " + (mergeMode ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-700 border-indigo-300")}>{mergeMode ? "✓ Selecting — click compartments" : "⧉ Select & Merge"}</button>
-          {mergeMode && <button onClick={mergeSelected} disabled={msel.length < 2} className={"px-2 py-0.5 rounded text-[11px] font-medium " + (msel.length < 2 ? "bg-slate-200 text-slate-400" : "bg-emerald-600 text-white")}>Merge {msel.length} selected → one</button>}
-          {mergeMode && <button onClick={() => { setMsel([]); setMmsg(""); }} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[11px]">Clear</button>}
-          {mmsg ? <span className="text-[11px] text-rose-600">{mmsg}</span> : (mergeMode && <span className="text-[11px] text-slate-500">Pick 2+ compartments side by side (or stacked) at the same height, then Merge. Right-click a merged cell to Unmerge.</span>)}
+        <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+          <button onClick={undo} disabled={history.ptr <= 0} title="Undo (Ctrl+Z)" className={"px-2 py-0.5 rounded border text-[11px] " + (history.ptr <= 0 ? "bg-slate-100 text-slate-300 border-slate-200" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50")}>↶ Undo</button>
+          <button onClick={redo} disabled={history.ptr >= history.list.length - 1} title="Redo (Ctrl+Y)" className={"px-2 py-0.5 rounded border text-[11px] " + (history.ptr >= history.list.length - 1 ? "bg-slate-100 text-slate-300 border-slate-200" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50")}>↷ Redo</button>
+          <button onClick={() => setShowHist((v) => !v)} title="History timeline" className="px-2 py-0.5 rounded border bg-white text-slate-700 border-slate-300 text-[11px] hover:bg-slate-50">🕘 History {history.ptr + 1}/{history.list.length}</button>
+          <span className="inline-block w-px h-4 bg-slate-200 mx-0.5" />
+          <button onClick={() => { setMergeMode((v) => !v); setMsel([]); setMmsg(""); }} className={"px-2 py-0.5 rounded border text-[11px] font-medium " + (mergeMode ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-700 border-indigo-300")}>{mergeMode ? "✓ Selecting" : "⧉ Select"}</button>
+          {mergeMode && (<React.Fragment>
+            <button onClick={mergeSelected} disabled={msel.length < 2} className={"px-2 py-0.5 rounded text-[11px] font-medium " + (msel.length < 2 ? "bg-slate-200 text-slate-400" : "bg-emerald-600 text-white")}>⊞ Merge {msel.length}</button>
+            <select value="" onChange={(e) => { if (e.target.value) batch("convert", e.target.value); e.target.value = ""; }} disabled={!msel.length} className="px-1 py-0.5 rounded border border-slate-300 text-[11px] bg-white text-slate-700 disabled:text-slate-300"><option value="">Convert →</option>{CONVERT_KINDS.map((c) => <option key={c.kind} value={c.kind}>{c.label}</option>)}</select>
+            <button onClick={() => batch("delete")} disabled={!msel.length} className={"px-2 py-0.5 rounded text-[11px] " + (!msel.length ? "bg-slate-100 text-slate-300" : "bg-rose-600 text-white")}>🗑 Delete</button>
+            <button onClick={() => batch("lock")} disabled={!msel.length} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[11px] disabled:text-slate-300" title="Lock selected">🔒</button>
+            <button onClick={() => batch("unlock")} disabled={!msel.length} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[11px] disabled:text-slate-300" title="Unlock selected">🔓</button>
+            <button onClick={() => { setMsel([]); setMmsg(""); }} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[11px]">Clear</button>
+            <span className="text-[10px] text-slate-400 ml-1">Select all:</span>
+            <button onClick={() => selectKind((k) => k === "drawer" || k === "jewellery" || k === "cosmetics")} className="px-1.5 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[10px]">Drawers</button>
+            <button onClick={() => selectKind((k) => k === "shelf" || k === "handbag" || k === "kidsShelf")} className="px-1.5 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[10px]">Shelves</button>
+            <button onClick={() => selectKind((k) => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga")} className="px-1.5 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[10px]">Hanging</button>
+          </React.Fragment>)}
+          {mmsg ? <span className="text-[11px] text-rose-600">{mmsg}</span> : (mergeMode && <span className="text-[11px] text-slate-500">Click to select · Shift+Click for a range · then Merge / Convert / Delete. Ctrl+Z = undo.</span>)}
         </div>
+        {showHist && (<div className="absolute z-40 bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] max-h-64 overflow-auto" style={{ top: 28, left: 0, minWidth: 220 }}>
+          <div className="px-3 py-1 text-slate-400 border-b border-slate-100 sticky top-0 bg-white">History — click any step to restore</div>
+          {history.list.map((h, i) => <button key={i} onClick={() => { restore(i); setShowHist(false); }} className={"block w-full text-left px-3 py-1 hover:bg-indigo-50 " + (i === history.ptr ? "bg-indigo-50 text-indigo-700 font-medium" : (i < history.ptr ? "text-slate-600" : "text-slate-400"))}>{(i === history.ptr ? "● " : (i < history.ptr ? "○ " : "· ")) + (i + 1) + ". " + h.label}</button>)}
+        </div>)}
         <svg width={W} height={H} viewBox={"0 0 " + W + " " + H} style={{ maxWidth: "100%", touchAction: "none", userSelect: "none" }} onPointerMove={onMove} onPointerUp={endDrag} onPointerLeave={endDrag}>{els}</svg>
         {menu && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
-          <div style={{ position: "fixed", left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1" >
+          <div style={{ position: "fixed", left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 460), zIndex: 50, maxHeight: "90vh", overflowY: "auto" }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1" >
             {mLocked ? (<React.Fragment>
               <div className="px-3 py-1 text-slate-500">🔒 Locked section</div>
               {mi("🔓 Unlock section", () => op("unlock"))}
@@ -12080,7 +12169,8 @@ const frontendHTML = `<!DOCTYPE html>
               {mi("▼ Decrease height (−50)", () => op("dec"))}
               {mi("≡ Equal-divide column", () => op("equal"))}
               <div className="border-t border-slate-100 my-1" />
-              {mi("⊟ Split column", () => op("split"))}
+              <div className="px-3 py-0.5 text-slate-400 flex items-center gap-1">Split into <span className="flex gap-1">{[2, 3, 4].map((N) => <button key={N} onClick={() => op("splitV", N)} className="px-1.5 rounded border border-slate-300 hover:bg-indigo-50 text-slate-700">{N}</button>)}</span></div>
+              <div className="px-3 py-0.5 text-slate-400 flex items-center gap-1">Split column <span className="flex gap-1">{[2, 3].map((N) => <button key={N} onClick={() => op("splitColN", N)} className="px-1.5 rounded border border-slate-300 hover:bg-indigo-50 text-slate-700">{N}</button>)}</span></div>
               {mi("⊞ Merge with next", () => op("merge"))}
               {mCol && mCol.cells[menu.k] && mCol.cells[menu.k].span > 1 && mi("⤫ Unmerge wide compartment", () => op("unmerge"))}
               <div className="border-t border-slate-100 my-1" />
