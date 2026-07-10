@@ -117,3 +117,6 @@ Thumbs.db
 !verify-wardart.mjs
 
 !verify-wardlasso.mjs
+
+!verify-vercompare.mjs
+!verify-vercompare-ui.mjs

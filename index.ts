@@ -9217,6 +9217,9 @@ const frontendHTML = `<!DOCTYPE html>
       const [viewJob, setViewJob] = useState(null);   // #4: inline artifact viewer (render PNG / walkthrough GIF)
       const [versions, setVersions] = useState([]);   // design version history (snapshot / restore)
       const [vlabel, setVlabel] = useState("");
+      const [cmpSel, setCmpSel] = useState([]);        // up to 2 version ids picked for side-by-side compare
+      const [cmpData, setCmpData] = useState(null);    // [{...fullVersionA}, {...fullVersionB}] once fetched
+      const [cmpBusy, setCmpBusy] = useState(false);
       const [rates, setRates] = useState(null);        // 💰 quotation rate-card
       const [quote, setQuote] = useState(null);        // priced BOQ
       const [client, setClient] = useState({});        // 🧾 Bill To / client details
@@ -9258,6 +9261,16 @@ const frontendHTML = `<!DOCTYPE html>
         if (!designId) return; setBusy("restore-" + vid);
         try { await fetch("/api/designs/" + designId + "/restore/" + vid, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }); refreshVersions(); } catch (e) {}
         setBusy("");
+      };
+      // pick up to 2 snapshots to diff; a 3rd pick drops the oldest.
+      const toggleCmp = (vid) => setCmpSel((p) => p.indexOf(vid) >= 0 ? p.filter((x) => x !== vid) : (p.length >= 2 ? [p[1], vid] : p.concat([vid])));
+      const runCompare = async () => {
+        if (!designId || cmpSel.length !== 2) return; setCmpBusy(true); setCmpData(null);
+        try {
+          const [a, b] = await Promise.all(cmpSel.map((vid) => fetch("/api/designs/" + designId + "/versions/" + vid).then((r) => r.json()).then((j) => j.data)));
+          if (a && b) setCmpData([a, b]);
+        } catch (e) {}
+        setCmpBusy(false);
       };
       const refreshJobs = React.useCallback(() => {
         if (!designId) return;
@@ -9348,23 +9361,64 @@ const frontendHTML = `<!DOCTYPE html>
                 </div>
               ); })()}
             </div>
-            {/* version history — snapshot + restore (auto-snapshots before a restore) */}
+            {/* version history — snapshot + restore (auto-snapshots before a restore) + side-by-side compare */}
             <div>
               <div className="flex flex-wrap items-center gap-2 mb-1"><span className="font-semibold text-slate-600">Version history ({versions.length}):</span>
                 <input value={vlabel} onChange={(e) => setVlabel(e.target.value)} placeholder="label (optional)" className="px-1.5 py-0.5 border border-slate-300 rounded w-40" />
                 <button disabled={busy === "snap"} onClick={snapshot} className="px-2 py-1 rounded font-semibold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-60">{busy === "snap" ? "Saving…" : "📸 Snapshot"}</button>
+                {versions.length >= 2 && <button disabled={cmpSel.length !== 2 || cmpBusy} onClick={runCompare} title="Tick two snapshots, then compare them side by side" className="px-2 py-1 rounded font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50">{cmpBusy ? "Loading…" : "⇆ Compare " + cmpSel.length + "/2"}</button>}
               </div>
               {versions.length === 0 ? <div className="text-slate-400 ml-2">No snapshots yet — save one before big edits so you can roll back.</div> : (
                 <ul className="ml-2 space-y-0.5 max-h-36 overflow-auto">
                   {versions.map((v) => (
-                    <li key={v.id} className="flex items-center gap-2">
-                      <span className="text-slate-600 truncate" style={{ maxWidth: 220 }}>{v.label}</span>
+                    <li key={v.id} className={"flex items-center gap-2 rounded px-1 " + (cmpSel.indexOf(v.id) >= 0 ? "bg-indigo-50" : "")}>
+                      <input type="checkbox" checked={cmpSel.indexOf(v.id) >= 0} onChange={() => toggleCmp(v.id)} title="Pick for compare (max 2)" className="accent-indigo-600" />
+                      <span className="text-slate-600 truncate" style={{ maxWidth: 200 }}>{v.label}</span>
                       <span className="text-slate-400">{v.summary.runs}r · {v.summary.cabinets}cab · {v.summary.mfgPass}/{v.summary.mfgTotal}✓</span>
                       <button disabled={busy === "restore-" + v.id} onClick={() => restore(v.id)} className="text-cyan-700 hover:underline disabled:opacity-60">{busy === "restore-" + v.id ? "restoring…" : "↩ restore"}</button>
                     </li>
                   ))}
                 </ul>
               )}
+              {cmpData && (() => {
+                const [A, Bv] = cmpData; const ma = A.metrics || {}, mb = Bv.metrics || {};
+                const money = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
+                const ROWS = [
+                  ["cabinets", "Cabinets", null], ["panels", "Panels", null], ["drawers", "Drawers", null], ["shutters", "Shutters", null], ["shelves", "Shelves", null],
+                  ["materialBoardSqft", "Board (sq.ft)", null], ["edgeBandM", "Edge band (m)", null], ["weightKg", "Weight (kg)", null],
+                  ["plywoodUtilPct", "Ply util %", null], ["storageScorePct", "Storage %", null], ["estCostInr", "Est. cost", money],
+                ];
+                return (<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setCmpData(null)}>
+                  <div className="bg-white rounded-xl shadow-2xl max-w-5xl w-full max-h-[92vh] overflow-auto p-4" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center justify-between mb-3"><h3 className="text-base font-bold text-slate-800">⇆ Version compare</h3><button onClick={() => setCmpData(null)} className="text-slate-400 hover:text-slate-700 text-xl leading-none">×</button></div>
+                    <div className="grid grid-cols-2 gap-4 mb-3">
+                      {[A, Bv].map((v, idx) => (
+                        <div key={idx} className="border border-slate-200 rounded-lg overflow-hidden">
+                          <div className={"px-3 py-1.5 text-xs font-semibold text-white " + (idx === 0 ? "bg-slate-600" : "bg-indigo-600")}>{idx === 0 ? "A · " : "B · "}{v.label}</div>
+                          <div className="p-2 bg-slate-50 flex items-center justify-center" style={{ minHeight: 180 }}>{v.planSvg ? <div style={{ maxWidth: "100%" }} dangerouslySetInnerHTML={{ __html: v.planSvg }} /> : <span className="text-slate-400 text-xs">no plan drawing stored</span>}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <table className="w-full text-xs border-collapse">
+                      <thead><tr className="text-slate-500 border-b border-slate-200"><th className="text-left py-1 font-semibold">Metric</th><th className="text-right py-1 font-semibold">A</th><th className="text-right py-1 font-semibold">B</th><th className="text-right py-1 font-semibold">Δ (B−A)</th></tr></thead>
+                      <tbody>
+                        {ROWS.map(([k, lbl, fmt]) => { const a = Number(ma[k] || 0), b = Number(mb[k] || 0), d = b - a; const f = fmt || ((n) => Math.round(n).toLocaleString("en-IN"));
+                          return (<tr key={k} className="border-b border-slate-100">
+                            <td className="py-1 text-slate-600">{lbl}</td>
+                            <td className="py-1 text-right text-slate-700">{f(a)}</td>
+                            <td className="py-1 text-right text-slate-700">{f(b)}</td>
+                            <td className={"py-1 text-right font-semibold " + (d === 0 ? "text-slate-300" : d > 0 ? "text-emerald-600" : "text-rose-600")}>{d === 0 ? "—" : (d > 0 ? "+" : "") + f(d)}</td>
+                          </tr>); })}
+                      </tbody>
+                    </table>
+                    {(!A.metrics || !Bv.metrics) && <div className="text-[11px] text-amber-600 mt-2">Some metrics unavailable for a furniture/wardrobe snapshot — plan drawings shown above.</div>}
+                    <div className="mt-3 flex justify-end gap-2">
+                      <button onClick={() => { restore(Bv.id); setCmpData(null); }} className="px-3 py-1 rounded bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-500">↩ Restore B</button>
+                      <button onClick={() => setCmpData(null)} className="px-3 py-1 rounded border border-slate-300 text-slate-600 text-xs">Close</button>
+                    </div>
+                  </div>
+                </div>);
+              })()}
             </div>
             {/* 💰 priced quotation — rate-card × BOQ → INR estimate with margin + GST */}
             <div>
@@ -15688,6 +15742,15 @@ app.post("/api/designs/:id/version", async (c) => {
 app.get("/api/designs/:id/versions", (c) => {
   const rows = sqlite.prepare(`SELECT id,label,layout,created_at FROM design_versions WHERE design_id=? ORDER BY created_at DESC LIMIT 50`).all(c.req.param("id")) as any[];
   return c.json({ data: rows.map((r) => ({ id: r.id, label: r.label, createdAt: r.created_at, summary: versionSummary(JSON.parse(r.layout)) })) });
+});
+// full snapshot of ONE version — the stored layout's plan drawing + rich metrics, for side-by-side compare.
+app.get("/api/designs/:id/versions/:vid", (c) => {
+  const row = sqlite.prepare(`SELECT id,label,layout,created_at FROM design_versions WHERE id=? AND design_id=?`).get(c.req.param("vid"), c.req.param("id")) as any;
+  if (!row) return c.json({ error: "version not found" }, 404);
+  let layout: any; try { layout = JSON.parse(row.layout); } catch { return c.json({ error: "corrupt version data" }, 500); }
+  try { rederiveLayout(layout); } catch {}   // refresh planSvg/cutList/boq/mfg from stored runs if stale
+  let metrics: any = null; try { metrics = designMetrics(layout); } catch {}
+  return c.json({ data: { id: row.id, label: row.label, createdAt: row.created_at, type: layout.type, dims: layout.dims, planSvg: layout.planSvg || "", summary: versionSummary(layout), metrics } });
 });
 app.post("/api/designs/:id/restore/:vid", async (c) => {
   const id = c.req.param("id"); const d = loadDesign(id); if (!d) return c.json({ error: "Design not found" }, 404);
