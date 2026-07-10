@@ -14366,8 +14366,11 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
       const fill = internal ? "#f1f5f9" : cell.color + "33", stroke = internal ? "#64748b" : cell.color;
       p.push(`<rect x="${(cx + 1).toFixed(1)}" y="${yt.toFixed(1)}" width="${(cw - 2).toFixed(1)}" height="${(ch - 1).toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${internal ? 0.9 : 0.7}"/>`);
       if (ch > 12) {
-        if (internal) { cellNo++; p.push(`<circle cx="${(cx + 8).toFixed(1)}" cy="${(yt + 8).toFixed(1)}" r="5.5" fill="#1e293b"/><text x="${(cx + 8).toFixed(1)}" y="${(yt + 10).toFixed(1)}" fill="#ffffff" font-size="6" text-anchor="middle">${cellNo}</text>`); }
-        p.push(`<text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 + 2).toFixed(1)}" fill="#334155" font-size="7" text-anchor="middle">${esc(cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label)}</text>`);
+        // internal (shutters-off) view shows the same real item artwork as the Shop Drawing
+        if (internal) { p.push(wardCellArt(String(cell.kind), cx, yt, cw, ch)); cellNo++; p.push(`<circle cx="${(cx + 8).toFixed(1)}" cy="${(yt + 8).toFixed(1)}" r="5.5" fill="#1e293b"/><text x="${(cx + 8).toFixed(1)}" y="${(yt + 10).toFixed(1)}" fill="#ffffff" font-size="6" text-anchor="middle">${cellNo}</text>`); }
+        const lblT = esc(cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label);
+        if (internal) { const lw = Math.min(cw - 6, lblT.length * 4.4 + 8); p.push(`<rect x="${(cxm - lw / 2).toFixed(1)}" y="${(yt + ch / 2 - 5).toFixed(1)}" width="${lw.toFixed(1)}" height="10" rx="2" fill="#ffffff" opacity="0.82"/>`); }
+        p.push(`<text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 + 2).toFixed(1)}" fill="#334155" font-size="7" text-anchor="middle">${lblT}</text>`);
         if (ch > 22) p.push(`<text x="${cxm.toFixed(1)}" y="${(yb - 3).toFixed(1)}" fill="${internal ? "#475569" : "#94a3b8"}" font-size="5.5" text-anchor="middle">${cell.hMM} mm</text>`);
       }
       yb = yt;
@@ -14406,6 +14409,68 @@ function renderWardrobeElevationSvg(opt: any, mode: string): string {
 const renderWardrobeOptionSvg = (opt: any): string => renderWardrobeElevationSvg(opt, "front");
 // mm dimension label — everything on drawings + printouts is in millimetres, e.g. 1067 -> "1067".
 function wardMm(mm: number): string { return Math.round(+mm || 0) + ""; }
+// Shared compartment ITEM ARTWORK (garments on real hangers, folded stacks, drawers, accessories)
+// drawn into an absolute pixel rect (cx,yt,cw,ch). Coordinate-based + scale-independent, so the
+// Shop Drawing, the Shutters "internal" elevation and the Internal elevation all render identical art.
+function wardCellArt(k: string, cx: number, yt: number, cw: number, ch: number): string {
+  const INK = "#111827", THIN = "#9ca3af", MID = "#4b5563";
+  const f1 = (v: number) => v.toFixed(1);
+  const isHang = (kk: string) => kk.toLowerCase().indexOf("hang") >= 0 || kk === "saree" || kk === "dress" || kk === "lehenga" || kk === "suit";
+  const isCorner = (kk: string) => kk.indexOf("corner") === 0;
+  const drawerGlyph = (cx: number, yt: number, cw: number, ch: number, shoe: boolean) => {
+    let g = `<rect x="${(cx + 5).toFixed(1)}" y="${(yt + 3).toFixed(1)}" width="${(cw - 10).toFixed(1)}" height="${(ch - 6).toFixed(1)}" rx="2" fill="none" stroke="${INK}" stroke-width="1"/>`;
+    const hy = yt + ch / 2, mid = cx + cw / 2, hw = Math.min(cw * 0.16, 16);
+    g += `<line x1="${(mid - hw).toFixed(1)}" y1="${hy.toFixed(1)}" x2="${(mid + hw).toFixed(1)}" y2="${hy.toFixed(1)}" stroke="${INK}" stroke-width="2"/>`;
+    if (shoe) g += `<line x1="${(cx + 8).toFixed(1)}" y1="${(yt + ch - 6).toFixed(1)}" x2="${(cx + cw - 8).toFixed(1)}" y2="${(yt + ch - 6).toFixed(1)}" stroke="${THIN}" stroke-width="0.7" stroke-dasharray="3 2"/>`;
+    return g;
+  };
+  const foldGlyph = (cx: number, yt: number, cw: number, ch: number) => {
+    const subs = cw > 95 ? 2 : 1, gapx = 8, sw = (cw - gapx * (subs + 1)) / subs;
+    const bandH = 6, gap = 2.6, stackN = Math.max(2, Math.min(6, Math.floor((ch - 8) / (bandH + gap)))); let g = "";
+    for (let s = 0; s < subs; s++) { const sx = cx + gapx + s * (sw + gapx); for (let k = 0; k < stackN; k++) { const py = yt + ch - 6 - k * (bandH + gap); g += `<rect x="${sx.toFixed(1)}" y="${(py - bandH).toFixed(1)}" width="${sw.toFixed(1)}" height="${bandH.toFixed(1)}" rx="${(bandH / 2).toFixed(1)}" fill="#f3f4f6" stroke="${MID}" stroke-width="0.7"/><line x1="${(sx + 2.5).toFixed(1)}" y1="${(py - bandH / 2).toFixed(1)}" x2="${(sx + sw - 2.5).toFixed(1)}" y2="${(py - bandH / 2).toFixed(1)}" stroke="#cbd5e1" stroke-width="0.4"/>`; } }
+    return g;
+  };
+  // a real clothes hanger: hook curling over the rod + sloping shoulders the garment drapes from
+  const hanger = (gx: number, rodY: number, shY: number, sw: number) => `<path d="M${f1(gx - 2)},${f1(rodY - 1)} q0,${f1(-3)} 2,${f1(-3)} q2,0 2,2.5" fill="none" stroke="${MID}" stroke-width="0.6"/><line x1="${f1(gx + 2)}" y1="${f1(rodY - 1)}" x2="${f1(gx)}" y2="${f1(shY)}" stroke="${MID}" stroke-width="0.55"/><path d="M${f1(gx - sw / 2)},${f1(shY + 2.6)} L${f1(gx)},${f1(shY)} L${f1(gx + sw / 2)},${f1(shY + 2.6)}" fill="none" stroke="${MID}" stroke-width="0.7"/>`;
+  const gShirt = (gx: number, topY: number, gh: number, gw: number, fill = "#eef2ff") => { const sh = gw / 2, bt = gw * 0.44, cn = gw * 0.13, ty = topY + 2.4; return `<path d="M${f1(gx - sh)},${f1(ty)} L${f1(gx - cn)},${f1(ty)} L${f1(gx)},${f1(topY + gh * 0.07)} L${f1(gx + cn)},${f1(ty)} L${f1(gx + sh)},${f1(ty)} L${f1(gx + bt)},${f1(topY + gh)} L${f1(gx - bt)},${f1(topY + gh)} Z" fill="${fill}" stroke="${MID}" stroke-width="0.6"/><line x1="${f1(gx)}" y1="${f1(topY + gh * 0.07)}" x2="${f1(gx)}" y2="${f1(topY + gh - 2)}" stroke="${MID}" stroke-width="0.4"/>`; };
+  const gCoat = (gx: number, topY: number, gh: number, gw: number) => { const sh = gw / 2, bt = gw * 0.46, ty = topY + 2.4, cY = topY + gh * 0.09; let s = `<path d="M${f1(gx - sh)},${f1(ty)} L${f1(gx + sh)},${f1(ty)} L${f1(gx + bt)},${f1(topY + gh)} L${f1(gx - bt)},${f1(topY + gh)} Z" fill="#dbe3f4" stroke="${MID}" stroke-width="0.6"/>`; s += `<path d="M${f1(gx - gw * 0.14)},${f1(ty)} L${f1(gx)},${f1(cY)} L${f1(gx + gw * 0.14)},${f1(ty)}" fill="none" stroke="${MID}" stroke-width="0.5"/><path d="M${f1(gx)},${f1(cY)} L${f1(gx - gw * 0.17)},${f1(topY + gh * 0.32)} M${f1(gx)},${f1(cY)} L${f1(gx + gw * 0.17)},${f1(topY + gh * 0.32)} M${f1(gx)},${f1(cY)} L${f1(gx)},${f1(topY + gh - 2)}" fill="none" stroke="${MID}" stroke-width="0.5"/>`; const nb = Math.max(2, Math.min(4, Math.floor(gh / 34))); for (let b = 0; b < nb; b++) { const by = topY + gh * 0.4 + b * (gh * 0.13); s += `<circle cx="${f1(gx + 1.6)}" cy="${f1(by)}" r="0.9" fill="none" stroke="${MID}" stroke-width="0.45"/>`; } return s; };
+  const gSaree = (gx: number, topY: number, gh: number, gw: number) => { const w = gw * 0.9; let s = `<path d="M${f1(gx - w * 0.32)},${f1(topY)} L${f1(gx + w * 0.32)},${f1(topY)} L${f1(gx + w / 2)},${f1(topY + gh)} L${f1(gx - w / 2)},${f1(topY + gh)} Z" fill="#fce7f3" stroke="#db2777" stroke-width="0.55"/>`; for (let i = 1; i < 4; i++) { const px = gx - w * 0.32 + (w * 0.64) * (i / 4); s += `<line x1="${f1(px)}" y1="${f1(topY + 2)}" x2="${f1(px + (i - 2) * 2.2)}" y2="${f1(topY + gh - 2)}" stroke="#db2777" stroke-width="0.4"/>`; } s += `<rect x="${f1(gx - w / 2)}" y="${f1(topY + gh - 3)}" width="${f1(w)}" height="2.3" fill="#be185d"/>`; s += `<path d="M${f1(gx - w * 0.28)},${f1(topY + 1)} q${f1(-w * 0.34)},${f1(gh * 0.32)} ${f1(-w * 0.14)},${f1(gh * 0.62)}" fill="none" stroke="#be185d" stroke-width="0.5"/>`; return s; };
+  const gDress = (gx: number, topY: number, gh: number, gw: number) => { const wt = topY + gh * 0.42, ty = topY + 2.4; return `<path d="M${f1(gx - gw * 0.34)},${f1(ty)} L${f1(gx - gw * 0.1)},${f1(ty)} L${f1(gx)},${f1(topY + gh * 0.07)} L${f1(gx + gw * 0.1)},${f1(ty)} L${f1(gx + gw * 0.34)},${f1(ty)} L${f1(gx + gw * 0.22)},${f1(wt)} L${f1(gx + gw / 2)},${f1(topY + gh)} L${f1(gx - gw / 2)},${f1(topY + gh)} L${f1(gx - gw * 0.22)},${f1(wt)} Z" fill="#fdecf5" stroke="#db2777" stroke-width="0.6"/><line x1="${f1(gx)}" y1="${f1(wt)}" x2="${f1(gx)}" y2="${f1(topY + gh - 2)}" stroke="#db2777" stroke-width="0.35"/>`; };
+  const gLehenga = (gx: number, topY: number, gh: number, gw: number) => { const wt = topY + gh * 0.3; return `<rect x="${f1(gx - gw * 0.18)}" y="${f1(topY)}" width="${f1(gw * 0.36)}" height="${f1(gh * 0.3)}" fill="#fbcfe8" stroke="#be185d" stroke-width="0.5"/><path d="M${f1(gx - gw * 0.18)},${f1(wt)} L${f1(gx + gw * 0.18)},${f1(wt)} L${f1(gx + gw / 2)},${f1(topY + gh)} L${f1(gx - gw / 2)},${f1(topY + gh)} Z" fill="#f9a8d4" stroke="#be185d" stroke-width="0.6"/>`; };
+  const drawGarment = (t: string, gx: number, topY: number, gh: number, gw: number) =>
+    t === "coat" ? gCoat(gx, topY, gh, gw) : t === "saree" ? gSaree(gx, topY, gh, gw) : t === "dress" ? gDress(gx, topY, gh, gw) : t === "lehenga" ? gLehenga(gx, topY, gh, gw) : t === "kid" ? gShirt(gx, topY, gh * 0.7, gw * 0.8, "#e0f2fe") : gShirt(gx, topY, gh, gw);
+  const HANG_SET: Record<string, string[]> = { longHang: ["shirt", "coat", "shirt", "shirt"], shortHang: ["shirt", "shirt", "shirt"], suit: ["coat", "coat"], saree: ["saree", "saree", "saree"], dress: ["dress", "dress", "dress"], lehenga: ["lehenga", "lehenga"], dupatta: ["saree", "dress"], kidsHang: ["kid", "kid", "kid"], hang: ["shirt", "coat", "shirt"] };
+  const hangItems = (k: string, cx: number, yt: number, cw: number, ch: number) => {
+    const rodY = yt + Math.min(13, ch * 0.13), botY = yt + ch - 4;
+    let g = `<line x1="${f1(cx + 5)}" y1="${f1(rodY)}" x2="${f1(cx + cw - 5)}" y2="${f1(rodY)}" stroke="${INK}" stroke-width="1.3"/><line x1="${f1(cx + 5)}" y1="${f1(rodY - 3)}" x2="${f1(cx + 5)}" y2="${f1(rodY + 3)}" stroke="${INK}" stroke-width="1.1"/><line x1="${f1(cx + cw - 5)}" y1="${f1(rodY - 3)}" x2="${f1(cx + cw - 5)}" y2="${f1(rodY + 3)}" stroke="${INK}" stroke-width="1.1"/>`;
+    const set = HANG_SET[k] || (k.toLowerCase().indexOf("kids") >= 0 ? ["kid", "kid"] : ["shirt", "coat", "shirt"]);
+    const shY = rodY + 5;
+    const n = cw < 60 ? 1 : cw < 150 ? 2 : 3;
+    const isSlim = set[0] === "saree" || set.indexOf("dress") >= 0 || set.indexOf("lehenga") >= 0;
+    const gw = Math.min(((cw - 12) / n) * (isSlim ? 0.9 : 1.02), isSlim ? 30 : 52);
+    const gh = Math.max(10, Math.min(botY - shY, ch * 0.74, gw * (isSlim ? 7 : 5)));
+    for (let i = 0; i < n; i++) { const gx = n === 1 ? cx + cw / 2 : cx + gw / 2 + 5 + (cw - gw - 10) * (i / (n - 1)); g += hanger(gx, rodY, shY, gw * 0.9) + drawGarment(set[i % set.length], gx, shY, gh, gw); }
+    return g;
+  };
+  const iHandbag = (cx: number, yt: number, cw: number, ch: number) => { const n = cw > 90 ? 2 : 1, slot = cw / n; let g = ""; for (let i = 0; i < n; i++) { const bcx = cx + i * slot + slot * 0.5, bw = Math.min(slot * 0.5, ch * 0.5), bh = Math.min(ch * 0.56, bw * 0.85), by = yt + ch / 2 - bh / 2 + 2; g += `<path d="M${f1(bcx - bw / 2)},${f1(by)} q${f1(bw / 2)},${f1(-bh * 0.55)} ${f1(bw)},0" fill="none" stroke="#7c3aed" stroke-width="0.7"/><rect x="${f1(bcx - bw / 2)}" y="${f1(by)}" width="${f1(bw)}" height="${f1(bh)}" rx="2" fill="#ede9fe" stroke="#7c3aed" stroke-width="0.7"/><line x1="${f1(bcx - bw / 2)}" y1="${f1(by + bh * 0.3)}" x2="${f1(bcx + bw / 2)}" y2="${f1(by + bh * 0.3)}" stroke="#7c3aed" stroke-width="0.4"/>`; } return g; };
+  const iShoe = (cx: number, yt: number, cw: number, ch: number) => { const n = Math.max(2, Math.min(4, Math.round(cw / 22))), by = yt + ch - 5; let g = ""; for (let i = 0; i < n; i++) { const sx = cx + 8 + (cw - 20) * (n === 1 ? 0.5 : i / (n - 1)) - 6; g += `<path d="M${f1(sx)},${f1(by)} l0,-3.5 q0.6,-3 5,-3 l3.5,0 q3.5,0 4.5,3 l0,3.5 Z" fill="#f5ead9" stroke="#a1712f" stroke-width="0.6"/>`; } return g; };
+  const iJewel = (cx: number, yt: number, cw: number, ch: number) => { const r = Math.min(cw * 0.28, ch * 0.26), my = yt + ch * 0.34; return `<path d="M${f1(cx + cw / 2 - r)},${f1(my)} q${f1(r)},${f1(r * 1.1)} ${f1(2 * r)},0" fill="none" stroke="#d97706" stroke-width="0.8"/><circle cx="${f1(cx + cw / 2)}" cy="${f1(my + r * 0.9)}" r="2" fill="#f59e0b"/><circle cx="${f1(cx + cw / 2 - r * 0.6)}" cy="${f1(my + r * 0.55)}" r="1.2" fill="#fcd34d"/><circle cx="${f1(cx + cw / 2 + r * 0.6)}" cy="${f1(my + r * 0.55)}" r="1.2" fill="#fcd34d"/>`; };
+  const iCosmetic = (cx: number, yt: number, cw: number, ch: number) => { const n = Math.max(2, Math.min(4, Math.round(cw / 16))), by = yt + ch - 5; let g = ""; for (let i = 0; i < n; i++) { const bx = cx + 7 + (cw - 14) * (n === 1 ? 0.5 : i / (n - 1)), bh = ch * 0.42 + (i % 2) * 4; g += `<rect x="${f1(bx - 2.2)}" y="${f1(by - bh)}" width="4.4" height="${f1(bh)}" rx="1" fill="#fecaca" stroke="#ef4444" stroke-width="0.5"/><rect x="${f1(bx - 1)}" y="${f1(by - bh - 2.2)}" width="2" height="2.4" fill="#ef4444"/>`; } return g; };
+  const iSafe = (cx: number, yt: number, cw: number, ch: number) => { const m = 6, bx = cx + m, by = yt + m, bw = cw - 2 * m, bh = ch - 2 * m; return `<rect x="${f1(bx)}" y="${f1(by)}" width="${f1(bw)}" height="${f1(bh)}" rx="2" fill="#fee2e2" stroke="#b91c1c" stroke-width="0.8"/><circle cx="${f1(bx + bw * 0.66)}" cy="${f1(by + bh / 2)}" r="${f1(Math.min(bw * 0.16, bh * 0.28))}" fill="none" stroke="#b91c1c" stroke-width="0.8"/><line x1="${f1(bx + bw * 0.66)}" y1="${f1(by + bh / 2)}" x2="${f1(bx + bw * 0.66)}" y2="${f1(by + bh * 0.26)}" stroke="#b91c1c" stroke-width="0.7"/>`; };
+  const iTie = (cx: number, yt: number, cw: number, ch: number) => { const railY = yt + 5, n = Math.max(3, Math.min(7, Math.round(cw / 10))); let g = `<line x1="${f1(cx + 4)}" y1="${f1(railY)}" x2="${f1(cx + cw - 4)}" y2="${f1(railY)}" stroke="${INK}" stroke-width="0.9"/>`; for (let i = 0; i < n; i++) { const px = cx + 7 + (cw - 14) * (n === 1 ? 0.5 : i / (n - 1)); g += `<path d="M${f1(px - 1.6)},${f1(railY)} L${f1(px + 1.6)},${f1(railY)} L${f1(px + 1)},${f1(yt + ch - 6)} L${f1(px - 1)},${f1(yt + ch - 6)} Z" fill="#fde68a" stroke="#b45309" stroke-width="0.4"/>`; } return g; };
+  const iPants = (cx: number, yt: number, cw: number, ch: number) => { const railY = yt + 6, n = Math.max(2, Math.min(6, Math.round(cw / 14))); let g = `<line x1="${f1(cx + 4)}" y1="${f1(railY)}" x2="${f1(cx + cw - 4)}" y2="${f1(railY)}" stroke="${INK}" stroke-width="1"/>`; for (let i = 0; i < n; i++) { const px = cx + 8 + (cw - 16) * (n === 1 ? 0.5 : i / (n - 1)); g += `<path d="M${f1(px - 3)},${f1(railY)} L${f1(px - 3)},${f1(yt + ch - 4)} M${f1(px + 3)},${f1(railY)} L${f1(px + 3)},${f1(yt + ch - 4)}" stroke="${MID}" stroke-width="0.7" fill="none"/>`; } return g; };
+  if (isHang(k)) return hangItems(k, cx, yt, cw, ch);
+  if (k === "pantRack") return iPants(cx, yt, cw, ch);
+  if (k === "handbag") return iHandbag(cx, yt, cw, ch);
+  if (k === "shoe") return iShoe(cx, yt, cw, ch);
+  if (k === "jewellery") return iJewel(cx, yt, cw, ch);
+  if (k === "cosmetics") return iCosmetic(cx, yt, cw, ch);
+  if (k === "safe") return iSafe(cx, yt, cw, ch);
+  if (k === "tieBelt") return iTie(cx, yt, cw, ch);
+  if (k === "drawer" || k === "laptop") return drawerGlyph(cx, yt, cw, ch, false);
+  if (isCorner(k)) return `<line x1="${f1(cx + 4)}" y1="${f1(yt + ch - 4)}" x2="${f1(cx + cw - 4)}" y2="${f1(yt + 4)}" stroke="${MID}" stroke-width="0.9" stroke-dasharray="4 3"/>`;
+  return foldGlyph(cx, yt, cw, ch);
+}
 // Classic Indian wardrobe FRONT-ELEVATION shop drawing: every compartment illustrated
 // (hanging rods+garments, folded stacks, drawers, loft storage boxes, open shelves) and fully
 // dimensioned in millimetres — outer + internal widths, per-cell heights, overall body height, thada.
@@ -14527,7 +14592,7 @@ function renderWardrobeShopDrawing(opt: any): string {
       const cw = wardSpanWmm(cols, cix, cell) * scale, cxm = cx + cw / 2;
       p.push(`<rect x="${cx.toFixed(1)}" y="${yt.toFixed(1)}" width="${cw.toFixed(1)}" height="${ch.toFixed(1)}" fill="#ffffff" stroke="${THIN}" stroke-width="0.6"/>`);
       if (ch > 10) {
-        p.push(cellArt(k, cx, yt, cw, ch));
+        p.push(wardCellArt(k, cx, yt, cw, ch));
         // label (uppercased) on a small white plate near the TOP so it never hides the item art
         if (ch > 22) {
           const lbl = String(cell.label || k).toUpperCase(), maxc = Math.max(3, Math.floor((cw - 6) / 5.0)), shown = lbl.length > maxc ? lbl.slice(0, maxc) : lbl, lw = Math.min(cw - 4, shown.length * 5.0 + 8), lY = yt + 8;
@@ -14619,9 +14684,7 @@ function renderWardrobeShutterCompareSvg(opt: any): string {
           const cw = wardSpanWmm(cols, cix, cell) * scale, cxm = cx + cw / 2;
           p.push(`<rect x="${cx.toFixed(1)}" y="${yt.toFixed(1)}" width="${cw.toFixed(1)}" height="${ch.toFixed(1)}" fill="#ffffff" stroke="${THIN}" stroke-width="0.6"/>`);
           if (ch > 9) {
-            if (isHang(k)) { const rodY = yt + Math.min(13, ch * 0.14), n = Math.max(3, Math.min(22, Math.round(cw / 10))); p.push(`<line x1="${(cx + 4).toFixed(1)}" y1="${rodY.toFixed(1)}" x2="${(cx + cw - 4).toFixed(1)}" y2="${rodY.toFixed(1)}" stroke="${INK}" stroke-width="1.1"/>`); for (let i = 0; i < n; i++) { const gx = cx + 6 + (cw - 12) * (n === 1 ? 0.5 : i / (n - 1)); p.push(`<line x1="${gx.toFixed(1)}" y1="${(rodY + 2).toFixed(1)}" x2="${gx.toFixed(1)}" y2="${(yt + ch - 5).toFixed(1)}" stroke="${THIN}" stroke-width="0.7"/>`); } }
-            else if (isDrawer(k)) { p.push(`<rect x="${(cx + 4).toFixed(1)}" y="${(yt + 3).toFixed(1)}" width="${(cw - 8).toFixed(1)}" height="${(ch - 6).toFixed(1)}" fill="none" stroke="${INK}" stroke-width="0.9"/><line x1="${(cx + cw / 2 - 9).toFixed(1)}" y1="${(yt + ch / 2).toFixed(1)}" x2="${(cx + cw / 2 + 9).toFixed(1)}" y2="${(yt + ch / 2).toFixed(1)}" stroke="${INK}" stroke-width="1.8"/>`); }
-            else { const rows = Math.max(1, Math.min(4, Math.floor(ch / 12))); for (let r = 1; r <= rows; r++) { const ly = yt + (ch * r) / (rows + 1); p.push(`<line x1="${(cx + 5).toFixed(1)}" y1="${ly.toFixed(1)}" x2="${(cx + cw - 5).toFixed(1)}" y2="${ly.toFixed(1)}" stroke="${THIN}" stroke-width="0.7"/>`); } }
+            p.push(wardCellArt(k, cx, yt, cw, ch));   // shared real item artwork (garments on hangers, folded stacks, drawers, accessories)
             if (ch > 18) { const lbl = String(cell.label || k); p.push(`<rect x="${(cxm - Math.min(cw - 6, lbl.length * 4 + 6) / 2).toFixed(1)}" y="${(yt + ch / 2 - 9).toFixed(1)}" width="${Math.min(cw - 6, lbl.length * 4 + 6).toFixed(1)}" height="10" fill="#ffffff" opacity="0.85"/><text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 - 1).toFixed(1)}" fill="${INK}" font-size="6.6" text-anchor="middle">${esc(lbl.length > (cw - 6) / 4 ? lbl.slice(0, Math.max(3, Math.floor((cw - 6) / 4))) : lbl)}</text><text x="${cxm.toFixed(1)}" y="${(yt + ch / 2 + 7).toFixed(1)}" fill="${MID}" font-size="6" text-anchor="middle">${Math.round(cell.hMM)}</text>`); }
           }
           yb = yt;
