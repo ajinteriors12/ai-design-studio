@@ -11936,7 +11936,7 @@ const frontendHTML = `<!DOCTYPE html>
         lastStruct.current = cur;                  // a genuinely different design was loaded → start fresh
         const fresh = clone(opt.sections || []);
         setSecs(fresh); setHistory({ list: [{ secs: clone(fresh), label: "Opened design" }], ptr: 0 });
-        setMsel([]); setMergeMode(false); setMmsg("");
+        setMsel([]); setMergeMode(false); setMmsg(""); setLasso(false); setLassoPath(null);
       }, [optSig]);
       const dragRef = React.useRef(null);
       const [mergeMode, setMergeMode] = useState(false);   // select-and-merge compartments
@@ -11945,7 +11945,9 @@ const frontendHTML = `<!DOCTYPE html>
       const lastSel = React.useRef(null);                   // for Shift+Click range selection
       const svgRef = React.useRef(null);
       const [box, setBox] = useState(null);                 // rubber-band selection box (SVG coords)
-      const suppressClick = React.useRef(false);            // ignore the click that ends a box-drag
+      const [lasso, setLasso] = useState(false);            // freeform lasso selection mode (vs rubber-band box)
+      const [lassoPath, setLassoPath] = useState(null);     // array of [x,y] SVG points traced while dragging the lasso
+      const suppressClick = React.useRef(false);            // ignore the click that ends a box/lasso drag
       const clip = React.useRef(null);                      // copied compartment properties (Copy/Paste)
       // commit a new sections state → push to history + notify parent (auto-updates all views/BOQ/CNC/3D)
       const commit = (newSecs, label) => {
@@ -12043,6 +12045,7 @@ const frontendHTML = `<!DOCTYPE html>
       const onMove = (e) => {
         const d = dragRef.current; if (!d) return;
         if (d.kind === "box") { const p = toSvg(e); d.moved = true; d.x1 = p.x; d.y1 = p.y; setBox({ x: Math.min(d.x0, p.x), y: Math.min(d.y0, p.y), w: Math.abs(p.x - d.x0), h: Math.abs(p.y - d.y0), cross: p.x < d.x0 }); return; }
+        if (d.kind === "lasso") { const p = toSvg(e); d.moved = true; const last = d.pts[d.pts.length - 1]; if (!last || Math.abs(last[0] - p.x) + Math.abs(last[1] - p.y) > 2) { d.pts.push([p.x, p.y]); setLassoPath(d.pts.slice()); } return; }
         if (d.kind === "sect") {
           const dxMM = Math.round((e.clientX - d.x) / scale / 5) * 5; if (!dxMM) return;
           setSecs((prev) => { const n = JSON.parse(JSON.stringify(prev)); const L = n[d.i], R = n[d.i + 1]; if (!L || !R) return prev; const nLw = L.width + dxMM, nRw = R.width - dxMM; if (nLw < 500 || nRw < 500) return prev; rescaleCols(L, nLw); R.x = L.x + L.width; rescaleCols(R, nRw); setTip({ x: e.clientX, y: e.clientY, text: L.width + " / " + R.width + " mm" }); return n; });
@@ -12059,6 +12062,7 @@ const frontendHTML = `<!DOCTYPE html>
       };
       const endDrag = () => { const d = dragRef.current; dragRef.current = null; setTip(null);
         if (d && d.kind === "box") { if (d.moved && d.x1 != null) { suppressClick.current = true; selectByBox({ x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1), w: Math.abs(d.x1 - d.x0), h: Math.abs(d.y1 - d.y0), cross: d.x1 < d.x0 }); } setBox(null); return; }
+        if (d && d.kind === "lasso") { if (d.moved && d.pts.length >= 3) { suppressClick.current = true; selectByLasso(d.pts); } setLassoPath(null); return; }
         if (d) commit(secs, d.kind === "col" ? "Resize columns" : d.kind === "sect" ? "Resize sections" : "Resize compartment"); };
       const startCell = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "cell", si, ci, k, y: e.clientY }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
       const startCol = (e, si, ci) => { e.preventDefault(); e.stopPropagation(); dragRef.current = { kind: "col", si, ci, x: e.clientX }; try { e.target.setPointerCapture(e.pointerId); } catch (z) {} };
@@ -12066,7 +12070,21 @@ const frontendHTML = `<!DOCTYPE html>
       // rubber-band (drag-a-box) selection — only in Select mode; drag L→R = window (fully enclosed),
       // R→L = crossing (any touching), matching AutoCAD/CAD convention.
       const toSvg = (e) => { const r = svgRef.current && svgRef.current.getBoundingClientRect(); if (!r || !r.width) return { x: 0, y: 0 }; return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H }; };
-      const onDown = (e) => { if (!mergeMode || (e.button != null && e.button !== 0)) return; const p = toSvg(e); dragRef.current = { kind: "box", x0: p.x, y0: p.y, moved: false }; setBox({ x: p.x, y: p.y, w: 0, h: 0, cross: false }); };
+      const onDown = (e) => { if (!mergeMode || (e.button != null && e.button !== 0)) return; const p = toSvg(e); if (lasso) { dragRef.current = { kind: "lasso", pts: [[p.x, p.y]], moved: false }; setLassoPath([[p.x, p.y]]); return; } dragRef.current = { kind: "box", x0: p.x, y0: p.y, moved: false }; setBox({ x: p.x, y: p.y, w: 0, h: 0, cross: false }); };
+      // point-in-polygon (ray casting) — selects a cell when its CENTRE falls inside the freeform lasso.
+      const pointInPoly = (x, y, pts) => { let inside = false; for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) { const xi = pts[i][0], yi = pts[i][1], xj = pts[j][0], yj = pts[j][1]; if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside; } return inside; };
+      const selectByLasso = (pts) => {
+        if (!pts || pts.length < 3) return; const keys = [];
+        secs.forEach((sec, si) => sec.columns.forEach((col, ci) => {
+          const cx = xOf(col.x); let yb = floorY;
+          col.cells.forEach((cell, k) => {
+            const ch = cell.hMM * scale, yt = yb - ch;
+            if (!cell.covered) { const cw = spanWmm(sec.columns, ci, cell) * scale; if (pointInPoly(cx + cw / 2, (yt + yb) / 2, pts)) keys.push(si + "-" + ci + "-" + k); }
+            yb = yt;
+          });
+        }));
+        setMsel(keys); setMmsg(keys.length ? "" : "Nothing inside the lasso.");
+      };
       const selectByBox = (b) => {
         if (!b) return; const bx1 = b.x, by1 = b.y, bx2 = b.x + b.w, by2 = b.y + b.h, cross = b.cross; const keys = [];
         secs.forEach((sec, si) => sec.columns.forEach((col, ci) => {
@@ -12154,6 +12172,7 @@ const frontendHTML = `<!DOCTYPE html>
       if (!mergeMode) for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); els.push(<rect key={"sdh" + i} x={dx - 5} y={usableTopY} width={10} height={floorY - usableTopY} fill="rgba(71,85,105,0.001)" style={{ cursor: "ew-resize" }} onPointerDown={(e) => startSect(e, i)} />); }
       else for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); }
       if (box) els.push(<rect key="selbox" x={box.x} y={box.y} width={box.w} height={box.h} fill={box.cross ? "rgba(34,197,94,0.14)" : "rgba(59,130,246,0.14)"} stroke={box.cross ? "#16a34a" : "#2563eb"} strokeWidth="1" strokeDasharray={box.cross ? "5 3" : "0"} style={{ pointerEvents: "none" }} />);
+      if (lassoPath && lassoPath.length > 1) els.push(<polygon key="lassopath" points={lassoPath.map((q) => q[0].toFixed(1) + "," + q[1].toFixed(1)).join(" ")} fill="rgba(139,92,246,0.12)" stroke="#7c3aed" strokeWidth="1.2" strokeDasharray="4 3" style={{ pointerEvents: "none" }} />);
       const mCol = menu && secs[menu.si] && secs[menu.si].columns[menu.ci];
       const mLocked = mCol && mCol.cells[menu.k] && mCol.cells[menu.k].locked;
       const mi = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
@@ -12163,7 +12182,8 @@ const frontendHTML = `<!DOCTYPE html>
           <button onClick={redo} disabled={history.ptr >= history.list.length - 1} title="Redo (Ctrl+Y)" className={"px-2 py-0.5 rounded border text-[11px] " + (history.ptr >= history.list.length - 1 ? "bg-slate-100 text-slate-300 border-slate-200" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50")}>↷ Redo</button>
           <button onClick={() => setShowHist((v) => !v)} title="History timeline" className="px-2 py-0.5 rounded border bg-white text-slate-700 border-slate-300 text-[11px] hover:bg-slate-50">🕘 History {history.ptr + 1}/{history.list.length}</button>
           <span className="inline-block w-px h-4 bg-slate-200 mx-0.5" />
-          <button onClick={() => { setMergeMode((v) => !v); setMsel([]); setMmsg(""); }} className={"px-2 py-0.5 rounded border text-[11px] font-medium " + (mergeMode ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-700 border-indigo-300")}>{mergeMode ? "✓ Selecting" : "⧉ Select"}</button>
+          <button onClick={() => { setMergeMode((v) => !v); setLasso(false); setLassoPath(null); setMsel([]); setMmsg(""); }} className={"px-2 py-0.5 rounded border text-[11px] font-medium " + (mergeMode ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-700 border-indigo-300")}>{mergeMode ? "✓ Selecting" : "⧉ Select"}</button>
+          {mergeMode && (<button onClick={() => { setLasso((v) => !v); setLassoPath(null); setMmsg(""); }} title="Freeform lasso — drag to draw a shape; compartments inside it are selected" className={"px-2 py-0.5 rounded border text-[11px] font-medium " + (lasso ? "bg-violet-600 text-white border-violet-600" : "bg-white text-violet-700 border-violet-300")}>{lasso ? "✓ Lasso" : "◌ Lasso"}</button>)}
           {mergeMode && (<React.Fragment>
             <button onClick={mergeSelected} disabled={msel.length < 2} className={"px-2 py-0.5 rounded text-[11px] font-medium " + (msel.length < 2 ? "bg-slate-200 text-slate-400" : "bg-emerald-600 text-white")}>⊞ Merge {msel.length}</button>
             <select value="" onChange={(e) => { if (e.target.value) batch("convert", e.target.value); e.target.value = ""; }} disabled={!msel.length} className="px-1 py-0.5 rounded border border-slate-300 text-[11px] bg-white text-slate-700 disabled:text-slate-300"><option value="">Convert →</option>{CONVERT_KINDS.map((c) => <option key={c.kind} value={c.kind}>{c.label}</option>)}</select>
@@ -12176,7 +12196,7 @@ const frontendHTML = `<!DOCTYPE html>
             <button onClick={() => selectKind((k) => k === "shelf" || k === "handbag" || k === "kidsShelf")} className="px-1.5 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[10px]">Shelves</button>
             <button onClick={() => selectKind((k) => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga")} className="px-1.5 py-0.5 rounded border bg-white border-slate-300 text-slate-600 text-[10px]">Hanging</button>
           </React.Fragment>)}
-          {mmsg ? <span className="text-[11px] text-rose-600">{mmsg}</span> : (mergeMode && <span className="text-[11px] text-slate-500">Click · Shift+Click range · or drag a box (drag → = enclose, ← = touch) · then Merge / Convert / Delete · Ctrl+Z undo.</span>)}
+          {mmsg ? <span className="text-[11px] text-rose-600">{mmsg}</span> : (mergeMode && <span className="text-[11px] text-slate-500">{lasso ? "Lasso: drag to draw a freeform shape — every compartment whose centre falls inside it is selected." : "Click · Shift+Click range · drag a box (drag → = enclose, ← = touch) · or ◌ Lasso freeform · then Merge / Convert / Delete · Ctrl+Z undo."}</span>)}
         </div>
         {showHist && (<div className="absolute z-40 bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] max-h-64 overflow-auto" style={{ top: 28, left: 0, minWidth: 220 }}>
           <div className="px-3 py-1 text-slate-400 border-b border-slate-100 sticky top-0 bg-white">History — click any step to restore</div>
