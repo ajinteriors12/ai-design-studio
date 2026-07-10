@@ -12132,6 +12132,27 @@ const frontendHTML = `<!DOCTYPE html>
         return () => window.removeEventListener("keydown", onKey);
       }, [history]);
       const CONVERT_KINDS = WARD_CONVERTS.concat([{ kind: "jewellery", label: "Jewellery", color: "#f59e0b" }, { kind: "cosmetics", label: "Cosmetics", color: "#fb7185" }, { kind: "hanging", label: "Hanging", color: "#3b82f6" }]);
+      // §4 accessories that can be inserted at the exact right-click height. kind = the underlying
+      // renderable wardrobe compartment kind; h = per-cell height (mm); n = stacked cells (drawer banks).
+      const WARD_INSERTS = [
+        { arg: "shelf", label: "Shelf", kind: "shelf", color: "#22c55e", h: 250 },
+        { arg: "shelfAdj", label: "Adjustable Shelf", kind: "shelf", color: "#22c55e", h: 250 },
+        { arg: "shelfFixed", label: "Fixed Shelf", kind: "shelf", color: "#16a34a", h: 250 },
+        { arg: "shelfGlass", label: "Glass Shelf", kind: "shelf", color: "#38bdf8", h: 220 },
+        { arg: "niche", label: "Open Niche", kind: "shelf", color: "#94a3b8", h: 300 },
+        { arg: "drawer", label: "Single Drawer", kind: "drawer", color: "#ec4899", h: 200 },
+        { arg: "drawer2", label: "Double Drawer", kind: "drawer", color: "#ec4899", h: 190, n: 2 },
+        { arg: "drawer3", label: "Triple Drawer", kind: "drawer", color: "#ec4899", h: 180, n: 3 },
+        { arg: "longHang", label: "Long Hanging", kind: "longHang", color: "#3b82f6", h: 1050 },
+        { arg: "shortHang", label: "Short Hanging", kind: "shortHang", color: "#60a5fa", h: 900 },
+        { arg: "pantRack", label: "Trouser Rack", kind: "pantRack", color: "#8b5cf6", h: 150 },
+        { arg: "shoe", label: "Shoe Rack", kind: "shoe", color: "#a16207", h: 180 },
+        { arg: "jewellery", label: "Jewellery Tray", kind: "jewellery", color: "#f59e0b", h: 90 },
+        { arg: "safe", label: "Safe Locker", kind: "safe", color: "#b91c1c", h: 300 },
+        { arg: "basket", label: "Pull-out Basket", kind: "drawer", color: "#db2777", h: 200 },
+        { arg: "laundry", label: "Laundry Basket", kind: "drawer", color: "#6366f1", h: 350 },
+        { arg: "custom", label: "Custom Accessory", kind: "shelf", color: "#94a3b8", h: 250 },
+      ];
       const spanWmm = (cols, ci, cell) => { const nn = Math.max(1, Math.round((cell && cell.span) || 1)); let w = 0; for (let j = 0; j < nn && ci + j < cols.length; j++) w += cols[ci + j].w; return w; };
       const toggleSel = (si, ci, k, e) => {
         const key = si + "-" + ci + "-" + k; setMmsg("");
@@ -12263,6 +12284,34 @@ const frontendHTML = `<!DOCTYPE html>
         }));
         setMsel(keys); setMmsg(keys.length ? "" : "Nothing inside the box.");
       };
+      // EXACT-POSITION insert (spec): split the clicked compartment (si,ci,k) at the clicked height
+      // (clickMM, mm from the wardrobe floor, snapped to 5 mm) so the new accessory's bottom lands
+      // exactly where the user right-clicked, INSIDE that same compartment. Commits itself (one undo step).
+      const insertAt = (si, ci, k, clickMM, arg) => {
+        const n = JSON.parse(JSON.stringify(secs)); const sec = n[si]; if (!sec) return; const col = sec.columns[ci]; if (!col) return; const cells = col.cells, cur = cells[k];
+        if (!cur || cur.covered) return;
+        const ins = WARD_INSERTS.find((x) => x.arg === arg) || { arg: arg, label: String(arg), kind: (CONVERT_KINDS.find((c) => c.kind === arg) || {}).kind || arg, color: "#94a3b8", h: 250 };
+        const cnt = Math.max(1, ins.n || 1), nh = cnt * ins.h;
+        if (cur.hMM < nh + 40) { setMmsg("Only " + Math.round(cur.hMM) + " mm here — " + ins.label + " needs " + (nh + 40) + " mm. Pick a taller compartment or a smaller accessory."); return; }
+        let cellBottom = 0; for (let j = 0; j < k; j++) cellBottom += cells[j].hMM;   // this compartment's floor height (mm)
+        const want = (clickMM != null ? clickMM : cellBottom + cur.hMM / 2) - cellBottom;   // desired component-bottom offset within the cell
+        let below = Math.max(0, Math.min(Math.round(want / 5) * 5, cur.hMM - nh));
+        let above = cur.hMM - below - nh;
+        if (below < 40) below = 0;      // no sliver compartments — fold tiny remainders into the block
+        if (above < 40) above = 0;
+        const compTotal = cur.hMM - below - above, each = Math.round(compTotal / cnt), made = [];
+        for (let i = 0; i < cnt; i++) made.push({ kind: ins.kind, label: ins.label, color: ins.color, hMM: i === cnt - 1 ? compTotal - each * (cnt - 1) : each });
+        const parts = [];
+        if (below > 0) parts.push({ kind: cur.kind, label: cur.label, color: cur.color, hMM: below });
+        parts.push(...made);
+        if (above > 0) parts.push({ kind: cur.kind, label: cur.label, color: cur.color, hMM: above });
+        if (cur.locked) parts.forEach((p) => p.locked = true);
+        cells.splice(k, 1, ...parts);
+        commit(n, "Insert " + ins.label + " at " + (cellBottom + below) + " mm" + (sec.label ? " · " + sec.label : ""));
+      };
+      // dev test-hook (matches the file's window.__ads* pattern) — lets headless tests drive the exact
+      // insert since React onContextMenu on SVG cells can't be fired by a dispatched event.
+      React.useEffect(() => { try { window.__adsWardInsertAt = insertAt; window.__adsWardSecs = () => JSON.parse(JSON.stringify(secs)); } catch (z) {} });
       const op = (kind, arg) => {
         if (!menu) return;
         const n = JSON.parse(JSON.stringify(secs)); const sec = n[menu.si], col = sec.columns[menu.ci], cells = col.cells, k = menu.k;
@@ -12291,7 +12340,7 @@ const frontendHTML = `<!DOCTYPE html>
         else if (kind === "dup") { const c = cells[k]; if (c.hMM < 120) { setMenu(null); return; } const half = Math.round(c.hMM / 2); c.hMM = c.hMM - half; const cp = { kind: c.kind, label: c.label, color: c.color, hMM: half }; if (c.locked) cp.locked = true; cells.splice(k + 1, 0, cp); }
         else if (kind === "copyProps") { const c = cells[k]; clip.current = { kind: c.kind, label: c.label, color: c.color }; setMenu(null); return; }   // copy only — no commit
         else if (kind === "pasteProps") { if (!clip.current) { setMenu(null); return; } cells[k].kind = clip.current.kind; cells[k].label = clip.current.label; cells[k].color = clip.current.color; }
-        else if (kind === "insert") { const cv = CONVERT_KINDS.find((c) => c.kind === arg) || { kind: arg, label: String(arg), color: "#94a3b8" }; const take = Math.min(cells[k].hMM - 60, arg === "drawer" ? 200 : 300); if (take < 60) { setMenu(null); return; } cells[k].hMM -= take; cells.splice(k + 1, 0, { kind: cv.kind, label: cv.label, color: cv.color, hMM: take }); }
+        else if (kind === "insert") { insertAt(menu.si, menu.ci, menu.k, menu.clickMM, arg); setMenu(null); return; }   // exact-position insert commits itself
         else if (kind === "splitV") {   // split one compartment into N stacked compartments of the same kind
           const N = Math.max(2, Math.min(6, +arg || 2)), cur = cells[k];
           if (cur.span > 1) { const mid = cur.mergeId; delete cur.span; delete cur.mergeId; if (mid != null) for (const cc of sec.columns) for (const cl of (cc.cells || [])) if (cl.mergeId === mid) { delete cl.covered; delete cl.mergeId; } }
@@ -12308,7 +12357,9 @@ const frontendHTML = `<!DOCTYPE html>
         const LBL = { convert: "Convert → " + arg, add: "Add " + arg, insert: "Insert " + arg, dup: "Duplicate compartment", pasteProps: "Paste properties", delete: "Delete compartment", inc: "Resize +50", dec: "Resize −50", equal: "Equal-divide column", split: "Split column", splitColN: "Split column into " + arg, splitV: "Split into " + arg, merge: "Merge column", unmerge: "Unmerge compartment", reassign: "Move column → " + arg, lock: "Lock", unlock: "Unlock" };
         commit(n, LBL[kind] || "Edit"); setMenu(null);
       };
-      const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, si, ci, k }); };
+      // Capture the EXACT clicked height (mm from the wardrobe floor) so an Insert lands where the user
+      // right-clicked — not at a default position. The saved clickMM is used later, not the live cursor.
+      const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); const sp = toSvg(e); const clickMM = Math.max(0, Math.round((floorY - sp.y) / scale)); setMenu({ x: e.clientX, y: e.clientY, si, ci, k, clickMM }); };
       const els = [];
       secs.forEach((sec, si) => { const sx = xOf(sec.x), sw = sec.width * scale; const tint = sec.kind === "male" ? "#eff6ff" : sec.kind === "female" ? "#fdf2f8" : "#fefce8"; const hc = sec.kind === "male" ? "#2563eb" : sec.kind === "female" ? "#db2777" : "#ca8a04"; els.push(<rect key={"st" + si} x={sx} y={y0} width={sw} height={hpx} fill={tint} />); els.push(<text key={"sh" + si} x={sx + sw / 2} y={y0 - 8} fill={hc} fontSize="11" fontWeight="700" textAnchor="middle">{sec.label}</text>); });
       if (opt.hasLoft) { els.push(<rect key="loft" x={x0} y={y0} width={wpx} height={loftPx} fill="#fcd34d55" stroke="#a16207" strokeWidth="0.8" />); els.push(<text key="loftt" x={x0 + wpx / 2} y={y0 + loftPx / 2 + 3} fill="#a16207" fontSize="9" fontWeight="600" textAnchor="middle">{"LOFT " + opt.loftH + " mm"}</text>); }
@@ -12336,6 +12387,19 @@ const frontendHTML = `<!DOCTYPE html>
       else for (let i = 0; i < secs.length - 1; i++) { const dx = xOf(secs[i].x + secs[i].width); els.push(<line key={"sd" + i} x1={dx} y1={y0} x2={dx} y2={floorY} stroke="#475569" strokeWidth="1.6" style={{ pointerEvents: "none" }} />); }
       if (box) els.push(<rect key="selbox" x={box.x} y={box.y} width={box.w} height={box.h} fill={box.cross ? "rgba(34,197,94,0.14)" : "rgba(59,130,246,0.14)"} stroke={box.cross ? "#16a34a" : "#2563eb"} strokeWidth="1" strokeDasharray={box.cross ? "5 3" : "0"} style={{ pointerEvents: "none" }} />);
       if (lassoPath && lassoPath.length > 1) els.push(<polygon key="lassopath" points={lassoPath.map((q) => q[0].toFixed(1) + "," + q[1].toFixed(1)).join(" ")} fill="rgba(139,92,246,0.12)" stroke="#7c3aed" strokeWidth="1.2" strokeDasharray="4 3" style={{ pointerEvents: "none" }} />);
+      // §1 insert target: while the context menu is open, highlight the clicked compartment + draw a red
+      // insertion line at the exact clicked height so the user sees where the accessory will land.
+      if (menu && menu.clickMM != null && secs[menu.si] && secs[menu.si].columns[menu.ci]) {
+        const tcol = secs[menu.si].columns[menu.ci], tcell = tcol.cells[menu.k];
+        if (tcell && !tcell.covered) {
+          const tcx = xOf(tcol.x), tcw = spanWmm(secs[menu.si].columns, menu.ci, tcell) * scale;
+          let yb = floorY; for (let j = 0; j < menu.k; j++) yb -= tcol.cells[j].hMM * scale; const yt = yb - tcell.hMM * scale;
+          const ly = Math.max(yt, Math.min(yb, floorY - menu.clickMM * scale));
+          els.push(<rect key="instgt" x={tcx} y={yt} width={tcw} height={yb - yt} fill="rgba(225,29,72,0.10)" stroke="#e11d48" strokeWidth="1.2" strokeDasharray="4 3" pointerEvents="none" />);
+          els.push(<line key="insline" x1={tcx} y1={ly} x2={tcx + tcw} y2={ly} stroke="#e11d48" strokeWidth="2" pointerEvents="none" />);
+          els.push(<text key="inslbl" x={tcx + 3} y={ly - 2.5} fill="#e11d48" fontSize="8" fontWeight="700" pointerEvents="none">{menu.clickMM + " mm"}</text>);
+        }
+      }
       const mCol = menu && secs[menu.si] && secs[menu.si].columns[menu.ci];
       const mLocked = mCol && mCol.cells[menu.k] && mCol.cells[menu.k].locked;
       const mi = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
@@ -12373,8 +12437,8 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="px-3 py-1 text-slate-500">🔒 Locked section</div>
               {mi("🔓 Unlock section", () => op("unlock"))}
             </React.Fragment>) : (<React.Fragment>
-              <div className="px-3 py-0.5 text-slate-400">Insert below…</div>
-              {[["drawer", "Drawer"], ["shelf", "Shelf"], ["longHang", "Hanging"], ["shoe", "Shoe Rack"], ["jewellery", "Jewellery"], ["safe", "Safe"]].map((t) => mi("+ " + t[1], () => op("insert", t[0])))}
+              <div className="px-3 py-0.5 text-rose-500 font-semibold">Insert here{menu.clickMM != null ? " · " + menu.clickMM + " mm" : ""}…</div>
+              {WARD_INSERTS.map((t) => mi("+ " + t.label, () => op("insert", t.arg)))}
               {mi("⧉ Duplicate", () => op("dup"))}
               {mi("🗑 Delete", () => op("delete"))}
               <div className="border-t border-slate-100 my-1" />
