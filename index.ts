@@ -6701,6 +6701,10 @@ const frontendHTML = `<!DOCTYPE html>
       const [base, setBase] = useState(initBase);
       const [wallC, setWallC2] = useState(initWall);   // wall cabinets (now editable too)
       const [sel, setSel] = useState(null);     // {row:'base'|'wall', i}
+      const [msel, setMsel] = useState([]);      // §7 multi-select: keys "row:i" (Shift/Ctrl-click) for batch align/clipboard/mirror
+      const mkey = (row, i) => row + ":" + i;
+      const inMsel = (row, i) => msel.indexOf(mkey(row, i)) >= 0;
+      const toggleMsel = (row, i) => setMsel((p) => { const k = mkey(row, i); return p.indexOf(k) >= 0 ? p.filter((x) => x !== k) : p.concat([k]); });
       const [menu, setMenu] = useState(null);    // {x,y,row,i}
       const [msg, setMsg] = useState("");
       const [drag, setDrag] = useState(null);    // {row,i,mode,x0,y0,w0,h0,sill0}
@@ -6724,7 +6728,7 @@ const frontendHTML = `<!DOCTYPE html>
       useEffect(() => {
         const incoming = cabSig(run.base) + "||" + cabSig(run.wallCabs);
         if (incoming === sentSigRef.current) return;   // our own echo → keep local state, no re-seed
-        editedRef.current = false; setBase(initBase()); setWallC2(initWall()); setSel(null); setMenu(null); setMsg("");
+        editedRef.current = false; setBase(initBase()); setWallC2(initWall()); setSel(null); setMsel([]); setMenu(null); setMsg("");
       }, [run]);
       // §7.9 cross-view propagation: lift edits to the shared room model (record what we sent so the
       // re-seed effect can recognise — and ignore — the echo it produces).
@@ -6921,6 +6925,52 @@ const frontendHTML = `<!DOCTYPE html>
         else if (op === "cosmetic") { setMsg(arg + " applied (material/finish/colour/LED reflect in the production build)."); }
         setMenu(null);
       };
+      // §7 batch ops over the multi-selection (msel) — align/equalize widths, mirror, clipboard copy/paste,
+      // lock/unlock, delete. Operates per row (base vs wall) so mixed selections stay valid.
+      const mact = (op) => {
+        if (!msel.length) { setMsg("Shift/Ctrl-click cabinets to multi-select first."); return; }
+        editedRef.current = true;
+        const byRow = { base: [], wall: [] };
+        msel.forEach((k) => { const p = k.split(":"); if (byRow[p[0]]) byRow[p[0]].push(+p[1]); });
+        byRow.base.sort((a, b) => a - b); byRow.wall.sort((a, b) => a - b);
+        const rows = ["base", "wall"];
+        if (op === "copy") {
+          const cabs = []; rows.forEach((r) => byRow[r].forEach((ii) => { const c = rowArr(r)[ii]; if (c) cabs.push({ ...c, groupId: null, x: 0 }); }));
+          try { window.__adsCabClip = cabs.map((c) => ({ ...c })); } catch (z) {}
+          setMsg("Copied " + cabs.length + " cabinet(s) — Paste into any run."); return;
+        }
+        if (op === "paste") {
+          let clip = []; try { clip = (window.__adsCabClip || []).map((c) => ({ ...c, x: 0, groupId: null })); } catch (z) {}
+          if (!clip.length) { setMsg("Clipboard empty — Copy cabinets first."); return; }
+          const row = (sel && sel.row) || (byRow.wall.length && !byRow.base.length ? "wall" : "base");
+          const arr = rowArr(row).slice(); const idxs = byRow[row]; const at = idxs.length ? Math.max.apply(null, idxs) + 1 : arr.length;
+          arr.splice(at, 0, ...clip); setRow(row, reflow(arr)); setMsel([]); setSel(null);
+          setMsg("Pasted " + clip.length + " cabinet(s) into the " + row + " row."); return;
+        }
+        if (op === "equal" || op === "widest" || op === "narrowest") {
+          let touched = 0;
+          rows.forEach((r) => {
+            const idxs = byRow[r].filter((ii) => { const c = rowArr(r)[ii]; return c && !c.locked && c.kind !== "sidepanel" && c.kind !== "chimney"; });
+            if (!idxs.length) return;
+            const ws = idxs.map((ii) => rowArr(r)[ii].w);
+            const target = Math.round(op === "equal" ? ws.reduce((s, x) => s + x, 0) / ws.length : op === "widest" ? Math.max.apply(null, ws) : Math.min.apply(null, ws));
+            const a2 = rowArr(r).slice(); idxs.forEach((ii) => { a2[ii] = { ...a2[ii], w: Math.max(40, target) }; touched++; }); setRow(r, reflow(a2));
+          });
+          setMsg(touched ? (op === "equal" ? "Equalized widths across " + touched + " cabinet(s) (average — run length kept)." : op === "widest" ? "Matched " + touched + " cabinet(s) to the widest." : "Matched " + touched + " cabinet(s) to the narrowest.") : "Nothing to align (locked / fixed only)."); return;
+        }
+        if (op === "lock" || op === "unlock") {
+          rows.forEach((r) => { if (!byRow[r].length) return; const a2 = rowArr(r).slice(); byRow[r].forEach((ii) => { if (a2[ii]) a2[ii] = { ...a2[ii], locked: op === "lock" }; }); setRow(r, a2); });
+          setMsg((op === "lock" ? "Locked " : "Unlocked ") + msel.length + " cabinet(s)."); return;
+        }
+        if (op === "delete") {
+          let n = 0; rows.forEach((r) => { if (!byRow[r].length) return; const a2 = rowArr(r).slice(); byRow[r].slice().sort((a, b) => b - a).forEach((ii) => { if (a2.length > 1 && a2[ii]) { a2.splice(ii, 1); n++; } }); setRow(r, reflow(a2)); });
+          setMsel([]); setSel(null); setMsg("Deleted " + n + " cabinet(s) (gaps closed; wall length may shorten)."); return;
+        }
+        if (op === "mirror") {
+          rows.forEach((r) => { const idxs = byRow[r]; if (idxs.length < 2) return; const a2 = rowArr(r).slice(); const picked = idxs.map((ii) => a2[ii]).reverse(); idxs.forEach((ii, k) => { a2[ii] = picked[k]; }); setRow(r, reflow(a2)); });
+          setMsg("Mirrored the selected cabinets' order."); return;
+        }
+      };
       const rebalance = () => {
         editedRef.current = true;
         const fixed = ["drawer3", "drawer-atta", "sink", "hob", "dishwasher", "fridge", "tall-fridge", "tall-pantry", "tall-hiunit", "tall-utility", "drawer"];
@@ -7026,7 +7076,7 @@ const frontendHTML = `<!DOCTYPE html>
       const drawnBase = reflow(base), drawnWall = reflow(wallC);
       // shared cabinet renderer (base + wall), with selection handles + grips
       const renderCab = (row, c, i) => {
-        const b = yBand(row, c), x = cabX(c), w = cabW(c), y = b.yTop, h = b.yBot - b.yTop, selected = selOf(row, i);
+        const b = yBand(row, c), x = cabX(c), w = cabW(c), y = b.yTop, h = b.yBot - b.yTop, selected = selOf(row, i), multi = inMsel(row, i);
         // Keep a label inside its own cabinet — when the text would be wider than the cabinet, compress it
         // with SVG textLength so it never spills onto the neighbour (user-reported overlap).
         const fit = (label, fs, avail) => ((String(label || "").length * fs * 0.56 > avail - 4) ? { textLength: Math.max(8, avail - 4), lengthAdjust: "spacingAndGlyphs" } : {});
@@ -7034,8 +7084,8 @@ const frontendHTML = `<!DOCTYPE html>
         const glass = row === "wall" && (c.kind === "glass-wall" || c.kind === "display" || c.kind === "gtpt");  // 5.9.9
         const cellFill = glass ? "url(#glassGrad)" : fillOf(row, c.kind);
         const body = isChim
-          ? <polygon points={x + "," + b.yBot + " " + (x + w) + "," + b.yBot + " " + (x + w * 0.7) + "," + y + " " + (x + w * 0.3) + "," + y} fill="#e0e7ff" stroke={selected ? "#ea580c" : "#a5b4fc"} strokeWidth={selected ? 2.4 : 1} style={{ cursor: "move" }} onPointerDown={(e) => onDown(e, row, i, "move")} onClick={(e) => { e.stopPropagation(); setSel({ row, i }); setMenu(null); }} onDoubleClick={(e) => { e.stopPropagation(); setProp({ row, i }); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSel({ row, i }); setMenu({ x: e.clientX, y: e.clientY, row, i }); }} />
-          : <rect x={x} y={y} width={w - 1} height={h} fill={cellFill} fillOpacity={glass ? 0.82 : 1} stroke={selected ? "#ea580c" : glass ? "#9aa0a6" : "#2f74d0"} strokeWidth={selected ? 2.4 : 1} style={{ cursor: "move" }} onPointerDown={(e) => onDown(e, row, i, "move")} onClick={(e) => { e.stopPropagation(); setSel({ row, i }); setMenu(null); }} onDoubleClick={(e) => { e.stopPropagation(); setProp({ row, i }); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSel({ row, i }); setMenu({ x: e.clientX, y: e.clientY, row, i }); }} />;
+          ? <polygon points={x + "," + b.yBot + " " + (x + w) + "," + b.yBot + " " + (x + w * 0.7) + "," + y + " " + (x + w * 0.3) + "," + y} fill="#e0e7ff" stroke={selected ? "#ea580c" : "#a5b4fc"} strokeWidth={selected ? 2.4 : 1} style={{ cursor: "move" }} onPointerDown={(e) => onDown(e, row, i, "move")} onClick={(e) => { e.stopPropagation(); setMenu(null); if (e.shiftKey || e.ctrlKey || e.metaKey) { toggleMsel(row, i); setSel({ row, i }); } else { setSel({ row, i }); setMsel([]); } }} onDoubleClick={(e) => { e.stopPropagation(); setProp({ row, i }); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSel({ row, i }); setMenu({ x: e.clientX, y: e.clientY, row, i }); }} />
+          : <rect x={x} y={y} width={w - 1} height={h} fill={cellFill} fillOpacity={glass ? 0.82 : 1} stroke={selected ? "#ea580c" : glass ? "#9aa0a6" : "#2f74d0"} strokeWidth={selected ? 2.4 : 1} style={{ cursor: "move" }} onPointerDown={(e) => onDown(e, row, i, "move")} onClick={(e) => { e.stopPropagation(); setMenu(null); if (e.shiftKey || e.ctrlKey || e.metaKey) { toggleMsel(row, i); setSel({ row, i }); } else { setSel({ row, i }); setMsel([]); } }} onDoubleClick={(e) => { e.stopPropagation(); setProp({ row, i }); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSel({ row, i }); setMenu({ x: e.clientX, y: e.clientY, row, i }); }} />;
         const shelves = c.shelves != null ? c.shelves : (row === "wall" && (c.kind === "glass-wall" || c.kind === "open-shelf" || c.kind === "wall" || c.kind === "display") ? 2 : 0);
         const isCorner = c.kind === "corner";
         const badgeW = Math.min(w - 4, Math.max(48, (c.label || "").length * 5.4));
@@ -7044,8 +7094,9 @@ const frontendHTML = `<!DOCTYPE html>
           : (c.label || "").includes("Blind") ? { fill: "#d97706", stroke: "#92400e" }
           : { fill: "#e11d48", stroke: "#9f1239" };
         return (
-          <g key={row + i} data-kind={c.kind} data-row={row} data-group={c.groupId || ""}>
+          <g key={row + i} data-kind={c.kind} data-row={row} data-group={c.groupId || ""} data-msel={multi ? "1" : ""}>
             {body}
+            {multi && <rect x={x} y={y} width={w - 1} height={h} fill="rgba(79,70,229,0.22)" stroke="#4338ca" strokeWidth="1.8" pointerEvents="none" />}
             {c.groupId && <rect x={x + 0.5} y={y + 0.5} width={w - 1} height={3} fill={"hsl(" + ((parseInt(String(c.groupId).slice(1), 10) * 67) % 360) + ",72%,52%)"} pointerEvents="none" />}
             {c.drawers > 0 && drawerBandsC(c).map((f, d) => <line key={d} x1={x} y1={y + h * f} x2={x + w - 1} y2={y + h * f} stroke="#2f74d0" strokeWidth="0.5" pointerEvents="none" />)}
             {shelves > 0 && Array.from({ length: shelves }, (_, k) => <line key={"s" + k} x1={x + 1} y1={y + h * (k + 1) / (shelves + 1)} x2={x + w - 2} y2={y + h * (k + 1) / (shelves + 1)} stroke="#94a3b8" strokeWidth="0.4" pointerEvents="none" />)}
@@ -7102,8 +7153,25 @@ const frontendHTML = `<!DOCTYPE html>
       const totalPx = totalW * S, svgW = Math.max(W, totalPx) + (showDims ? 120 : 4);
       const sel0 = sel ? rowArr(sel.row)[sel.i] : null;   // 5.9.16 live cabinet summary
       return (
-        <div className="relative" ref={rootRef} tabIndex={0} onKeyDown={onRootKey} style={{ outline: "none" }} onClick={() => { setMenu(null); setSel(null); }}>
-          <div className="text-xs font-semibold text-cyan-600 mb-1 uppercase tracking-wide">Elevation — {label} <span className="text-slate-400 font-normal normal-case">· every base AND wall cabinet is editable: click, drag edge/height grips, drag body to reorder, right-click for options</span></div>
+        <div className="relative" ref={rootRef} tabIndex={0} onKeyDown={onRootKey} style={{ outline: "none" }} onClick={() => { setMenu(null); setSel(null); setMsel([]); }}>
+          <div className="text-xs font-semibold text-cyan-600 mb-1 uppercase tracking-wide">Elevation — {label} <span className="text-slate-400 font-normal normal-case">· every base AND wall cabinet is editable: click, drag edge/height grips, drag body to reorder, right-click for options · Shift/Ctrl-click to multi-select</span></div>
+          {msel.length > 0 && (
+            <div onClick={(e) => e.stopPropagation()} className="flex flex-wrap items-center gap-1 mb-1 p-1.5 rounded-lg bg-indigo-50 border border-indigo-200 text-[11px]">
+              <span className="font-semibold text-indigo-700">{msel.length} selected</span>
+              <span className="text-slate-400 ml-1">Align widths:</span>
+              <button onClick={() => mact("equal")} title="Set all selected to their average width — run length preserved" className="px-1.5 py-0.5 rounded border border-indigo-300 bg-white text-indigo-700 hover:bg-indigo-100">Equalize</button>
+              <button onClick={() => mact("widest")} className="px-1.5 py-0.5 rounded border border-indigo-300 bg-white text-indigo-700 hover:bg-indigo-100">Match widest</button>
+              <button onClick={() => mact("narrowest")} className="px-1.5 py-0.5 rounded border border-indigo-300 bg-white text-indigo-700 hover:bg-indigo-100">Match narrowest</button>
+              <span className="inline-block w-px h-4 bg-indigo-200 mx-0.5" />
+              <button onClick={() => mact("mirror")} title="Reverse the order of the selected cabinets" className="px-1.5 py-0.5 rounded border border-violet-300 bg-white text-violet-700 hover:bg-violet-100">⇄ Mirror</button>
+              <button onClick={() => mact("copy")} className="px-1.5 py-0.5 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-100">⧉ Copy</button>
+              <button onClick={() => mact("paste")} title="Paste copied cabinets into this run (works across runs)" className="px-1.5 py-0.5 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-100">📋 Paste</button>
+              <button onClick={() => mact("lock")} className="px-1.5 py-0.5 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-100">🔒 Lock</button>
+              <button onClick={() => mact("unlock")} className="px-1.5 py-0.5 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-100">🔓 Unlock</button>
+              <button onClick={() => mact("delete")} className="px-1.5 py-0.5 rounded bg-rose-600 text-white hover:bg-rose-500">🗑 Delete</button>
+              <button onClick={() => setMsel([])} className="px-1.5 py-0.5 rounded border border-slate-300 bg-white text-slate-500 hover:bg-slate-100">Clear</button>
+            </div>
+          )}
           <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50">
             <svg ref={svgRef} width={svgW} height={vH + (showDims ? 56 : 4)} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none" }}>
               <defs>
