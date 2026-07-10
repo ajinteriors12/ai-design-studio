@@ -122,3 +122,5 @@ Thumbs.db
 !verify-vercompare-ui.mjs
 
 !verify-cabmulti.mjs
+
+!verify-wallmulti.mjs

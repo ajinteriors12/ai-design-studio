@@ -7588,7 +7588,7 @@ const frontendHTML = `<!DOCTYPE html>
     // ---- Free-form POLYGON room editor: walls = edges between vertices ----------
     // Click an edge to select a wall, drag a vertex to reshape, right-click an edge
     // to Split/Delete, right-click a vertex to Join (merge the two adjacent walls).
-    function RoomPolygon2D({ polygon, openWalls, lockedWalls, selected, onSelectWall, onSelectVertex, onMoveVertex, onWallMenu, onVertexMenu }) {
+    function RoomPolygon2D({ polygon, openWalls, lockedWalls, selected, selectedSet, onSelectWall, onSelectVertex, onMoveVertex, onWallMenu, onVertexMenu }) {
       const pts = (polygon && polygon.length >= 3) ? polygon : [{ x: 0, y: 0 }, { x: 3600, y: 0 }, { x: 3600, y: 2400 }, { x: 0, y: 2400 }];
       const n = pts.length, pad = 30, maxPx = 460;
       const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
@@ -7618,9 +7618,9 @@ const frontendHTML = `<!DOCTYPE html>
       // edges (walls)
       for (let i = 0; i < n; i++) {
         const a = P[i], b = P[(i + 1) % n], A = pts[i], B = pts[(i + 1) % n];
-        const isOpen = ow.indexOf(i) >= 0, isLock = lw.indexOf(i) >= 0, sel = selected && selected.kind === "polywall" && selected.id === i;
-        els.push(<line key={"e" + i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={sel ? "#ea580c" : isOpen ? "#cbd5e1" : "#334155"} strokeWidth={sel ? 6 : 4} strokeDasharray={isOpen ? "6 5" : "0"} strokeLinecap="round" pointerEvents="none" />);
-        els.push(<line key={"h" + i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={14} strokeLinecap="round" style={{ cursor: "pointer" }} onPointerDown={(e) => { e.stopPropagation(); onSelectWall && onSelectWall(i); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onSelectWall && onSelectWall(i); onWallMenu && onWallMenu(i, e.clientX, e.clientY); }} />);
+        const isOpen = ow.indexOf(i) >= 0, isLock = lw.indexOf(i) >= 0, sel = selected && selected.kind === "polywall" && selected.id === i, inSet = (selectedSet || []).indexOf(i) >= 0;
+        els.push(<line key={"e" + i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={inSet ? "#4338ca" : sel ? "#ea580c" : isOpen ? "#cbd5e1" : "#334155"} strokeWidth={sel || inSet ? 6 : 4} strokeDasharray={isOpen ? "6 5" : "0"} strokeLinecap="round" pointerEvents="none" />);
+        els.push(<line key={"h" + i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={14} strokeLinecap="round" style={{ cursor: "pointer" }} onPointerDown={(e) => { e.stopPropagation(); onSelectWall && onSelectWall(i, e); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onSelectWall && onSelectWall(i, e); onWallMenu && onWallMenu(i, e.clientX, e.clientY); }} />);
         const len = Math.round(Math.hypot(B.x - A.x, B.y - A.y));
         els.push(<text key={"l" + i} x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 4} fill={sel ? "#ea580c" : "#64748b"} fontSize="8.5" textAnchor="middle" pointerEvents="none">{isOpen ? "open" : len}{isLock ? " 🔒" : ""}</text>);
       }
@@ -7633,7 +7633,7 @@ const frontendHTML = `<!DOCTYPE html>
       }
       const W = (maxX - minX) * S + pad * 2, H = (maxY - minY) * S + pad * 2 + 16;
       els.push(<text key="area" x={pad} y={H - 4} fill="#94a3b8" fontSize="9">{n} walls · {(perim / 1000).toFixed(2)} m perimeter · {areaM2.toFixed(2)} m² · {Math.round(spanX)}×{Math.round(spanY)} mm bounds</text>);
-      return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Free-form plan — click a WALL to select · drag a VERTEX to reshape · right-click a wall to Split/Delete · right-click a vertex to Join</div><svg ref={svgRef} width={W} height={H} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
+      return <div><div className="text-xs text-slate-500 mb-1 font-semibold">Free-form plan — click a WALL to select · Shift/Ctrl-click to multi-select walls · drag a VERTEX to reshape · right-click a wall to Split/Delete · right-click a vertex to Join</div><svg ref={svgRef} width={W} height={H} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ touchAction: "none", background: "#fff", borderRadius: 8, border: "1px solid #e2e8f0" }}>{els}</svg></div>;
     }
 
     // ---- 15.txt 5.14: interactive EMPTY 3D room (3D-first workflow) ----------
@@ -9616,9 +9616,9 @@ const frontendHTML = `<!DOCTYPE html>
       const curPoly = () => (room.polygon && room.polygon.length >= 3) ? room.polygon : rectPoly(+room.width || 3600, +room.depth || 2400);
       const polyBounds = (poly) => { const xs = poly.map((p) => p.x), ys = poly.map((p) => p.y); return { w: Math.max(...xs) - Math.min(...xs), d: Math.max(...ys) - Math.min(...ys) }; };
       const commitPoly = (poly, r, extra) => { const b = polyBounds(poly); return { ...r, polygon: poly, width: b.w, depth: b.d, ...(extra || {}) }; };
-      const setShape = (shape) => setRoom((r) => shape === "poly" ? commitPoly((r.polygon && r.polygon.length >= 3) ? r.polygon : rectPoly(+r.width || 3600, +r.depth || 2400), r, { shape, openWalls: [], lockedWalls: [] }) : { ...r, shape, openWalls: [], lockedWalls: [] });
-      const usePreset = (kind) => setRoom((r) => { const w = +r.width || 3600, d = +r.depth || 2400; const poly = kind === "L" ? lPoly(w, d) : kind === "U" ? uPoly(w, d) : rectPoly(w, d); return commitPoly(poly, r, { shape: "poly", openWalls: [], lockedWalls: [] }); });
-      const polySelectWall = (i) => setSelectedObj({ kind: "polywall", id: i });
+      const setShape = (shape) => { setWallSel([]); setRoom((r) => shape === "poly" ? commitPoly((r.polygon && r.polygon.length >= 3) ? r.polygon : rectPoly(+r.width || 3600, +r.depth || 2400), r, { shape, openWalls: [], lockedWalls: [] }) : { ...r, shape, openWalls: [], lockedWalls: [] }); };
+      const usePreset = (kind) => { setWallSel([]); setRoom((r) => { const w = +r.width || 3600, d = +r.depth || 2400; const poly = kind === "L" ? lPoly(w, d) : kind === "U" ? uPoly(w, d) : rectPoly(w, d); return commitPoly(poly, r, { shape: "poly", openWalls: [], lockedWalls: [] }); }); };
+      const polySelectWall = (i, e) => { if (e && (e.shiftKey || e.ctrlKey || e.metaKey)) { setWallSel((p) => p.indexOf(i) >= 0 ? p.filter((x) => x !== i) : p.concat([i])); setSelectedObj({ kind: "polywall", id: i }); } else { setWallSel([]); setSelectedObj({ kind: "polywall", id: i }); } };
       const polySelectVertex = (i) => setSelectedObj({ kind: "polyvertex", id: i });
       const polyMoveVertex = (i, x, y) => setRoom((r) => commitPoly(curPoly().map((p, j) => j === i ? { x, y } : p), r));
       const shiftIdx = (arr, from) => (arr || []).map((v) => typeof v === "number" && v >= from ? v + 1 : v);
@@ -9626,6 +9626,31 @@ const frontendHTML = `<!DOCTYPE html>
       const polyJoinVertex = (i) => { const poly = curPoly(); if (poly.length <= 3) { alert("A room needs at least 3 walls."); return; } const np = poly.filter((_, j) => j !== i); const dec = (arr) => (arr || []).filter((v) => v !== i).map((v) => typeof v === "number" && v > i ? v - 1 : v); setRoom((r) => commitPoly(np, r, { openWalls: dec(r.openWalls), lockedWalls: dec(r.lockedWalls) })); setSelectedObj(null); };
       const polyToggleOpen = (i) => setRoom((r) => { const o = (r.openWalls || []).slice(); const k = o.indexOf(i); if (k >= 0) o.splice(k, 1); else o.push(i); return { ...r, openWalls: o }; });
       const polyToggleLock = (i) => setRoom((r) => { const l = (r.lockedWalls || []).slice(); const k = l.indexOf(i); if (k >= 0) l.splice(k, 1); else l.push(i); return { ...r, lockedWalls: l }; });
+      // §Multi-select batch over the selected polygon walls (wallSel). Open/close (doorway), lock/unlock,
+      // and split-all (processed high→low index so earlier splits don't renumber later ones).
+      const wallBatch = (op) => {
+        if (!wallSel.length) return; const sel = wallSel.slice();
+        if (op === "open") setRoom((r) => { const o = (r.openWalls || []).slice(); sel.forEach((i) => { if (o.indexOf(i) < 0) o.push(i); }); return { ...r, openWalls: o }; });
+        else if (op === "close") setRoom((r) => ({ ...r, openWalls: (r.openWalls || []).filter((i) => sel.indexOf(i) < 0) }));
+        else if (op === "lock") setRoom((r) => { const l = (r.lockedWalls || []).slice(); sel.forEach((i) => { if (l.indexOf(i) < 0) l.push(i); }); return { ...r, lockedWalls: l }; });
+        else if (op === "unlock") setRoom((r) => ({ ...r, lockedWalls: (r.lockedWalls || []).filter((i) => sel.indexOf(i) < 0) }));
+        else if (op === "split") {
+          const desc = sel.slice().sort((a, b) => b - a);
+          setRoom((r) => { let poly = (r.polygon && r.polygon.length >= 3) ? r.polygon.slice() : rectPoly(+r.width || 3600, +r.depth || 2400); let ow = (r.openWalls || []).slice(), lw = (r.lockedWalls || []).slice();
+            desc.forEach((i) => { const a = poly[i], b = poly[(i + 1) % poly.length]; const mid = { x: rnd10((a.x + b.x) / 2), y: rnd10((a.y + b.y) / 2) }; poly.splice(i + 1, 0, mid); ow = shiftIdx(ow, i + 1); lw = shiftIdx(lw, i + 1); });
+            return commitPoly(poly, r, { openWalls: ow, lockedWalls: lw }); });
+          setWallSel([]); setSelectedObj(null);
+        }
+      };
+      // §Downstream propagation: keep the generation run lengths (wall/wallB/wallC) in sync with the
+      // drawn polygon — longest NON-open (usable) walls fill the runs the current layout type needs.
+      const runNeed = () => (isU || isG) ? 3 : needsB ? 2 : 1;
+      const autoFitRuns = (poly, openW) => {
+        if (!isKitchen || !poly || poly.length < 3) return;
+        const ed = []; for (let i = 0; i < poly.length; i++) { if ((openW || []).indexOf(i) >= 0) continue; const a = poly[i], b = poly[(i + 1) % poly.length]; ed.push(Math.round(Math.hypot(b.x - a.x, b.y - a.y))); }
+        const need = runNeed(); const s = ed.sort((a, z) => z - a).slice(0, need).map((v) => Math.max(900, Math.min(8000, v)));
+        if (s[0]) setWall(s[0]); if (need >= 2 && s[1]) setWallB(s[1]); if (need >= 3 && s[2]) setWallC(s[2]);
+      };
       // 5.13: print ONLY the cut list — open a clean window with just the table and print it.
       const printCutList = () => {
         if (!result || !result.cutList || !result.cutList.length) return;
@@ -9795,6 +9820,10 @@ const frontendHTML = `<!DOCTYPE html>
       const [cutListPage, setCutListPage] = useState(false);   // 5.13: separate Production Cut List page
       const [roomWarn, setRoomWarn] = useState(null);          // 6.14: 'Room definition incomplete' warning (keeps planner visible)
       const [selectedObj, setSelectedObj] = useState(null);    // 6.1: selected Top-View object {kind,id}
+      const [wallSel, setWallSel] = useState([]);              // §multi-select: polygon wall (edge) indices (Shift/Ctrl-click)
+      const [autoFit, setAutoFit] = useState(true);            // auto-propagate drawn polygon → generation run lengths
+      // downstream propagation — keep run lengths in sync with the drawn polygon (declared after autoFit/type to avoid a TDZ in the dep array)
+      React.useEffect(() => { if (autoFit && room.shape === "poly" && Array.isArray(room.polygon) && room.polygon.length >= 3) autoFitRuns(room.polygon, room.openWalls); }, [room.polygon, room.openWalls, autoFit, type]);
       // §1/§2: Delete key removes the selected object (struct/point) or opens the selected wall.
       React.useEffect(() => {
         const onDel = (e) => {
@@ -10414,7 +10443,18 @@ const frontendHTML = `<!DOCTYPE html>
                   {room.shape === "poly" && <React.Fragment><span className="text-slate-300">|</span><span className="text-slate-400">Preset:</span>{[["rect", "Rect"], ["L", "L-shape"], ["U", "U-shape"]].map(([v, l]) => <button key={v} onClick={() => usePreset(v)} className="px-2 py-1 rounded border bg-white border-slate-300 text-slate-600 hover:border-cyan-400">{l}</button>)}</React.Fragment>}
                 </div>
                 {room.shape === "poly" ? (<React.Fragment>
-                  {selectedObj && selectedObj.kind === "polywall" && (() => { const poly = curPoly(); const i = selectedObj.id; const a = poly[i], b = poly[(i + 1) % poly.length]; const len = Math.round(Math.hypot(b.x - a.x, b.y - a.y)); const isOpen = (room.openWalls || []).indexOf(i) >= 0, isLock = (room.lockedWalls || []).indexOf(i) >= 0; return (
+                  {wallSel.length > 0 && (
+                    <div className="mb-2 flex items-center gap-1.5 flex-wrap text-xs bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
+                      <span className="font-semibold text-indigo-700">{wallSel.length} walls selected</span>
+                      <button onClick={() => wallBatch("split")} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-indigo-700">✂ Split all</button>
+                      <button onClick={() => wallBatch("open")} className="px-2 py-0.5 rounded border bg-rose-50 border-rose-300 text-rose-600">🗑 Open (doorway)</button>
+                      <button onClick={() => wallBatch("close")} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-emerald-700">↺ Close</button>
+                      <button onClick={() => wallBatch("lock")} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-amber-700">🔒 Lock</button>
+                      <button onClick={() => wallBatch("unlock")} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-slate-600">🔓 Unlock</button>
+                      <button onClick={() => setWallSel([])} className="px-2 py-0.5 text-slate-400">Clear</button>
+                    </div>
+                  )}
+                  {selectedObj && selectedObj.kind === "polywall" && wallSel.length === 0 && (() => { const poly = curPoly(); const i = selectedObj.id; const a = poly[i], b = poly[(i + 1) % poly.length]; const len = Math.round(Math.hypot(b.x - a.x, b.y - a.y)); const isOpen = (room.openWalls || []).indexOf(i) >= 0, isLock = (room.lockedWalls || []).indexOf(i) >= 0; return (
                     <div className="mb-2 flex items-center gap-2 flex-wrap text-xs bg-cyan-50 border border-cyan-200 rounded-lg px-3 py-2">
                       <span className="font-semibold text-cyan-700">🧱 Wall {i + 1}</span><span className="text-slate-500">Length {len} mm</span>
                       <button onClick={() => polySplitWall(i)} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-indigo-700">✂ Split</button>
@@ -10430,7 +10470,8 @@ const frontendHTML = `<!DOCTYPE html>
                       <button onClick={() => polyJoinVertex(i)} className="px-2 py-0.5 rounded border bg-white border-slate-300 text-indigo-700">⛓ Join (merge walls)</button>
                       <button onClick={() => setSelectedObj(null)} className="px-2 py-0.5 text-slate-400">✕</button>
                     </div>); })()}
-                  <RoomPolygon2D polygon={curPoly()} openWalls={room.openWalls} lockedWalls={room.lockedWalls} selected={selectedObj} onSelectWall={polySelectWall} onSelectVertex={polySelectVertex} onMoveVertex={polyMoveVertex} />
+                  <RoomPolygon2D polygon={curPoly()} openWalls={room.openWalls} lockedWalls={room.lockedWalls} selected={selectedObj} selectedSet={wallSel} onSelectWall={polySelectWall} onSelectVertex={polySelectVertex} onMoveVertex={polyMoveVertex} />
+                  {isKitchen && <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-500"><input type="checkbox" checked={autoFit} onChange={(e) => setAutoFit(e.target.checked)} className="accent-cyan-600" />Auto-fit run lengths to the drawn walls (propagates to the generated design)</label>}
                 </React.Fragment>) : (<React.Fragment>
                 {selectedObj && selectedObj.kind === "wall" && (() => {
                   const nm = selectedObj.id, dimW = nm.indexOf("back") >= 0 || nm.indexOf("front") >= 0, len = dimW ? room.width : room.depth;
