@@ -14539,7 +14539,27 @@ function wardColumn(recipe: string, usableH: number): WCell[] {
   }
   const sum = cells.reduce((a, c) => a + c.hMM, 0) || 1;
   if (Math.abs(sum - usableH) > 1) { const f = usableH / sum; cells.forEach(c => c.hMM = Math.round(c.hMM * f)); }
-  return cells;
+  return wardShelfCapHang(cells);
+}
+// DESIGN RULE (owner 2026-07-12): a short/long hanging section must always have a SHELF above it, so two
+// stacked hanging sections read as separate. Inserts a thin divider shelf above any hanging cell whose
+// upper neighbour isn't already shelf-like (steals a slice from the hanging). Idempotent; skips merged
+// columns (span/covered) so it can't break a colspan merge. Topmost hangings are capped by the top panel/loft.
+function wardShelfCapHang(cells: any[]): any[] {
+  if (!Array.isArray(cells) || cells.length < 2) return cells;
+  if (cells.some((c: any) => (+c.span > 1) || c.covered)) return cells;   // don't disturb merges
+  const isHang = (k: string) => { const s = String(k || "").toLowerCase(); return s.indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"; };
+  const isShelfLike = (k: string) => k === "shelf" || k === "handbag" || k === "kidsShelf" || k === "cornerShelf" || k === "loft";
+  const SH = 40, out: any[] = [];
+  for (let i = 0; i < cells.length; i++) {
+    const cur = cells[i], nxt = cells[i + 1];
+    out.push(cur);
+    if (isHang(cur.kind) && nxt && !isShelfLike(nxt.kind) && cur.hMM - SH >= 200) {
+      cur.hMM -= SH;
+      out.push({ kind: "shelf", label: "Divider Shelf", hMM: SH, color: (WARD_COLORS as any).shelf || "#22c55e" });
+    }
+  }
+  return out;
 }
 // Corner-unit column (L/U-shape §20) — cells for the chosen corner solution.
 function wardCornerColumn(solution: string, usableH: number): WCell[] {
@@ -15564,7 +15584,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
       if (!cells.length) cells = [{ kind: "shelf", label: "Shelf", hMM: target, color: WARD_COLORS.shelf }];
       const sum = cells.reduce((a: number, cc: any) => a + cc.hMM, 0) || 1, f = target / sum;
       cells.forEach((cc: any) => cc.hMM = Math.round(cc.hMM * f));
-      col.cells = cells;
+      col.cells = wardShelfCapHang(cells);   // owner rule: a shelf always caps a hanging section
       // preserve + normalise editable loft compartments (sum → loftH); drop them when there is no loft
       if (o.hasLoft && !(ub)) {
         let lc = (Array.isArray(col.loftCells) ? col.loftCells : []).filter((x: any) => x && +x.hMM > 0).map((x: any) => ({ kind: String(x.kind || "loft"), label: String(x.label || "Loft"), hMM: Math.max(40, Math.round(+x.hMM)), color: String(x.color || "#fcd34d") }));
