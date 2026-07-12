@@ -21,7 +21,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { eq, desc } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
-import { readFileSync as fsRead, writeFileSync as fsWrite, existsSync as fsExists } from "fs";
+import { readFileSync as fsRead, writeFileSync as fsWrite, existsSync as fsExists, readdirSync as fsReaddir, statSync as fsStat, watch as fsWatch } from "fs";
 import { inflateSync, inflateRawSync } from "zlib";   // PNG IDAT decode (GIF encoder #6) + ZIP member inflate (§8 multi-upload)
 import { networkInterfaces } from "os";   // LAN IP discovery for the on-network deploy
 import { transformSync as esbuildTransform } from "esbuild";   // precompile the client JSX at boot (no slow in-browser Babel)
@@ -12744,6 +12744,52 @@ const frontendHTML = `<!DOCTYPE html>
     }
 
     // ── Wardrobe AI Designer — lifestyle-driven 3-option wardrobe generator (§2-§12) ──
+    // 📚 Design Learnings — the knowledge distilled from the wardrobe reference-image folder
+    // (WARDROBE_DNA standards + per-image vision learnings) + a Rescan trigger for the always-on watcher.
+    function WardrobeLearnings() {
+      const [ln, setLn] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState("");
+      const load = () => fetch("/api/wardrobe/learnings").then((r) => r.json()).then((j) => setLn(j)).catch(() => setMsg("Could not load learnings."));
+      React.useEffect(() => { load(); }, []);
+      const rescan = () => { setBusy(true); setMsg("Scanning + vision-reading the reference folder…"); fetch("/api/wardrobe/learnings/rescan", { method: "POST" }).then((r) => r.json()).then((j) => { setBusy(false); if (j.error) { setMsg(j.error); return; } setMsg("Learned " + (j.data.learned || 0) + " / " + (j.data.scanned || 0) + (j.data.pending ? " · " + j.data.pending + " awaiting API credit" : "")); load(); }).catch(() => { setBusy(false); setMsg("Rescan failed."); }); };
+      if (!ln) return <div className="text-sm text-slate-400 p-4">{msg || "Loading design learnings…"}</div>;
+      const dna = ln.dna || {}, D = dna.dimensionsMm || {};
+      const chip = (bg) => ({ background: bg, width: 18, height: 18, borderRadius: 4, border: "1px solid rgba(0,0,0,0.1)", display: "inline-block" });
+      const dimRow = (k, o) => o && (typeof o === "object" ? <tr key={k}><td className="pr-3 py-0.5 text-slate-500">{k}</td><td className="py-0.5 font-medium text-slate-700">{o.def != null ? o.def + " mm" : ""}</td><td className="py-0.5 text-slate-400 text-[10px]">{(o.min != null ? o.min + "–" + o.max + " mm" : "") + (o.note ? " · " + o.note : "") + (o.depth ? " · depth " + o.depth : "")}</td></tr> : null);
+      const byCat = (ln.counts && ln.counts.byCategory) || {};
+      return (<div className="space-y-4 text-[12px]">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-semibold text-slate-700">📚 Design Learnings</span>
+          <span className="text-[11px] text-slate-400">from {ln.watching}</span>
+          <span className="ml-auto text-[11px] text-slate-500">{ln.counts.analysed}/{ln.counts.total} images analysed</span>
+          <button onClick={rescan} disabled={busy} className="px-2.5 py-1 rounded bg-indigo-600 text-white text-[11px] font-medium disabled:opacity-50">{busy ? "Learning…" : "↻ Rescan folder"}</button>
+        </div>
+        {msg && <div className="text-[11px] text-indigo-600">{msg}</div>}
+        <div className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">✓ Always-on: any new image dropped in the folder is auto-learned. Standards below are applied to generation, glass-doors, palettes &amp; the presentation board.</div>
+        <div>
+          <div className="font-semibold text-slate-600 mb-1">📐 Dimension standards (mm)</div>
+          <table className="w-full"><tbody>{Object.keys(D).filter((k) => D[k] && typeof D[k] === "object" && D[k].def != null).map((k) => dimRow(k, D[k]))}</tbody></table>
+          <div className="text-[10px] text-slate-400 mt-1">Height tiers {(D.heightTiers || []).join(" / ")} mm · Width tiers {(D.widthTiers || []).join(" / ")} mm</div>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div><div className="font-semibold text-slate-600 mb-1">🧩 Layout archetypes</div>{(dna.archetypes || []).map((a) => <div key={a.id} className="mb-1"><span className="font-medium text-slate-700">{a.name}</span><div className="text-[10px] text-slate-400">{a.note}</div></div>)}</div>
+          <div><div className="font-semibold text-slate-600 mb-1">📋 Named recipes</div>{(dna.recipes || []).map((r) => <div key={r.id} className="text-slate-600">• {r.name} <span className="text-[10px] text-slate-400">({r.cols})</span></div>)}</div>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div><div className="font-semibold text-slate-600 mb-1">🚪 Glass-door types</div><div className="flex flex-wrap gap-1">{(dna.glassDoorTypes || []).map((g) => <span key={g.id} className="px-1.5 py-0.5 rounded border border-slate-200 text-slate-600 text-[10px]">{g.name}</span>)}</div>
+            <div className="font-semibold text-slate-600 mb-1 mt-2">✨ CNC / jaali motifs</div><div className="flex flex-wrap gap-1">{(dna.glassDecorMotifs || []).map((g) => <span key={g.id} className="px-1.5 py-0.5 rounded border border-amber-200 text-amber-700 text-[10px]">{g.name}</span>)}</div></div>
+          <div><div className="font-semibold text-slate-600 mb-1">🎨 Palettes</div>{(dna.palettes || []).map((p) => <div key={p.id} className="flex items-center gap-1.5 mb-1"><span className="text-slate-700 w-28">{p.name}</span>{(p.colors || []).map((c, i) => <span key={i} style={chip(c)} />)}<span className="text-[10px] text-slate-400 ml-1">{p.hardware}</span></div>)}</div>
+        </div>
+        <div>
+          <div className="font-semibold text-slate-600 mb-1">🖼 Learned reference images ({ln.counts.total}) — by folder</div>
+          <div className="flex flex-wrap gap-1 mb-2">{Object.keys(byCat).map((c) => <span key={c} className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px]">{c}: {byCat[c]}</span>)}</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-72 overflow-auto">
+            {(ln.images || []).map((im) => { const d = im.data || {}; const pend = !im.engine || im.engine === "pending"; return <div key={im.id} className={"rounded border p-1.5 " + (pend ? "border-slate-200 bg-slate-50" : "border-emerald-200 bg-emerald-50/40")}><div className="flex items-center gap-1"><span className="text-[11px] font-medium text-slate-700 truncate">{im.filename}</span><span className="ml-auto text-[9px] text-slate-400">{im.category}</span></div>{pend ? <div className="text-[10px] text-amber-600">awaiting API credit</div> : <div className="text-[10px] text-slate-500"><div>{d.subCategory}{d.doorStyle && d.doorStyle !== "none" ? " · " + d.doorStyle : ""}{d.glassType && d.glassType !== "none" ? " · " + d.glassType + " glass" : ""}</div>{d.layoutArchetype && <div className="text-slate-400 truncate" title={d.layoutArchetype}>{d.layoutArchetype}</div>}{(d.compartments || []).length > 0 && <div className="text-[9px] text-indigo-500 truncate">{(d.compartments || []).join(", ")}</div>}</div>}</div>; })}
+          </div>
+        </div>
+      </div>);
+    }
     function WardrobeAI() {
       const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300, beamOn: false, beamProj: 200, beamSoffit: 2100, beamPos: 600, beamWidth: 900, shape: "straight", wingB: 1800, wingC: 1800, corner: "lemans" });
       const [data, setData] = useState(null);
@@ -13032,7 +13078,7 @@ const frontendHTML = `<!DOCTYPE html>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
-            {["Legend", "Reports", "Cutting List", "Hardware", "BOQ", "CNC", "Math", "3D", "Board"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700") + (t === "Board" ? " ml-0.5" : "")}>{t === "Board" ? "🖼 Board" : t === "Math" ? "🔬 Math" : t}</button>))}
+            {["Legend", "Reports", "Cutting List", "Hardware", "BOQ", "CNC", "Math", "3D", "Board", "Learnings"].map((t) => (<button key={t} onClick={() => setRepTab(t)} className={"px-3 py-1.5 text-xs font-medium " + (repTab === t ? "text-indigo-700 border-b-2 border-indigo-500" : "text-slate-500 hover:text-slate-700") + (t === "Board" ? " ml-0.5" : "")}>{t === "Board" ? "🖼 Board" : t === "Math" ? "🔬 Math" : t === "Learnings" ? "📚 Learnings" : t}</button>))}
             <span className="ml-auto text-[11px] text-slate-400">{sel ? "Option " + (selIdx + 1) + " · " + sel.label : ""}</span>
           </div>
           {repTab === "Legend" && (<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1.5">
@@ -13094,6 +13140,7 @@ const frontendHTML = `<!DOCTYPE html>
             </div>
             <div className="rounded-lg border border-slate-200 overflow-auto bg-slate-100 p-2" style={{ maxHeight: 620 }} dangerouslySetInnerHTML={{ __html: photoBoard || boardSvg }} />
           </div>)}
+          {repTab === "Learnings" && <WardrobeLearnings />}
         </div>
         <div className="text-[11px] text-slate-400 px-1">Learns from your uploaded references in the <span className="font-medium text-slate-500">Library</span> tab (vision-read wardrobes drive the Generator). This module applies Indian standard arrangements to your lifestyle inputs.</div>
       </div>);
@@ -15562,6 +15609,168 @@ app.post("/api/wardrobe/options", async (c) => {
 });
 // Re-derive a single, drag-edited option: sanitize + renormalize the posted geometry, then
 // recompute stats/reports/scorecard/views from it (keeps the server as the source of truth).
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// WARDROBE DESIGN LEARNING — knowledge base synthesised from the reference images in
+// D:\Others\Wardrobe Images, + an always-on folder watcher that vision-analyses any NEW image and
+// keeps learning. WARDROBE_DNA (the distilled standards) also feeds the generator, glass-door & palette
+// features. (Owner: "learn everything from the folder category-wise + keep learning on every new image".)
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const WARDROBE_DNA = {
+  updated: "2026-07-13",
+  source: "41 reference images (D:\\Others\\Wardrobe Images) — internal layouts, dimensioned shop drawings, AutoCAD elevations, 3D renders, glass-decor infographics",
+  dimensionsMm: {
+    longHang: { min: 1300, max: 1700, def: 1500, note: "coats/dresses clear hanging height" },
+    shortHang: { min: 900, max: 1100, def: 1000, note: "shirts / upper rod of a double-hang" },
+    doubleHangColumn: { def: 2000, note: "two ~1000mm rods stacked" },
+    shelfPitch: { min: 250, max: 420, def: 300, note: "folded-clothes shelf spacing (350-400 for bulky)" },
+    drawer: { min: 150, max: 250, def: 180 }, deepDrawer: { def: 250 },
+    loft: { min: 300, max: 600, def: 400, depth: 550 },
+    pantRackZone: { min: 350, max: 680, def: 500 }, shoePitch: { def: 200 },
+    plinth: { min: 75, max: 100, def: 90 }, depth: { def: 600 },
+    hingedLeaf: { min: 400, max: 600, def: 500 }, slidingPanel: { def: 800 },
+    heightTiers: [2100, 2400, 2700, 3000], widthTiers: [1200, 1500, 1800, 2100, 2400, 2700, 3000],
+    hangingRodDia: 32, hingeAngle: 110,
+  },
+  archetypes: [
+    { id: "three-column", name: "Classic 3-Column (Hang · Shelf · Hang)", note: "the canonical template — recurs 5× in the references; long-hang + central shelf/drawer tower + mirrored hang" },
+    { id: "his-hers", name: "His & Hers Split", note: "mirrored male/female sections + shared centre (shelf + safe + drawer), full-mirror door" },
+    { id: "matrix", name: "Standard Arrangement Matrix", note: "3 heights (2100/2400/2700) × 3 widths (1200/1500/1800) presets, per section" },
+    { id: "entryway", name: "Entryway / Mudroom Hybrid", note: "cabinets + open shelving + hook nook + seating bench" },
+    { id: "boutique", name: "Glass-Front Boutique Display", note: "LED-lit glass doors + accessory/handbag display tower" },
+  ],
+  recipes: [
+    { id: "daily-organizer", name: "The Daily Organizer", cols: "800/1200/800", note: "balanced everyday mix" },
+    { id: "maximum-hanger", name: "The Maximum Hanger", cols: "800/1200/800", note: "hang-led" },
+    { id: "shoe-hub", name: "The Shoe Enthusiast's Hub", cols: "800/1200/400", note: "shoe-shelf led" },
+    { id: "accessory-fold", name: "The Accessory & Fold Alcove", cols: "800/1200/400", note: "shelves + accessory drawers" },
+    { id: "seasonal-shift", name: "The Seasonal Shift System", cols: "800/1200/800", note: "loft + long-hang seasonal" },
+    { id: "utility-hybrid", name: "The Utility Hybrid", cols: "800/1200/800", note: "mixed utility storage" },
+  ],
+  glassDoorTypes: [
+    { id: "clear", name: "Clear Glass" }, { id: "frosted", name: "Frosted" }, { id: "tinted", name: "Tinted" },
+    { id: "reeded", name: "Reeded / Fluted" }, { id: "mirror", name: "Mirror" }, { id: "smoked", name: "Smoked" },
+    { id: "frameless", name: "Frameless" }, { id: "black-framed", name: "Black-Framed" }, { id: "two-tone", name: "Two-Tone" },
+  ],
+  glassDecorMotifs: [
+    { id: "reeded", name: "Vertical Reeded / Fluted" }, { id: "lattice", name: "Diamond Lattice Jaali" },
+    { id: "rosette", name: "Floral Rosette Repeat" }, { id: "mullion", name: "Linear Mullion Grid" },
+    { id: "arch", name: "Arched Panel" }, { id: "ripple", name: "Ripple" },
+  ],
+  palettes: [
+    { id: "japandi", name: "Japandi", colors: ["#E7DCCB", "#C9A97E", "#7C7A4E", "#B06A4B", "#F1EADD"], hardware: "matte gold" },
+    { id: "indian-classic", name: "Indian Classic", colors: ["#F5F0E6", "#6E4B2A", "#3A2A1A"], hardware: "brass / antique" },
+    { id: "modern-charcoal", name: "Modern Charcoal", colors: ["#2B2B30", "#3A3A42", "#D9A441"], hardware: "matte black + amber LED" },
+    { id: "two-tone", name: "Two-Tone White / Walnut", colors: ["#F7F6F2", "#7A4E2D"], hardware: "brushed nickel" },
+    { id: "sage-greige", name: "Sage & Greige", colors: ["#B7BFA6", "#CFC6B8", "#8A8B7A"], hardware: "brushed brass" },
+  ],
+  materials: { carcass: "18mm BWP/MR plywood", back: "6mm ply", shutter: "18mm MDF / Acrylic / Membrane / Veneer", edgeBand: "1-2mm PVC", hinge: "110° soft-close", drawer: "Tandem-box / wooden soft-close", plinth: "75-100mm" },
+  styleCues3d: ["3000K warm LED under every shelf + rail (auto-on with door)", "3/4 corner perspective, doors open", "neutral seamless backdrop for spec cards; realistic bedroom for lifestyle", "pill/oval dimension bubbles with leader lines"],
+};
+sqlite.exec(`CREATE TABLE IF NOT EXISTS wardrobe_learnings (id TEXT PRIMARY KEY, path TEXT NOT NULL, category TEXT NOT NULL DEFAULT '', filename TEXT NOT NULL DEFAULT '', mtime INTEGER NOT NULL DEFAULT 0, engine TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL);`);
+const WARD_LEARN_DIR = (process.env.WARDROBE_IMAGES_DIR || "D:/Others/Wardrobe Images").replace(/\\/g, "/");
+// Vision-analyse a single wardrobe reference image → structured design knowledge (GPT-4o, or Claude if a key exists).
+async function learnWardrobeVision(name: string, media: string, b64: string): Promise<{ data: any; engine: string } | null> {
+  const keys = loadAIKeys();
+  const ask = "You are a modular-wardrobe design analyst. Study this wardrobe reference image and extract IMPLEMENTABLE design knowledge. " +
+    "Convert every dimension to MILLIMETRES (cm×10, inch×25.4, foot×304.8). Never invent numbers — omit what you cannot read. " +
+    "Reply with COMPACT JSON only, no prose: " +
+    '{"subCategory":"internal-layout|dimensioned-drawing|3d-render|sliding-door|glass-decor|cad-elevation|other",' +
+    '"layoutArchetype":"short description of the column/section arrangement",' +
+    '"compartments":["e.g. long-hang, short-hang, shelves, drawers, pant-rack, loft, shoe, accessory"],' +
+    '"dimensionsMm":{"labelled sizes as key:number in mm, e.g. longHang, shelfPitch, drawer, loft, overallW, overallH, depth"},' +
+    '"materials":["finishes/materials named or clearly visible"],"palette":["dominant colours in plain words"],' +
+    '"hardware":["handles/hinges/rails if visible"],"doorStyle":"hinged|sliding|open|walk-in|none",' +
+    '"glassType":"clear|frosted|tinted|reeded|mirror|smoked|frameless|black-framed|two-tone|none",' +
+    '"motif":"decorative door/glass pattern if any else none","styleTags":["e.g. modern, japandi, luxury, indian-classic, minimal"],' +
+    '"notes":["anything else useful for reproducing this design"],"confidence":0-1}';
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 60000);
+  try {
+    if (keys.openai && media !== "application/pdf") {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + keys.openai }, body: JSON.stringify({ model: "gpt-4o", max_tokens: 1500, messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: "data:" + media + ";base64," + b64, detail: "high" } }] }] }), signal: ac.signal });
+      if (res.ok) { const j: any = await res.json(); const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || ""; const parsed = extractLastJson(txt); if (parsed) return { data: parsed, engine: "GPT-4o vision" }; }
+      else console.error("learn vision HTTP", res.status, (await res.text().catch(() => "")).slice(0, 100));
+    } else if (keys.anthropic) {
+      const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": keys.anthropic, "anthropic-version": "2023-06-01" }, body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5", max_tokens: 1500, messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: media, data: b64 } }, { type: "text", text: ask }] }] }), signal: ac.signal });
+      if (res.ok) { const j: any = await res.json(); const txt = (j.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n"); const parsed = extractLastJson(txt); if (parsed) return { data: parsed, engine: "Claude vision" }; }
+    }
+  } catch (e: any) { console.error("learn vision failed:", String((e && e.message) || e).slice(0, 120)); }
+  finally { clearTimeout(t); }
+  return null;
+}
+function wardLearnWalk(dir: string): { abs: string; cat: string; name: string }[] {
+  const out: { abs: string; cat: string; name: string }[] = [];
+  const rec = (d: string, cat: string) => {
+    let ents: any[] = []; try { ents = fsReaddir(d, { withFileTypes: true }) as any[]; } catch { return; }
+    for (const e of ents) {
+      const p = d + "/" + e.name;
+      if (e.isDirectory()) rec(p, cat ? cat + "/" + e.name : e.name);
+      else if (/\.(jpe?g|png|webp)$/i.test(e.name)) out.push({ abs: p, cat: cat || "root", name: e.name });
+    }
+  };
+  rec(dir, ""); return out;
+}
+async function wardLearnFile(abs: string, cat: string): Promise<"learned" | "skip" | "pending"> {
+  try {
+    if (!fsExists(abs)) return "skip";
+    const st = fsStat(abs), mtime = Math.round(st.mtimeMs), rel = abs.slice(WARD_LEARN_DIR.length + 1) || abs;
+    const row: any = sqlite.prepare("SELECT mtime, engine FROM wardrobe_learnings WHERE id=?").get(rel);
+    if (row && row.mtime === mtime && row.engine && row.engine !== "pending") return "skip";   // already learned this version
+    const name = abs.split("/").pop() || abs, media = visionMediaType("", name); if (!media) return "skip";
+    const vis = await learnWardrobeVision(name, media, fsRead(abs).toString("base64"));
+    const data = vis ? vis.data : { subCategory: "pending", notes: ["vision not available / failed — will retry"] };
+    const eng = vis ? vis.engine : "pending", mt = vis ? mtime : 0;   // pending keeps mtime=0 so it retries next scan
+    sqlite.prepare("INSERT OR REPLACE INTO wardrobe_learnings (id,path,category,filename,mtime,engine,data,created_at) VALUES (?,?,?,?,?,?,?,?)").run(rel, abs, cat, name, mt, eng, JSON.stringify(data), Date.now());
+    return vis ? "learned" : "pending";
+  } catch (e: any) { console.error("wardLearnFile", String((e && e.message) || e).slice(0, 120)); return "skip"; }
+}
+let wardLearnBusy = false;
+async function wardLearnBulk(): Promise<{ scanned: number; learned: number; pending: number }> {
+  if (wardLearnBusy) return { scanned: 0, learned: 0, pending: 0 };
+  wardLearnBusy = true; let learned = 0, pending = 0;
+  try {
+    const files = wardLearnWalk(WARD_LEARN_DIR);
+    for (const f of files) { const r = await wardLearnFile(f.abs, f.cat); if (r === "learned") learned++; else if (r === "pending") pending++; }
+    return { scanned: files.length, learned, pending };
+  } finally { wardLearnBusy = false; }
+}
+// Always-on watcher: any new/changed image in the folder is auto-learned (debounced).
+let wardWatchTimer: any = null; const wardWatchQueue = new Set<string>();
+function startWardLearnWatcher() {
+  if (!fsExists(WARD_LEARN_DIR)) { console.log("[learn] wardrobe images folder not found (watcher idle):", WARD_LEARN_DIR); return; }
+  try {
+    fsWatch(WARD_LEARN_DIR, { recursive: true }, (_evt, fn) => {
+      if (!fn) return; const rel = String(fn).replace(/\\/g, "/"); if (!/\.(jpe?g|png|webp)$/i.test(rel)) return;
+      wardWatchQueue.add(rel); clearTimeout(wardWatchTimer);
+      wardWatchTimer = setTimeout(async () => {
+        const items = [...wardWatchQueue]; wardWatchQueue.clear();
+        for (const r of items) { const abs = WARD_LEARN_DIR + "/" + r, cat = r.indexOf("/") >= 0 ? r.slice(0, r.lastIndexOf("/")) : "root"; const res = await wardLearnFile(abs, cat); if (res === "learned") console.log("[learn] learned new image:", r); }
+      }, 1800);
+    });
+    console.log("[learn] watching for new wardrobe images:", WARD_LEARN_DIR);
+  } catch (e: any) { console.error("[learn] watch failed:", String((e && e.message) || e).slice(0, 120)); }
+}
+// Boot: one-time bulk learn if the KB is empty + a vision key exists, then start the watcher.
+setTimeout(() => {
+  try {
+    const cnt = (sqlite.prepare("SELECT COUNT(*) c FROM wardrobe_learnings").get() as any).c, keys = loadAIKeys();
+    if (cnt === 0 && (keys.openai || keys.anthropic) && fsExists(WARD_LEARN_DIR)) {
+      console.log("[learn] first run — learning all wardrobe reference images once…");
+      wardLearnBulk().then((r) => console.log("[learn] first-run complete:", r.learned + " learned / " + r.scanned + " scanned" + (r.pending ? " (" + r.pending + " pending)" : ""))).catch(() => {});
+    }
+  } catch { }
+  startWardLearnWatcher();
+}, 3500);
+app.get("/api/wardrobe/learnings", (c) => {
+  const rows = sqlite.prepare("SELECT id,category,filename,engine,data FROM wardrobe_learnings ORDER BY category, filename").all() as any[];
+  const images = rows.map((r) => { let d: any = {}; try { d = JSON.parse(r.data); } catch { } return { id: r.id, category: r.category, filename: r.filename, engine: r.engine, data: d }; });
+  const byCategory: Record<string, number> = {}; images.forEach((im) => { byCategory[im.category] = (byCategory[im.category] || 0) + 1; });
+  return c.json({ dna: WARDROBE_DNA, images, counts: { total: images.length, byCategory, analysed: images.filter((i) => i.engine && i.engine !== "pending").length }, watching: WARD_LEARN_DIR, busy: wardLearnBusy });
+});
+app.post("/api/wardrobe/learnings/rescan", async (c) => {
+  const keys = loadAIKeys(); if (!keys.openai && !keys.anthropic) return c.json({ error: "No vision key — add \"openai\" to ai-keys.json to learn images." }, 400);
+  const r = await wardLearnBulk();
+  return c.json({ data: r });
+});
 app.post("/api/wardrobe/rerender", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({} as any));
