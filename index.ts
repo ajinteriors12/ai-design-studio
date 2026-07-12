@@ -12121,6 +12121,32 @@ const frontendHTML = `<!DOCTYPE html>
       if (cur.locked) parts.forEach((p) => p.locked = true);
       return { ok: true, parts: parts, accH: accH, minTotal: minTotal, cnt: cnt };
     };
+    // §2 cross-partition span: carve a covered band [b0, b0+accH] out of an adjacent column so a wide
+    // accessory (master.mergeId, span>1) reads across it. overwrite=false = safe mode: only when the band
+    // sits inside ONE plain (shelf/niche/spacer) cell or exactly matches a cell; else {ok:false, reason}.
+    // overwrite=true = replace whatever occupies the band. Returns {ok, cells} (column total preserved).
+    const spanBand = (cells, b0, accH, master, overwrite) => {
+      const b1 = b0 + accH; const below = [], above = [], touched = []; let acc = 0;
+      for (const c of cells) { const cb = acc, ct = acc + c.hMM; acc = ct; if (ct <= b0 + 0.5) below.push(c); else if (cb >= b1 - 0.5) above.push(c); else touched.push({ c: c, cb: cb, ct: ct }); }
+      if (!touched.length) return { ok: false, reason: "the band is outside this column" };
+      const plain = (k) => k === "shelf" || k === "niche" || k === "spacer" || k === "empty";
+      if (!overwrite) {
+        if (touched.length > 1) return { ok: false, reason: "it crosses more than one unit there" };
+        const t = touched[0], exact = Math.abs(t.cb - b0) < 2 && Math.abs(t.ct - b1) < 2;
+        if (!exact && !plain(t.c.kind)) return { ok: false, reason: "it would split a " + (t.c.label || t.c.kind) };
+        if (t.c.locked) return { ok: false, reason: "that compartment is locked" };
+      }
+      const first = touched[0], last = touched[touched.length - 1];
+      const belowRemH = Math.round(b0 - first.cb), aboveRemH = Math.round(last.ct - b1);
+      const out = below.slice();
+      if (belowRemH >= 1) out.push({ kind: first.c.kind, label: first.c.label, color: first.c.color, hMM: belowRemH });
+      out.push({ kind: master.kind, label: master.label, color: master.color, hMM: accH, covered: true, mergeId: master.mergeId });
+      if (aboveRemH >= 1) out.push({ kind: last.c.kind, label: last.c.label, color: last.c.color, hMM: aboveRemH });
+      above.forEach((c) => out.push(c));
+      const tot = cells.reduce((a, c) => a + c.hMM, 0), got = out.reduce((a, c) => a + c.hMM, 0), d = tot - got;
+      if (d !== 0) { const fix = aboveRemH >= 1 ? out[out.length - 1 - above.length] : (belowRemH >= 1 ? out[below.length] : null); if (fix) fix.hMM += d; }
+      return { ok: true, cells: out };
+    };
     function WardrobeDrawEditor({ opt, onCommit }) {
       const clone = (x) => JSON.parse(JSON.stringify(x));
       const [secs, setSecs] = useState(() => clone(opt.sections || []));
@@ -12352,8 +12378,19 @@ const frontendHTML = `<!DOCTYPE html>
         const res = wardFillBelow(cells, k, ins, clickMM, opts);   // shared fill-below core (also used by the 3D view)
         if (!res.ok) return null;   // guarded above by the minTotal check — belt-and-braces
         cells.splice(k, 1, ...res.parts);
+        // §2 cross-partition span — carry the accessory across adjacent columns of the same section as one wide unit
+        let spanLabel = "";
+        const spanN = Math.max(1, Math.min(opts.span || 1, sec.columns.length - ci));
+        if (spanN > 1) {
+          const master = cells[k]; let b0 = 0; for (let j = 0; j < k; j++) b0 += cells[j].hMM; const accH = master.hMM;
+          const mid = "mi" + si + "-" + ci + "-" + k + "-" + Math.round(b0);
+          const applied = []; let blocked = null;
+          for (let jc = ci + 1; jc < ci + spanN; jc++) { const jcol = sec.columns[jc]; if (!jcol) { blocked = { col: jc, reason: "no such column" }; break; } const r = spanBand(jcol.cells, b0, accH, { kind: ins.kind, label: ins.label, color: ins.color, mergeId: mid }, !!opts.overwrite); if (!r.ok) { blocked = { col: jc, reason: r.reason }; break; } applied.push({ jc: jc, cells: r.cells }); }
+          if (applied.length === spanN - 1) { master.span = spanN; master.mergeId = mid; applied.forEach((a) => { sec.columns[a.jc].cells = a.cells; }); spanLabel = " (spans " + spanN + " cols)"; }
+          else { setMmsg("Spanned only the clicked column — column " + ((blocked ? blocked.col : ci + 1) + 1) + ": " + (blocked ? blocked.reason : "no room") + ". Tick Overwrite to force it."); }
+        }
         setAdjust(null);
-        commit(n, "Insert " + ins.label + " (" + res.accH + " mm from base)" + (sec.label ? " · " + sec.label : ""));
+        commit(n, "Insert " + ins.label + (spanLabel || " (" + res.accH + " mm from base)") + (sec.label ? " · " + sec.label : ""));
         return { si: si, ci: ci, k: k };   // the accessory occupies the below zone → same index k
       };
       // Double-click a compartment's mm size to retype it — resizes it to the exact value, borrowing from
@@ -12402,7 +12439,7 @@ const frontendHTML = `<!DOCTYPE html>
         else if (kind === "dup") { const c = cells[k]; if (c.hMM < 120) { setMenu(null); return; } const half = Math.round(c.hMM / 2); c.hMM = c.hMM - half; const cp = { kind: c.kind, label: c.label, color: c.color, hMM: half }; if (c.locked) cp.locked = true; cells.splice(k + 1, 0, cp); }
         else if (kind === "copyProps") { const c = cells[k]; clip.current = { kind: c.kind, label: c.label, color: c.color }; setMenu(null); return; }   // copy only — no commit
         else if (kind === "pasteProps") { if (!clip.current) { setMenu(null); return; } cells[k].kind = clip.current.kind; cells[k].label = clip.current.label; cells[k].color = clip.current.color; }
-        else if (kind === "insert") { const r = insertAt(menu.si, menu.ci, menu.k, (menu.heightMM != null ? menu.heightMM : menu.clickMM), arg); setMenu(null); selectInserted(r); return; }   // exact-position insert commits itself + keeps the new cell selected (§10)
+        else if (kind === "insert") { const r = insertAt(menu.si, menu.ci, menu.k, (menu.heightMM != null ? menu.heightMM : menu.clickMM), arg, { span: menu.spanN || 1, overwrite: !!menu.spanOver }); setMenu(null); selectInserted(r); return; }   // exact-position insert commits itself + keeps the new cell selected (§10)
         else if (kind === "splitV") {   // split one compartment into N stacked compartments of the same kind
           const N = Math.max(2, Math.min(6, +arg || 2)), cur = cells[k];
           if (cur.span > 1) { const mid = cur.mergeId; delete cur.span; delete cur.mergeId; if (mid != null) for (const cc of sec.columns) for (const cl of (cc.cells || [])) if (cl.mergeId === mid) { delete cl.covered; delete cl.mergeId; } }
@@ -12506,6 +12543,7 @@ const frontendHTML = `<!DOCTYPE html>
                 <input type="number" value={menu.heightMM != null ? menu.heightMM : (menu.clickMM || 0)} step="5" min="0" onClick={(e) => e.stopPropagation()} onChange={(e) => { const v = Math.max(0, Math.round((+e.target.value || 0) / 5) * 5); setMenu((m) => m ? { ...m, heightMM: v } : m); }} className="w-16 px-1 py-0 border border-rose-200 rounded text-rose-700 text-[11px]" title="Type an exact height in mm from the floor" /> mm
               </div>
               {(() => { const mc = secs[menu.si] && secs[menu.si].columns[menu.ci]; const cell = mc && mc.cells[menu.k]; if (!cell) return null; let cb = 0; for (let j = 0; j < menu.k; j++) cb += mc.cells[j].hMM; const h = menu.heightMM != null ? menu.heightMM : menu.clickMM; let below = Math.max(0, Math.min(Math.round((h - cb) / 5) * 5, cell.hMM)); let above = cell.hMM - below; if (above < 40) { above = 0; below = cell.hMM; } return <div className="px-3 pb-0.5 text-[10px] text-slate-500">Below → new: <b className="text-emerald-600">{below} mm</b> · above kept: <b className="text-slate-600">{above} mm</b></div>; })()}
+              {(() => { const cols = secs[menu.si] && secs[menu.si].columns; const avail = cols ? cols.length - menu.ci : 1; if (avail < 2) return null; const maxS = Math.min(4, avail); const arr = []; for (let s = 1; s <= maxS; s++) arr.push(s); return <div className="px-3 pb-0.5 text-[10px] text-slate-500 flex items-center gap-1">Span cols <span className="flex gap-0.5">{arr.map((s) => <button key={s} onClick={(e) => { e.stopPropagation(); setMenu((m) => m ? { ...m, spanN: s } : m); }} className={"px-1.5 rounded border " + ((menu.spanN || 1) === s ? "bg-indigo-600 text-white border-indigo-600" : "border-slate-300 text-slate-600 hover:bg-indigo-50")}>{s}</button>)}</span>{(menu.spanN || 1) > 1 && <label className="flex items-center gap-0.5 ml-1" title="Replace whatever occupies that height in the spanned columns" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={!!menu.spanOver} onChange={(e) => setMenu((m) => m ? { ...m, spanOver: e.target.checked } : m)} /> overwrite</label>}</div>; })()}
               {WARD_INSERTS.map((t) => mi("+ " + t.label, () => op("insert", t.arg)))}
               {mi("⧉ Duplicate", () => op("dup"))}
               {mi("🗑 Delete", () => op("delete"))}
