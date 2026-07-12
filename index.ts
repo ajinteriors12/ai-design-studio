@@ -11816,6 +11816,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [light, setLight] = useState("day");       // §13.6 lighting preset
       const [fly, setFly] = useState(false);           // §13.1 fly-through (auto-orbit)
       const [led, setLed] = useState(false);           // §13 decorative LED strip lighting
+      const [dims3d, setDims3d] = useState(false);     // dimension annotations overlay in 3D (W×H×D + per-cell)
       const [menu3d, setMenu3d] = useState(null);      // §13.3 3D right-click menu
       const modeRef = React.useRef("persp"), explRef = React.useRef(0), secRef = React.useRef(0), shadRef = React.useRef(false), qualRef = React.useRef("med"), lightRef = React.useRef("day"), flyRef = React.useRef(false), exportRef = React.useRef(null), opRef = React.useRef(null);
       React.useEffect(() => { modeRef.current = vmode; }, [vmode]);
@@ -11825,6 +11826,8 @@ const frontendHTML = `<!DOCTYPE html>
       React.useEffect(() => { qualRef.current = quality; }, [quality]);
       React.useEffect(() => { lightRef.current = light; }, [light]);
       React.useEffect(() => { flyRef.current = fly; }, [fly]);
+      const dimRef = React.useRef(false);
+      React.useEffect(() => { dimRef.current = dims3d; }, [dims3d]);   // toggle-only: no scene rebuild (visibility flipped in the render loop)
       React.useEffect(() => {
         const THREE = window.THREE; if (!THREE || !ref.current || !opt) return;
         const host = ref.current, Wv = host.clientWidth || 640, Hv = 440;
@@ -11852,12 +11855,40 @@ const frontendHTML = `<!DOCTYPE html>
         const clipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 1e7);   // §13.4 section cut (X-plane, off by default)
         let lodSkipEdges = false;   // §13 LOD: on large/busy wardrobes drop interior edge overlays + rod segments
         let boxTarget = g;          // §20 folded L/U build routes meshes into per-wing sub-groups
+        let dimObjs = [];           // dimension overlay objects (lines + label sprites), toggled via dimRef
         // §20 folded L/U-shape 3D: fold the flat run into wings + corners (mirrors renderWardrobePlanShaped geometry)
         const isFolded = (opt.shape === "l" || opt.shape === "u") && Array.isArray(opt.wings) && opt.wings.length > 0;
         let foldCx = 0, foldCz = 0, foldBw = Wd;   // footprint centre + span for explode/section in folded mode
         let ledMatShared = null;
         const getLedMat = () => ledMatShared || (ledMatShared = new THREE.MeshStandardMaterial({ color: 0xfff4d6, emissive: 0xffe6a8, emissiveIntensity: 1.5, roughness: 0.4, clippingPlanes: [clipPlane] }));
         const box = (w, h, d, x, y, z, col, opac, ud) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.72, transparent: opac != null, opacity: opac == null ? 1 : opac, clippingPlanes: [clipPlane], clipShadows: true })); m.position.set(x, y, z); m.userData = ud ? Object.assign({}, ud, { base: { x, y, z } }) : { base: { x, y, z } }; m.castShadow = true; boxTarget.add(m); if (!(opac != null && opac < 0.02) && !(lodSkipEdges && ud && ud.cell)) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: (ud && ud.key === selKey) ? 0x4338ca : 0x94a3b8, clippingPlanes: [clipPlane] })); e.position.copy(m.position); e.userData = { base: { x, y, z } }; boxTarget.add(e); } return m; };
+        // ── Dimension overlay helpers (mm labels + tick lines; hidden until 📐 Dim is on) ──
+        const addDim = (ob) => { ob.visible = dimRef.current; dimObjs.push(ob); return ob; };
+        const makeLabel = (txt, o) => {
+          o = o || {}; const fs = o.fs || 46, pad = 8;
+          const cv = document.createElement("canvas"); let ctx = cv.getContext("2d");
+          ctx.font = "bold " + fs + "px Arial, sans-serif";
+          const tw = Math.ceil(ctx.measureText(txt).width);
+          cv.width = tw + pad * 2; cv.height = fs + pad * 2;
+          ctx = cv.getContext("2d"); ctx.font = "bold " + fs + "px Arial, sans-serif";
+          ctx.fillStyle = o.bg || "rgba(255,255,255,0.88)"; ctx.fillRect(0, 0, cv.width, cv.height);
+          ctx.strokeStyle = o.border || "rgba(100,116,139,0.55)"; ctx.lineWidth = 2; ctx.strokeRect(1, 1, cv.width - 2, cv.height - 2);
+          ctx.fillStyle = o.color || "#1e293b"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(txt, cv.width / 2, cv.height / 2 + 1);
+          const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
+          const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }));
+          const mmH = o.mm || 80; sp.scale.set(mmH * cv.width / cv.height, mmH, 1); sp.renderOrder = 999; return sp;
+        };
+        const addLine = (pts) => { const geo = new THREE.BufferGeometry().setFromPoints(pts.map((p) => new THREE.Vector3(p[0], p[1], p[2]))); const ln = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x475569, depthTest: false, transparent: true })); ln.renderOrder = 998; boxTarget.add(ln); return addDim(ln); };
+        const dimLabel = (pos, txt, o) => { const lb = makeLabel(txt, o); lb.position.set(pos[0], pos[1], pos[2]); boxTarget.add(lb); return addDim(lb); };
+        const dimSeg = (p1, p2, tick, label, o) => {   // extension line with slash-ticks + centred mm label
+          o = o || {}; const t = tick || [0, 0, 0];
+          addLine([p1, p2]);
+          addLine([[p1[0] - t[0], p1[1] - t[1], p1[2] - t[2]], [p1[0] + t[0], p1[1] + t[1], p1[2] + t[2]]]);
+          addLine([[p2[0] - t[0], p2[1] - t[1], p2[2] - t[2]], [p2[0] + t[0], p2[1] + t[1], p2[2] + t[2]]]);
+          const off = o.loff || [0, 0, 0];
+          dimLabel([(p1[0] + p2[0]) / 2 + off[0], (p1[1] + p2[1]) / 2 + off[1], (p1[2] + p2[2]) / 2 + off[2]], label, { mm: o.mm || 95, color: o.color || "#334155" });
+        };
         // shared column renderer — partition + cells (+ per-column shutter & LED strip), at local run offset localX
         const emitColumn = (col, si, ci, localX, secKind, cols) => {
           const colCw = col.w, colMid = localX + colCw / 2, usableH = H - plinth - loftH;
@@ -11876,8 +11907,11 @@ const frontendHTML = `<!DOCTYPE html>
             else if (kind === "cornerLemans") box(cw - 20, T + 4, D - 60, cxMid - 8, yt - 10, 8, hl ? 0x818cf8 : 0x5eead4, null, ud);
             else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
             else box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
+            if (ch >= 90) dimLabel([cxMid, yb + ch / 2, D / 2 + 34], String(Math.round(ch)), { mm: Math.min(80, Math.max(50, ch * 0.5)), color: "#3730a3", bg: "rgba(238,242,255,0.92)" });
             yb = yt;
           });
+          // per-column running width label above the column (front face)
+          dimLabel([colMid, H + 70, D / 2], String(Math.round(colCw)), { mm: 88, color: "#0f766e", bg: "rgba(240,253,250,0.92)" });
           // left partition — drawn in segments so a covered (merged) band leaves the opening clear
           if (localX > 0) { let yp = plinth; col.cells.forEach((cell) => { const ch = cell.hMM; if (!cell.covered) box(T, ch, D, localX, yp + ch / 2, 0, WOOD); yp += ch; }); }
           if (shutters) { const fh = finHex(secKind); box(colCw - 4, H - 20, T, colMid, H / 2, D / 2 - T / 2, fh || 0xbcd0e6, fh ? 0.82 : 0.28); }
@@ -11892,6 +11926,10 @@ const frontendHTML = `<!DOCTYPE html>
           if (loftH > 0) box(Wd, T, loftD, Wd / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
           if (opt.beam && opt.beam.on) { const bh = H - opt.beam.soffit; if (bh > 20) box(opt.beam.width, bh, D + 40, opt.beam.pos + opt.beam.width / 2, opt.beam.soffit + bh / 2, 0, 0xf97316, 0.6); }
           secsData.forEach((sec, si) => sec.columns.forEach((col, ci) => emitColumn(col, si, ci, col.x, sec.kind, sec.columns)));
+          // overall W×H×D dimension chains (outside the carcass, front face)
+          dimSeg([0, H + 200, D / 2], [Wd, H + 200, D / 2], [0, 42, 0], String(Math.round(Wd)), { mm: 128, color: "#0f172a", loff: [0, 78, 0] });
+          dimSeg([-200, plinth, D / 2], [-200, H, D / 2], [42, 0, 0], String(Math.round(H)), { mm: 128, color: "#0f172a", loff: [-100, 0, 0] });
+          dimSeg([Wd + 200, 0, -D / 2], [Wd + 200, 0, D / 2], [0, 42, 0], String(Math.round(D)), { mm: 118, color: "#0f172a", loff: [150, 0, 0] });
           if (led) [0.25, 0.75].forEach((fx) => { const lp = new THREE.PointLight(0xffe1a6, 0.5, spanE * 2.4); lp.position.set(Wd * fx, (loftH > 0 ? H - loftH : H) - T - 6, D); lp.userData = { base: { x: Wd * fx, y: (loftH > 0 ? H - loftH : H) - T - 6, z: D } }; g.add(lp); });
           g.position.set(-Wd / 2, -H / 2, 0);
         };
@@ -11958,7 +11996,7 @@ const frontendHTML = `<!DOCTYPE html>
         const buildGroup = (secsData) => {
           g.traverse((o) => { if (o !== g) { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.dispose) o.material.dispose(); } });
           while (g.children.length) g.remove(g.children[0]);
-          boxTarget = g; ledMatShared = null;
+          boxTarget = g; ledMatShared = null; dimObjs.length = 0;
           const cellCnt = secsData.reduce((a, s) => a + s.columns.reduce((b, c) => b + c.cells.length, 0), 0);
           lodSkipEdges = cellCnt > 36;   // §13 LOD kicks in on busy layouts
           if (isFolded) buildFolded(secsData); else buildFlat(secsData);
@@ -12004,7 +12042,7 @@ const frontendHTML = `<!DOCTYPE html>
           }
           dirty = true; if (onEdit) onEdit(JSON.parse(JSON.stringify(work)));
         };
-        try { window.__adsWard3DInsert = (si, ci, k, mm, a) => { if (opRef.current) opRef.current("insert", a, si, ci, k, mm); }; window.__adsWard3DSecs = () => JSON.parse(JSON.stringify(work)); } catch (z) {}
+        try { window.__adsWard3DInsert = (si, ci, k, mm, a) => { if (opRef.current) opRef.current("insert", a, si, ci, k, mm); }; window.__adsWard3DSecs = () => JSON.parse(JSON.stringify(work)); window.__adsWard3DDims = () => ({ n: dimObjs.length, vis: dimObjs.filter((o) => o.visible).length }); } catch (z) {}
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
         let drag = null, dirty = false;
         const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, true); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
@@ -12015,13 +12053,14 @@ const frontendHTML = `<!DOCTYPE html>
         const onCtx = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, true); let u = null, frac = 0.5; for (const h of hits) { if (h.object.userData && h.object.userData.cell) { u = h.object.userData; const bb = new THREE.Box3().setFromObject(h.object); const span = bb.max.y - bb.min.y; if (span > 1 && h.point) frac = Math.max(0, Math.min(1, (h.point.y - bb.min.y) / span)); break; } } if (!u) return; e.preventDefault(); selKey = u.key; dirty = true; const cs = work[u.si].columns[u.ci].cells; let cb = 0; for (let j = 0; j < u.k; j++) cb += cs[j].hMM; const clickMM = Math.round((cb + frac * cs[u.k].hMM) / 5) * 5; setMenu3d({ x: e.clientX, y: e.clientY, si: u.si, ci: u.ci, k: u.k, clickMM: clickMM }); };
         renderer.domElement.addEventListener("pointerdown", onDown); renderer.domElement.addEventListener("contextmenu", onCtx);
         window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp);
-        let raf, lastMode = null, lastExpl = -1, lastQ = "", lastLight = "";
+        let raf, lastMode = null, lastExpl = -1, lastQ = "", lastLight = "", lastDim = null;
         const loop = () => {
           raf = requestAnimationFrame(loop);
           if (dirty) { buildGroup(work); dirty = false; lastExpl = -1; }
           const ex = explRef.current;
           if (ex !== lastExpl) { const cX = isFolded ? foldCx : Wd / 2, cZ = isFolded ? foldCz : 0; g.children.forEach((ch) => { const b = ch.userData && ch.userData.base; if (b) ch.position.set(b.x + (b.x - cX) * ex, b.y + (b.y - H / 2) * ex, b.z + (b.z - cZ) * ex * 1.8); }); lastExpl = ex; }
           if (modeRef.current !== lastMode) { applyMode(modeRef.current); lastMode = modeRef.current; }
+          if (dimRef.current !== lastDim) { for (let i = 0; i < dimObjs.length; i++) dimObjs[i].visible = dimRef.current; lastDim = dimRef.current; }
           clipPlane.constant = secRef.current > 0 ? (foldBw / 2 - secRef.current * foldBw) : 1e7;
           if (dl.castShadow !== shadRef.current) dl.castShadow = shadRef.current;
           if (qualRef.current !== lastQ) { const q = qualRef.current, pr = q === "low" ? 1 : q === "high" ? Math.min(window.devicePixelRatio || 1, 2) : 1.5; renderer.setPixelRatio(pr); renderer.setSize(host.clientWidth || Wv, Hv); lastQ = q; }
@@ -12044,6 +12083,7 @@ const frontendHTML = `<!DOCTYPE html>
           <select value={quality} onChange={(e) => setQuality(e.target.value)} className="px-1.5 py-1 border border-slate-200 rounded bg-white">{[["low", "Low"], ["med", "Medium"], ["high", "High"]].map((o) => <option key={o[0]} value={o[0]}>{o[1]}</option>)}</select>
           <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={fly} onChange={(e) => setFly(e.target.checked)} /> Fly</label>
           <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={led} onChange={(e) => setLed(e.target.checked)} /> 💡LED</label>
+          <label className="flex items-center gap-1 text-slate-500" title="Show mm dimensions (overall W×H×D, per-column widths, per-cell heights)"><input type="checkbox" checked={dims3d} onChange={(e) => setDims3d(e.target.checked)} /> 📐 Dim</label>
           <button onClick={() => setShutters((s) => !s)} className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button>
           <span className="text-slate-400">Export</span>
           {["obj", "gltf", "stl"].map((f) => <button key={f} onClick={() => exportRef.current && exportRef.current(f)} className="px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 uppercase">{f === "gltf" ? "GLB" : f}</button>)}
