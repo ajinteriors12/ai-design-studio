@@ -11984,9 +11984,10 @@ const frontendHTML = `<!DOCTYPE html>
         const exportStl = () => { const lines = ["solid wardrobe"]; const n = new THREE.Vector3(), ab = new THREE.Vector3(), ac = new THREE.Vector3(); eachTri((a, b, c) => { ab.subVectors(b, a); ac.subVectors(c, a); n.crossVectors(ab, ac).normalize(); lines.push(" facet normal " + n.x.toFixed(4) + " " + n.y.toFixed(4) + " " + n.z.toFixed(4), "  outer loop", "   vertex " + a.x.toFixed(1) + " " + a.y.toFixed(1) + " " + a.z.toFixed(1), "   vertex " + b.x.toFixed(1) + " " + b.y.toFixed(1) + " " + b.z.toFixed(1), "   vertex " + c.x.toFixed(1) + " " + c.y.toFixed(1) + " " + c.z.toFixed(1), "  endloop", " endfacet"); }); lines.push("endsolid wardrobe"); saveBlobAs(new Blob([lines.join("\\n")], { type: "model/stl" }), fname("stl")); };
         const exportGltf = () => { if (!THREE.GLTFExporter) { alert("GLTF exporter not loaded — try again."); return; } const meshes = g.children.filter((ch) => ch.isMesh); try { new THREE.GLTFExporter().parse(meshes.length ? meshes : g, (out) => { const bin = out instanceof ArrayBuffer; saveBlobAs(new Blob([bin ? out : JSON.stringify(out)], { type: bin ? "model/gltf-binary" : "model/gltf+json" }), fname(bin ? "glb" : "gltf")); }, { binary: true }); } catch (e) { alert("GLTF export failed: " + (e && e.message)); } };
         exportRef.current = (fmt) => { if (fmt === "gltf") exportGltf(); else if (fmt === "stl") exportStl(); else exportObj(); };
-        opRef.current = (kind, arg, si, ci, k) => {
+        opRef.current = (kind, arg, si, ci, k, clickMM) => {
           const cells = work[si] && work[si].columns[ci] && work[si].columns[ci].cells; if (!cells || !cells[k]) return;
           if (kind === "convert") { const cv = WARD_CONVERTS.find((c) => c.kind === arg); if (cv) { cells[k].kind = cv.kind; cells[k].label = cv.label; cells[k].color = cv.color; } }
+          else if (kind === "insert") { const ins = WARD_INSERTS.find((x) => x.arg === arg); if (!ins || cells[k].covered || cells[k].locked) return; const res = wardFillBelow(cells, k, ins, clickMM); if (!res.ok) { setSelInfo({ label: ins.label + " needs " + res.minTotal + "+ mm", mm: cells[k].hMM }); return; } cells.splice(k, 1, ...res.parts); }
           else if (kind === "add") { const isD = arg === "drawer"; const take = Math.min(cells[k].hMM - 60, isD ? 200 : 300); if (take < 60) return; cells[k].hMM -= take; cells.splice(k + 1, 0, { kind: isD ? "drawer" : "shelf", label: isD ? "Drawer" : "Shelf", color: isD ? "#ec4899" : "#22c55e", hMM: take }); }
           else if (kind === "delete") { if (cells.length < 2) return; const h = cells[k].hMM; cells.splice(k, 1); cells[Math.min(k, cells.length - 1)].hMM += h; }
           else if (kind === "lock") cells[k].locked = !cells[k].locked;
@@ -12003,6 +12004,7 @@ const frontendHTML = `<!DOCTYPE html>
           }
           dirty = true; if (onEdit) onEdit(JSON.parse(JSON.stringify(work)));
         };
+        try { window.__adsWard3DInsert = (si, ci, k, mm, a) => { if (opRef.current) opRef.current("insert", a, si, ci, k, mm); }; window.__adsWard3DSecs = () => JSON.parse(JSON.stringify(work)); } catch (z) {}
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
         let drag = null, dirty = false;
         const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, true); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
@@ -12010,7 +12012,7 @@ const frontendHTML = `<!DOCTYPE html>
         const onDown = (e) => { if (e.button !== 0) return; const u = pick(e); if (!u) return; e.preventDefault(); controls.enabled = false; drag = { si: u.si, ci: u.ci, k: u.k, y: e.clientY, wpp: worldPerPx(), moved: false }; selKey = u.key; const c0 = work[u.si].columns[u.ci].cells[u.k]; setSelInfo({ label: c0.label, mm: c0.hMM }); dirty = true; };
         const onMove = (e) => { if (!drag) return; const dMM = Math.round(-(e.clientY - drag.y) * drag.wpp / 5) * 5; if (!dMM) return; const cells = work[drag.si].columns[drag.ci].cells, cur = cells[drag.k], nb = cells[drag.k + 1] || cells[drag.k - 1]; if (!nb || cur.hMM + dMM < 60 || nb.hMM - dMM < 60) return; cur.hMM += dMM; nb.hMM -= dMM; drag.y = e.clientY; drag.moved = true; dirty = true; setSelInfo({ label: cur.label, mm: cur.hMM }); };
         const onUp = () => { if (!drag) return; const moved = drag.moved; controls.enabled = true; drag = null; if (moved && onEdit) onEdit(JSON.parse(JSON.stringify(work))); };
-        const onCtx = (e) => { const u = pick(e); if (!u) return; e.preventDefault(); selKey = u.key; dirty = true; setMenu3d({ x: e.clientX, y: e.clientY, si: u.si, ci: u.ci, k: u.k }); };
+        const onCtx = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, true); let u = null, frac = 0.5; for (const h of hits) { if (h.object.userData && h.object.userData.cell) { u = h.object.userData; const bb = new THREE.Box3().setFromObject(h.object); const span = bb.max.y - bb.min.y; if (span > 1 && h.point) frac = Math.max(0, Math.min(1, (h.point.y - bb.min.y) / span)); break; } } if (!u) return; e.preventDefault(); selKey = u.key; dirty = true; const cs = work[u.si].columns[u.ci].cells; let cb = 0; for (let j = 0; j < u.k; j++) cb += cs[j].hMM; const clickMM = Math.round((cb + frac * cs[u.k].hMM) / 5) * 5; setMenu3d({ x: e.clientX, y: e.clientY, si: u.si, ci: u.ci, k: u.k, clickMM: clickMM }); };
         renderer.domElement.addEventListener("pointerdown", onDown); renderer.domElement.addEventListener("contextmenu", onCtx);
         window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp);
         let raf, lastMode = null, lastExpl = -1, lastQ = "", lastLight = "";
@@ -12053,9 +12055,10 @@ const frontendHTML = `<!DOCTYPE html>
         {(opt.shape === "l" || opt.shape === "u") && <div style={{ position: "absolute", left: 8, bottom: 8, zIndex: 10 }} className="text-[10px] bg-white/85 border border-teal-200 text-teal-700 rounded px-2 py-1">◱ Folded {opt.shape === "u" ? "U-shape" : "L-shape"} — wings turn 90° at each teal corner unit. Orbit to inspect; section-cut &amp; exploded are approximate in folded view.</div>}
         {menu3d && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu3d(null)} onContextMenu={(e) => { e.preventDefault(); setMenu3d(null); }} />
-          <div style={{ position: "fixed", left: Math.min(menu3d.x, window.innerWidth - 190), top: Math.min(menu3d.y, window.innerHeight - 300), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1">
-            {mi3("+ Add shelf", () => { if (opRef.current) opRef.current("add", "shelf", menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
-            {mi3("+ Add drawer", () => { if (opRef.current) opRef.current("add", "drawer", menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
+          <div style={{ position: "fixed", left: Math.min(menu3d.x, window.innerWidth - 190), top: Math.min(menu3d.y, window.innerHeight - 460), zIndex: 50, maxHeight: "88vh", overflowY: "auto" }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1">
+            <div className="px-3 py-0.5 text-rose-500 font-semibold">Insert{menu3d.clickMM != null ? " · below " + menu3d.clickMM + " mm" : ""}… <span className="text-slate-400 font-normal">(fills below)</span></div>
+            {WARD_INSERTS.map((t) => mi3("+ " + t.label, () => { if (opRef.current) opRef.current("insert", t.arg, menu3d.si, menu3d.ci, menu3d.k, menu3d.clickMM); setMenu3d(null); }))}
+            <div className="border-t border-slate-100 my-1" />
             {mi3("🗑 Delete section", () => { if (opRef.current) opRef.current("delete", null, menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
             <div className="border-t border-slate-100 my-1" />
             <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
@@ -12078,6 +12081,46 @@ const frontendHTML = `<!DOCTYPE html>
       { kind: "drawer", label: "Drawer", color: "#ec4899" }, { kind: "shoe", label: "Shoe Rack", color: "#d4a574" },
       { kind: "safe", label: "Safe Locker", color: "#ef4444" },
     ];
+    // §4 accessories that can be inserted at an exact height (shared by the 2D editor + the 3D view).
+    // kind = renderable wardrobe compartment kind; h = natural per-cell height (mm); n = stacked cells;
+    // min = minimum per-cell height so tall accessories (hanging) can't land in a too-short zone.
+    const WARD_INSERTS = [
+      { arg: "shelf", label: "Shelf", kind: "shelf", color: "#22c55e", h: 250 },
+      { arg: "shelfAdj", label: "Adjustable Shelf", kind: "shelf", color: "#22c55e", h: 250 },
+      { arg: "shelfFixed", label: "Fixed Shelf", kind: "shelf", color: "#16a34a", h: 250 },
+      { arg: "shelfGlass", label: "Glass Shelf", kind: "shelf", color: "#38bdf8", h: 220 },
+      { arg: "niche", label: "Open Niche", kind: "shelf", color: "#94a3b8", h: 300 },
+      { arg: "drawer", label: "Single Drawer", kind: "drawer", color: "#ec4899", h: 200 },
+      { arg: "drawer2", label: "Double Drawer", kind: "drawer", color: "#ec4899", h: 190, n: 2 },
+      { arg: "drawer3", label: "Triple Drawer", kind: "drawer", color: "#ec4899", h: 180, n: 3 },
+      { arg: "longHang", label: "Long Hanging", kind: "longHang", color: "#3b82f6", h: 1050, min: 900 },
+      { arg: "shortHang", label: "Short Hanging", kind: "shortHang", color: "#60a5fa", h: 900, min: 750 },
+      { arg: "pantRack", label: "Trouser Rack", kind: "pantRack", color: "#8b5cf6", h: 150 },
+      { arg: "shoe", label: "Shoe Rack", kind: "shoe", color: "#a16207", h: 180 },
+      { arg: "jewellery", label: "Jewellery Tray", kind: "jewellery", color: "#f59e0b", h: 90 },
+      { arg: "safe", label: "Safe Locker", kind: "safe", color: "#b91c1c", h: 300 },
+      { arg: "basket", label: "Pull-out Basket", kind: "drawer", color: "#db2777", h: 200 },
+      { arg: "laundry", label: "Laundry Basket", kind: "drawer", color: "#6366f1", h: 350 },
+      { arg: "custom", label: "Custom Accessory", kind: "shelf", color: "#94a3b8", h: 250 },
+    ];
+    // Fill-below insert core: clickMM (mm from the column floor) is the TOP of the accessory; the area
+    // below it inside cell k becomes the accessory, the area above keeps the original kind. Returns
+    // {ok, parts, accH, minTotal, cnt}; ok=false when the whole compartment is below the minimum.
+    const wardFillBelow = (cells, k, ins, clickMM, opts) => {
+      opts = opts || {}; const cur = cells[k]; if (!cur) return { ok: false, minTotal: 0, cnt: 1 };
+      const cnt = Math.max(1, ins.n || 1), minTotal = cnt * (ins.min != null ? ins.min : 60);
+      if (cur.hMM < minTotal) return { ok: false, minTotal: minTotal, cnt: cnt };
+      let cellBottom = 0; for (let j = 0; j < k; j++) cellBottom += cells[j].hMM;
+      let accH = opts.reduce ? cur.hMM : (clickMM != null ? Math.round((clickMM - cellBottom) / 5) * 5 : cur.hMM);
+      accH = Math.max(minTotal, Math.min(accH, cur.hMM));
+      let above = cur.hMM - accH; if (above < 40) { above = 0; accH = cur.hMM; }
+      const each = Math.round(accH / cnt), made = [];
+      for (let i = 0; i < cnt; i++) made.push({ kind: ins.kind, label: ins.label, color: ins.color, hMM: i === cnt - 1 ? accH - each * (cnt - 1) : each });
+      const parts = made.slice();
+      if (above > 0) parts.push({ kind: cur.kind, label: cur.label, color: cur.color, hMM: above });
+      if (cur.locked) parts.forEach((p) => p.locked = true);
+      return { ok: true, parts: parts, accH: accH, minTotal: minTotal, cnt: cnt };
+    };
     function WardrobeDrawEditor({ opt, onCommit }) {
       const clone = (x) => JSON.parse(JSON.stringify(x));
       const [secs, setSecs] = useState(() => clone(opt.sections || []));
@@ -12134,27 +12177,6 @@ const frontendHTML = `<!DOCTYPE html>
         return () => window.removeEventListener("keydown", onKey);
       }, [history]);
       const CONVERT_KINDS = WARD_CONVERTS.concat([{ kind: "jewellery", label: "Jewellery", color: "#f59e0b" }, { kind: "cosmetics", label: "Cosmetics", color: "#fb7185" }, { kind: "hanging", label: "Hanging", color: "#3b82f6" }]);
-      // §4 accessories that can be inserted at the exact right-click height. kind = the underlying
-      // renderable wardrobe compartment kind; h = per-cell height (mm); n = stacked cells (drawer banks).
-      const WARD_INSERTS = [
-        { arg: "shelf", label: "Shelf", kind: "shelf", color: "#22c55e", h: 250 },
-        { arg: "shelfAdj", label: "Adjustable Shelf", kind: "shelf", color: "#22c55e", h: 250 },
-        { arg: "shelfFixed", label: "Fixed Shelf", kind: "shelf", color: "#16a34a", h: 250 },
-        { arg: "shelfGlass", label: "Glass Shelf", kind: "shelf", color: "#38bdf8", h: 220 },
-        { arg: "niche", label: "Open Niche", kind: "shelf", color: "#94a3b8", h: 300 },
-        { arg: "drawer", label: "Single Drawer", kind: "drawer", color: "#ec4899", h: 200 },
-        { arg: "drawer2", label: "Double Drawer", kind: "drawer", color: "#ec4899", h: 190, n: 2 },
-        { arg: "drawer3", label: "Triple Drawer", kind: "drawer", color: "#ec4899", h: 180, n: 3 },
-        { arg: "longHang", label: "Long Hanging", kind: "longHang", color: "#3b82f6", h: 1050, min: 900 },
-        { arg: "shortHang", label: "Short Hanging", kind: "shortHang", color: "#60a5fa", h: 900, min: 750 },
-        { arg: "pantRack", label: "Trouser Rack", kind: "pantRack", color: "#8b5cf6", h: 150 },
-        { arg: "shoe", label: "Shoe Rack", kind: "shoe", color: "#a16207", h: 180 },
-        { arg: "jewellery", label: "Jewellery Tray", kind: "jewellery", color: "#f59e0b", h: 90 },
-        { arg: "safe", label: "Safe Locker", kind: "safe", color: "#b91c1c", h: 300 },
-        { arg: "basket", label: "Pull-out Basket", kind: "drawer", color: "#db2777", h: 200 },
-        { arg: "laundry", label: "Laundry Basket", kind: "drawer", color: "#6366f1", h: 350 },
-        { arg: "custom", label: "Custom Accessory", kind: "shelf", color: "#94a3b8", h: 250 },
-      ];
       const spanWmm = (cols, ci, cell) => { const nn = Math.max(1, Math.round((cell && cell.span) || 1)); let w = 0; for (let j = 0; j < nn && ci + j < cols.length; j++) w += cols[ci + j].w; return w; };
       const toggleSel = (si, ci, k, e) => {
         const key = si + "-" + ci + "-" + k; setMmsg("");
@@ -12327,18 +12349,11 @@ const frontendHTML = `<!DOCTYPE html>
           setAdjust({ si: si, ci: ci, k: k, arg: arg, label: ins.label, avail: Math.round(cur.hMM), need: minTotal, cnt: cnt, canReduce: false });
           return null;
         }
-        // accessory height = the area below the clicked height, clamped to [minTotal, whole compartment]
-        let accH = opts.reduce ? cur.hMM : (clickMM != null ? Math.round((clickMM - cellBottom) / 5) * 5 : cur.hMM);
-        accH = Math.max(minTotal, Math.min(accH, cur.hMM));
-        let above = cur.hMM - accH; if (above < 40) { above = 0; accH = cur.hMM; }   // no sliver remnant
-        const each = Math.round(accH / cnt), made = [];
-        for (let i = 0; i < cnt; i++) made.push({ kind: ins.kind, label: ins.label, color: ins.color, hMM: i === cnt - 1 ? accH - each * (cnt - 1) : each });
-        const parts = made.slice();
-        if (above > 0) parts.push({ kind: cur.kind, label: cur.label, color: cur.color, hMM: above });
-        if (cur.locked) parts.forEach((p) => p.locked = true);
-        cells.splice(k, 1, ...parts);
+        const res = wardFillBelow(cells, k, ins, clickMM, opts);   // shared fill-below core (also used by the 3D view)
+        if (!res.ok) return null;   // guarded above by the minTotal check — belt-and-braces
+        cells.splice(k, 1, ...res.parts);
         setAdjust(null);
-        commit(n, "Insert " + ins.label + " (" + accH + " mm from base)" + (sec.label ? " · " + sec.label : ""));
+        commit(n, "Insert " + ins.label + " (" + res.accH + " mm from base)" + (sec.label ? " · " + sec.label : ""));
         return { si: si, ci: ci, k: k };   // the accessory occupies the below zone → same index k
       };
       // Double-click a compartment's mm size to retype it — resizes it to the exact value, borrowing from
