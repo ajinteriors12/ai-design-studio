@@ -11926,6 +11926,13 @@ const frontendHTML = `<!DOCTYPE html>
           if (loftH > 0) box(Wd, T, loftD, Wd / 2, H - loftH - T / 2, -(D - loftD) / 2, WOOD);
           if (opt.beam && opt.beam.on) { const bh = H - opt.beam.soffit; if (bh > 20) box(opt.beam.width, bh, D + 40, opt.beam.pos + opt.beam.width / 2, opt.beam.soffit + bh / 2, 0, 0xf97316, 0.6); }
           secsData.forEach((sec, si) => sec.columns.forEach((col, ci) => emitColumn(col, si, ci, col.x, sec.kind, sec.columns)));
+          // editable loft compartments per column (colored cells + horizontal dividers + column partitions)
+          if (loftH > 0) secsData.forEach((sec) => sec.columns.forEach((col) => {
+            const lc = (Array.isArray(col.loftCells) && col.loftCells.length) ? col.loftCells : [{ kind: "loft", hMM: loftH, color: "#fcd34d" }];
+            const lsum = lc.reduce((a, c) => a + (c.hMM || 0), 0) || loftH; let yl = H - loftH;
+            lc.forEach((cell, k) => { const chp = (cell.hMM / lsum) * loftH, cc = parseInt(String(cell.color || "#fcd34d").slice(1), 16) || 0xfcd34d; box(col.w - 6, Math.max(6, chp - 4), loftD - 20, col.x + col.w / 2, yl + chp / 2, -(D - loftD) / 2, cc, 0.5); if (k > 0) box(col.w - 4, T, loftD - 10, col.x + col.w / 2, yl, -(D - loftD) / 2, WOOD); yl += chp; });
+            if (col.x > 0) box(T, loftH, loftD, col.x, H - loftH / 2, -(D - loftD) / 2, WOOD);
+          }));
           // overall W×H×D dimension chains (outside the carcass, front face)
           dimSeg([0, H + 200, D / 2], [Wd, H + 200, D / 2], [0, 42, 0], String(Math.round(Wd)), { mm: 128, color: "#0f172a", loff: [0, 78, 0] });
           dimSeg([-200, plinth, D / 2], [-200, H, D / 2], [42, 0, 0], String(Math.round(H)), { mm: 128, color: "#0f172a", loff: [-100, 0, 0] });
@@ -12208,7 +12215,7 @@ const frontendHTML = `<!DOCTYPE html>
         lastStruct.current = cur;                  // a genuinely different design was loaded → start fresh
         const fresh = clone(opt.sections || []);
         setSecs(fresh); setHistory({ list: [{ secs: clone(fresh), label: "Opened design" }], ptr: 0 });
-        setMsel([]); setMergeMode(false); setMmsg(""); setLasso(false); setLassoPath(null); setAdjust(null); setEditH(null);
+        setMsel([]); setMergeMode(false); setMmsg(""); setLasso(false); setLassoPath(null); setAdjust(null); setEditH(null); setLoftSel(null); setLoftMenu(null);
       }, [optSig]);
       const dragRef = React.useRef(null);
       const [mergeMode, setMergeMode] = useState(false);   // select-and-merge compartments
@@ -12216,6 +12223,8 @@ const frontendHTML = `<!DOCTYPE html>
       const [mmsg, setMmsg] = useState("");
       const [adjust, setAdjust] = useState(null);           // §7 smart-adjust dialog {si,ci,k,arg,label,avail,need,cnt,canReduce}
       const [editH, setEditH] = useState(null);             // inline mm-size editor {si,ci,k,x,y,val}
+      const [loftSel, setLoftSel] = useState(null);         // selected loft compartment key "si-ci-k"
+      const [loftMenu, setLoftMenu] = useState(null);       // loft right-click menu {x,y,si,ci,k}
       const lastSel = React.useRef(null);                   // for Shift+Click range selection
       const svgRef = React.useRef(null);
       const [box, setBox] = useState(null);                 // rubber-band selection box (SVG coords)
@@ -12242,6 +12251,19 @@ const frontendHTML = `<!DOCTYPE html>
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
       }, [history]);
+      // Delete / Backspace removes the currently-selected compartment(s). Re-subscribes on msel/secs
+      // change so the handler always closes over the live selection + batch (no stale closure).
+      React.useEffect(() => {
+        const onDel = (e) => {
+          const t = e.target; if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || "")) return;
+          if (e.key !== "Delete" && e.key !== "Backspace") return;
+          if (loftSel) { e.preventDefault(); const p = loftSel.split("-").map(Number); loftOp("delete", null, p[0], p[1], p[2]); return; }
+          if (!msel.length) return;
+          e.preventDefault(); batch("delete");
+        };
+        window.addEventListener("keydown", onDel);
+        return () => window.removeEventListener("keydown", onDel);
+      }, [msel, secs, loftSel]);
       const CONVERT_KINDS = WARD_CONVERTS.concat([{ kind: "jewellery", label: "Jewellery", color: "#f59e0b" }, { kind: "cosmetics", label: "Cosmetics", color: "#fb7185" }, { kind: "hanging", label: "Hanging", color: "#3b82f6" }]);
       const spanWmm = (cols, ci, cell) => { const nn = Math.max(1, Math.round((cell && cell.span) || 1)); let w = 0; for (let j = 0; j < nn && ci + j < cols.length; j++) w += cols[ci + j].w; return w; };
       const toggleSel = (si, ci, k, e) => {
@@ -12269,6 +12291,20 @@ const frontendHTML = `<!DOCTYPE html>
           else if (kind === "lock") cell.locked = true; else if (kind === "unlock") cell.locked = false; });
         commit(n, kind === "convert" ? "Convert " + msel.length + " → " + arg : (kind === "lock" ? "Lock " : "Unlock ") + msel.length + " compartment(s)"); setMsel([]);
       };
+      // ── Loft editing: each column carries an optional loftCells[] (defaults to one full-height loft cell).
+      // Add-shelf / convert / delete / resize, editable in the loft band + keyboard-deletable. Persisted via /rerender.
+      const LOFT_KINDS = [{ kind: "loft", label: "Loft", color: "#fcd34d" }, { kind: "shelf", label: "Shelf", color: "#22c55e" }, { kind: "suitcase", label: "Suitcase", color: "#a78bfa" }, { kind: "box", label: "Box Storage", color: "#38bdf8" }, { kind: "bedding", label: "Bedding", color: "#f472b6" }];
+      const loftCellsOf = (col) => (Array.isArray(col.loftCells) && col.loftCells.length) ? col.loftCells : [{ kind: "loft", label: "Loft", color: "#fcd34d", hMM: opt.loftH }];
+      const loftOp = (kind, arg, si, ci, k) => {
+        const n = clone(secs); const col = n[si] && n[si].columns[ci]; if (!col) return;
+        let lc = clone(loftCellsOf(col));
+        if (kind === "convert") { const t = LOFT_KINDS.find((x) => x.kind === arg); if (t && lc[k]) { lc[k].kind = t.kind; lc[k].label = t.label; lc[k].color = t.color; } }
+        else if (kind === "addShelf") { if (!lc[k]) return; const h = lc[k].hMM, half = Math.max(40, Math.round(h / 2)); if (h - half < 40) { setMmsg("Loft compartment too small to split."); return; } lc.splice(k, 1, Object.assign({}, lc[k], { hMM: half }), { kind: "shelf", label: "Shelf", color: "#22c55e", hMM: h - half }); }
+        else if (kind === "delete") { if (lc.length < 2) { setMmsg("Loft keeps one compartment — switch off Loft height in the form to remove it."); return; } const h = lc[k].hMM; lc.splice(k, 1); lc[Math.min(k, lc.length - 1)].hMM += h; }
+        else if (kind === "inc" || kind === "dec") { const d = kind === "inc" ? 50 : -50, cur = lc[k], sib = lc[k + 1] || lc[k - 1]; if (!cur || !sib || cur.hMM + d < 40 || sib.hMM - d < 40) return; cur.hMM += d; sib.hMM -= d; }
+        col.loftCells = lc; commit(n, "Loft " + kind); setLoftMenu(null); setLoftSel(null);
+      };
+      React.useEffect(() => { try { window.__adsWardEd = { secs: () => clone(secs), msel: () => msel.slice(), loftSel: () => loftSel, selLoft: (si, ci, k) => setLoftSel(si + "-" + ci + "-" + k), loftOp: (kind, arg, si, ci, k) => loftOp(kind, arg, si, ci, k) }; } catch (z) {} });
       const mergeSelected = () => {
         if (msel.length < 2) { setMmsg("Pick at least two compartments."); return; }
         const items = msel.map((s) => { const a = s.split("-"); return { si: +a[0], ci: +a[1], k: +a[2] }; });
@@ -12514,7 +12550,21 @@ const frontendHTML = `<!DOCTYPE html>
       const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); const sp = toSvg(e); const clickMM = Math.max(0, Math.round((floorY - sp.y) / scale / 5) * 5); setMmsg(""); setMenu({ x: e.clientX, y: e.clientY, si, ci, k, clickMM, heightMM: clickMM }); };
       const els = [];
       secs.forEach((sec, si) => { const sx = xOf(sec.x), sw = sec.width * scale; const tint = sec.kind === "male" ? "#eff6ff" : sec.kind === "female" ? "#fdf2f8" : "#fefce8"; const hc = sec.kind === "male" ? "#2563eb" : sec.kind === "female" ? "#db2777" : "#ca8a04"; els.push(<rect key={"st" + si} x={sx} y={y0} width={sw} height={hpx} fill={tint} />); els.push(<text key={"sh" + si} x={sx + sw / 2} y={y0 - 8} fill={hc} fontSize="11" fontWeight="700" textAnchor="middle">{sec.label}</text>); });
-      if (opt.hasLoft) { els.push(<rect key="loft" x={x0} y={y0} width={wpx} height={loftPx} fill="#fcd34d55" stroke="#a16207" strokeWidth="0.8" />); els.push(<text key="loftt" x={x0 + wpx / 2} y={y0 + loftPx / 2 + 3} fill="#a16207" fontSize="9" fontWeight="600" textAnchor="middle">{"LOFT " + opt.loftH + " mm"}</text>); }
+      if (opt.hasLoft) {
+        els.push(<rect key="loftbg" x={x0} y={y0} width={wpx} height={loftPx} fill="#fef9c3" stroke="#a16207" strokeWidth="0.8" style={{ pointerEvents: "none" }} />);
+        els.push(<text key="loftlbl" x={x0 + 3} y={y0 + 7.5} fill="#a16207" fontSize="6" fontWeight="700" style={{ pointerEvents: "none" }}>{"LOFT " + opt.loftH + " mm — right-click to divide/convert"}</text>);
+        secs.forEach((sec, si) => sec.columns.forEach((col, ci) => {
+          const cx = xOf(col.x), cwp = col.w * scale, lc = loftCellsOf(col), lsum = lc.reduce((a, c) => a + (c.hMM || 0), 0) || opt.loftH;
+          let ly = y0;
+          lc.forEach((cell, k) => {
+            const chp = (cell.hMM / lsum) * loftPx, lk = si + "-" + ci + "-" + k, lsel = loftSel === lk;
+            els.push(<rect key={"lc" + lk} x={cx + 1} y={ly} width={Math.max(1, cwp - 2)} height={Math.max(1.5, chp - 0.5)} fill={lsel ? "rgba(79,70,229,0.30)" : (cell.color || "#fcd34d") + "44"} stroke={lsel ? "#4338ca" : "#a16207"} strokeWidth={lsel ? 1.6 : 0.6} style={{ cursor: "context-menu" }} onClick={(e) => { e.stopPropagation(); setMenu(null); setLoftSel(lsel ? null : lk); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu(null); setLoftSel(lk); setLoftMenu({ x: e.clientX, y: e.clientY, si, ci, k }); }} />);
+            if (chp > 8.5) els.push(<text key={"lct" + lk} x={cx + cwp / 2} y={ly + chp / 2 + 2} fill="#78350f" fontSize="5.5" textAnchor="middle" style={{ pointerEvents: "none" }}>{(cell.label || "Loft") + " " + Math.round(cell.hMM)}</text>);
+            ly += chp;
+          });
+          els.push(<line key={"lpart" + si + "-" + ci} x1={cx} y1={y0} x2={cx} y2={usableTopY} stroke="#a16207" strokeWidth="0.5" style={{ pointerEvents: "none" }} />);
+        }));
+      }
       secs.forEach((sec, si) => {
         sec.columns.forEach((col, ci) => {
           const cx = xOf(col.x); let yb = floorY;
@@ -12621,6 +12671,20 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="border-t border-slate-100 my-1" />
               {mi("🔒 Lock section", () => op("lock"))}
             </React.Fragment>)}
+          </div>
+        </React.Fragment>)}
+        {loftMenu && (<React.Fragment>
+          <div className="fixed inset-0 z-40" onClick={() => setLoftMenu(null)} onContextMenu={(e) => { e.preventDefault(); setLoftMenu(null); }} />
+          <div style={{ position: "fixed", left: Math.min(loftMenu.x, window.innerWidth - 190), top: Math.min(loftMenu.y, window.innerHeight - 320), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1">
+            <div className="px-3 py-0.5 text-amber-600 font-semibold">🔺 Loft compartment</div>
+            {mi("+ Add shelf (split in 2)", () => loftOp("addShelf", null, loftMenu.si, loftMenu.ci, loftMenu.k))}
+            <div className="border-t border-slate-100 my-1" />
+            <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
+            {LOFT_KINDS.map((t) => mi("• " + t.label, () => loftOp("convert", t.kind, loftMenu.si, loftMenu.ci, loftMenu.k)))}
+            <div className="border-t border-slate-100 my-1" />
+            {mi("▲ Taller (+50)", () => loftOp("inc", null, loftMenu.si, loftMenu.ci, loftMenu.k))}
+            {mi("▼ Shorter (−50)", () => loftOp("dec", null, loftMenu.si, loftMenu.ci, loftMenu.k))}
+            {mi("🗑 Delete (or press Del)", () => loftOp("delete", null, loftMenu.si, loftMenu.ci, loftMenu.k))}
           </div>
         </React.Fragment>)}
         {adjust && (<React.Fragment>
@@ -15501,6 +15565,13 @@ app.post("/api/wardrobe/rerender", async (c) => {
       const sum = cells.reduce((a: number, cc: any) => a + cc.hMM, 0) || 1, f = target / sum;
       cells.forEach((cc: any) => cc.hMM = Math.round(cc.hMM * f));
       col.cells = cells;
+      // preserve + normalise editable loft compartments (sum → loftH); drop them when there is no loft
+      if (o.hasLoft && !(ub)) {
+        let lc = (Array.isArray(col.loftCells) ? col.loftCells : []).filter((x: any) => x && +x.hMM > 0).map((x: any) => ({ kind: String(x.kind || "loft"), label: String(x.label || "Loft"), hMM: Math.max(40, Math.round(+x.hMM)), color: String(x.color || "#fcd34d") }));
+        if (!lc.length) lc = [{ kind: "loft", label: "Loft", hMM: o.loftH, color: "#fcd34d" }];
+        const ls = lc.reduce((a: number, x: any) => a + x.hMM, 0) || 1, lf = o.loftH / ls; lc.forEach((x: any) => x.hMM = Math.round(x.hMM * lf));
+        col.loftCells = lc;
+      } else { delete col.loftCells; }
     }
     // keep merged bands aligned after the per-column rescale: each covered twin re-snaps to its master's height
     { const masters: Record<string, any> = {}; for (const sec of o.sections) for (const col of (sec.columns || [])) for (const cc of col.cells) if (+cc.span > 1 && cc.mergeId != null) masters[String(cc.mergeId)] = cc;
