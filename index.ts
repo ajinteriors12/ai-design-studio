@@ -13532,6 +13532,7 @@ const frontendHTML = `<!DOCTYPE html>
       return (
         <div className="max-w-6xl mx-auto px-4 py-8">
           <header className="mb-6 text-center">
+            <img src="/mkw-logo.jpg" alt="Mamma's Kitchen &amp; Wardrobes logo" className="h-16 w-auto mx-auto mb-2 rounded-lg shadow-sm" onError={(e) => { e.target.style.display = "none"; }} />
             <h1 className="text-3xl font-bold bg-gradient-to-r from-cyan-600 via-blue-600 to-purple-600 bg-clip-text text-transparent">MKW Design Studio</h1>
             <p className="text-slate-700 text-lg font-semibold mt-0.5">Mamma's Kitchen &amp; Wardrobes®</p>
             <p className="text-slate-400 text-xs">(A Unit of AJ International)</p>
