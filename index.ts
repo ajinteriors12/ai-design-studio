@@ -6119,7 +6119,7 @@ const frontendHTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Design Studio — CAD Learning + Generation</title>
+  <title>MKW Design Studio — Mamma's Kitchen &amp; Wardrobes®</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
@@ -13531,10 +13531,12 @@ const frontendHTML = `<!DOCTYPE html>
       useEffect(() => { if (!devMode && visTabs.indexOf(tab) < 0) setTab("🏠 Dashboard"); }, [admin, modules.length]);
       return (
         <div className="max-w-6xl mx-auto px-4 py-8">
-          <header className="mb-6">
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-cyan-600 via-blue-600 to-purple-600 bg-clip-text text-transparent">Fabrik — AI Design Studio</h1>
-            <p className="text-slate-500 text-sm">From Sketch to Factory, in Real Time · Modular Kitchen &amp; Wardrobe design → manufacturing. {admin && <span className="text-emerald-600 font-medium">· Super Admin</span>}</p>
-            {admin && <div className="mt-3 flex items-center gap-3">
+          <header className="mb-6 text-center">
+            <h1 className="text-3xl font-bold bg-gradient-to-r from-cyan-600 via-blue-600 to-purple-600 bg-clip-text text-transparent">MKW Design Studio</h1>
+            <p className="text-slate-700 text-lg font-semibold mt-0.5">Mamma's Kitchen &amp; Wardrobes®</p>
+            <p className="text-slate-400 text-xs">(A Unit of AJ International)</p>
+            <p className="text-slate-500 text-sm mt-1">From Sketch to Factory, in Real Time · Modular Kitchen &amp; Wardrobe design → manufacturing. {admin && <span className="text-emerald-600 font-medium">· Super Admin</span>}</p>
+            {admin && <div className="mt-3 flex items-center justify-center gap-3">
               <button onClick={scan} disabled={scanning} className="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50">{scanning ? "Scanning…" : "Run Phase-1 Learning Scan"}</button>
               {scanMsg && <span className="text-xs text-slate-500">{scanMsg}</span>}
             </div>}
