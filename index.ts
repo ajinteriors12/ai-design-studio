@@ -12606,6 +12606,39 @@ const frontendHTML = `<!DOCTYPE html>
       </div>);
     }
 
+    // Pannable + zoomable canvas for any SVG drawing: drag to shift the view, scroll to zoom AT the
+    // cursor (+/− buttons zoom to the centre), Reset/Fit restore. Keeps the drawing clearly visible.
+    function PanZoom({ html, height, bg }) {
+      const [t, setT] = useState({ x: 0, y: 0, s: 1 });
+      const [grabbing, setGrabbing] = useState(false);
+      const ref = React.useRef(null); const inner = React.useRef(null); const drag = React.useRef(null);
+      const clamp = (s) => Math.max(0.2, Math.min(10, s));
+      React.useEffect(() => {
+        const el = ref.current; if (!el) return;
+        const onWheel = (e) => { e.preventDefault(); const r = el.getBoundingClientRect(); const mx = e.clientX - r.left, my = e.clientY - r.top; const f = e.deltaY < 0 ? 1.12 : 1 / 1.12; setT((p) => { const ns = clamp(p.s * f); const k = ns / p.s; return { s: ns, x: mx - (mx - p.x) * k, y: my - (my - p.y) * k }; }); };
+        el.addEventListener("wheel", onWheel, { passive: false });
+        return () => el.removeEventListener("wheel", onWheel);
+      }, []);
+      // fit the drawing to the frame whenever the drawing changes
+      React.useEffect(() => { const el = ref.current, ic = inner.current; if (!el || !ic) return; const svg = ic.querySelector("svg"); if (!svg) return; const fw = el.clientWidth || 1, fh = el.clientHeight || 1; const bb = svg.getBoundingClientRect(); const sw = (bb.width / (t.s || 1)) || fw, sh = (bb.height / (t.s || 1)) || fh; const s = clamp(Math.min(fw / sw, fh / sh) * 0.98); setT({ s: s, x: (fw - sw * s) / 2, y: (fh - sh * s) / 2 }); }, [html]);
+      const onDown = (e) => { drag.current = { x: e.clientX, y: e.clientY, ox: t.x, oy: t.y }; setGrabbing(true); try { e.currentTarget.setPointerCapture(e.pointerId); } catch (z) {} };
+      const onMove = (e) => { const d = drag.current; if (!d) return; setT((p) => ({ s: p.s, x: d.ox + (e.clientX - d.x), y: d.oy + (e.clientY - d.y) })); };
+      const onUp = (e) => { drag.current = null; setGrabbing(false); try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (z) {} };
+      const zoomCentre = (f) => setT((p) => { const el = ref.current; const w = (el ? el.clientWidth : 400) / 2, h = (el ? el.clientHeight : 400) / 2; const ns = clamp(p.s * f); const k = ns / p.s; return { s: ns, x: w - (w - p.x) * k, y: h - (h - p.y) * k }; });
+      const fit = () => { const el = ref.current, ic = inner.current; if (!el || !ic) return; const svg = ic.querySelector("svg"); if (!svg) { setT({ x: 0, y: 0, s: 1 }); return; } const fw = el.clientWidth || 1, fh = el.clientHeight || 1; const bb = svg.getBoundingClientRect(); const sw = bb.width / (t.s || 1), sh = bb.height / (t.s || 1); const s = clamp(Math.min(fw / sw, fh / sh) * 0.98); setT({ s: s, x: (fw - sw * s) / 2, y: (fh - sh * s) / 2 }); };
+      return (<div style={{ position: "relative" }}>
+        <div style={{ position: "absolute", top: 6, right: 6, zIndex: 5, display: "flex", gap: 4 }}>
+          <button onClick={() => zoomCentre(1.25)} title="Zoom in" className="w-6 h-6 rounded bg-white/90 border border-slate-300 text-slate-700 text-sm shadow-sm hover:bg-white">+</button>
+          <button onClick={() => zoomCentre(1 / 1.25)} title="Zoom out" className="w-6 h-6 rounded bg-white/90 border border-slate-300 text-slate-700 text-sm shadow-sm hover:bg-white">−</button>
+          <button onClick={fit} title="Fit to screen" className="px-1.5 h-6 rounded bg-white/90 border border-slate-300 text-slate-600 text-[10px] shadow-sm hover:bg-white">Fit</button>
+        </div>
+        <div ref={ref} data-pz="frame" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} style={{ height: height || 480, overflow: "hidden", background: bg || "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0", cursor: grabbing ? "grabbing" : "grab", touchAction: "none", userSelect: "none" }}>
+          <div ref={inner} data-pz="inner" style={{ transform: "translate(" + t.x.toFixed(1) + "px," + t.y.toFixed(1) + "px) scale(" + t.s.toFixed(3) + ")", transformOrigin: "0 0", width: "fit-content", pointerEvents: "none" }} dangerouslySetInnerHTML={{ __html: html }} />
+        </div>
+        <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-2"><span>🖱 drag to pan · scroll to zoom at cursor</span><span className="ml-auto tabular-nums">{Math.round(t.s * 100)}%</span></div>
+      </div>);
+    }
+
     // ── Wardrobe AI Designer — lifestyle-driven 3-option wardrobe generator (§2-§12) ──
     function WardrobeAI() {
       const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300, beamOn: false, beamProj: 200, beamSoffit: 2100, beamPos: 600, beamWidth: 900, shape: "straight", wingB: 1800, wingC: 1800, corner: "lemans" });
@@ -12886,8 +12919,8 @@ const frontendHTML = `<!DOCTYPE html>
           <div className="grid lg:grid-cols-2 gap-3">
             <div className="overflow-auto"><WardrobeDrawEditor opt={sel} onCommit={commitEdit} /></div>
             <div className="min-w-0">
-              <div className="text-[11px] text-slate-400 mb-1">{(view === "Shop Drawing" ? "📐 Shop Drawing" : view === "Shutters" ? "🚪 Shutters ⇄ Open" : view) + " — same design as shown above (updates live as you edit)"}</div>
-              <div className="overflow-auto rounded-lg border border-slate-100 bg-slate-50/40 p-1" dangerouslySetInnerHTML={{ __html: (sel.views && sel.views[view]) || sel.svg }} />
+              <div className="text-[11px] text-slate-400 mb-1">{(view === "Shop Drawing" ? "📐 Shop Drawing" : view === "Shutters" ? "🚪 Shutters ⇄ Open" : view) + " — same design as shown above · drag to pan, scroll to zoom"}</div>
+              <PanZoom html={(sel.views && sel.views[view]) || sel.svg} height={540} />
             </div>
           </div>
           <div className="text-[11px] mt-1">{edited ? <span className="text-emerald-600">Edited · the drawing on the right, cutting list &amp; cost below all reflect your changes.</span> : <span className="text-slate-400">Tip: use the Male section % slider above to change the split; drag dividers here to resize bands.</span>}</div>
