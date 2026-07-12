@@ -12099,12 +12099,14 @@ const frontendHTML = `<!DOCTYPE html>
         lastStruct.current = cur;                  // a genuinely different design was loaded → start fresh
         const fresh = clone(opt.sections || []);
         setSecs(fresh); setHistory({ list: [{ secs: clone(fresh), label: "Opened design" }], ptr: 0 });
-        setMsel([]); setMergeMode(false); setMmsg(""); setLasso(false); setLassoPath(null);
+        setMsel([]); setMergeMode(false); setMmsg(""); setLasso(false); setLassoPath(null); setAdjust(null); setEditH(null);
       }, [optSig]);
       const dragRef = React.useRef(null);
       const [mergeMode, setMergeMode] = useState(false);   // select-and-merge compartments
       const [msel, setMsel] = useState([]);                 // selected cell keys "si-ci-k"
       const [mmsg, setMmsg] = useState("");
+      const [adjust, setAdjust] = useState(null);           // §7 smart-adjust dialog {si,ci,k,arg,label,avail,need,cnt,canReduce}
+      const [editH, setEditH] = useState(null);             // inline mm-size editor {si,ci,k,x,y,val}
       const lastSel = React.useRef(null);                   // for Shift+Click range selection
       const svgRef = React.useRef(null);
       const [box, setBox] = useState(null);                 // rubber-band selection box (SVG coords)
@@ -12143,8 +12145,8 @@ const frontendHTML = `<!DOCTYPE html>
         { arg: "drawer", label: "Single Drawer", kind: "drawer", color: "#ec4899", h: 200 },
         { arg: "drawer2", label: "Double Drawer", kind: "drawer", color: "#ec4899", h: 190, n: 2 },
         { arg: "drawer3", label: "Triple Drawer", kind: "drawer", color: "#ec4899", h: 180, n: 3 },
-        { arg: "longHang", label: "Long Hanging", kind: "longHang", color: "#3b82f6", h: 1050 },
-        { arg: "shortHang", label: "Short Hanging", kind: "shortHang", color: "#60a5fa", h: 900 },
+        { arg: "longHang", label: "Long Hanging", kind: "longHang", color: "#3b82f6", h: 1050, min: 900 },
+        { arg: "shortHang", label: "Short Hanging", kind: "shortHang", color: "#60a5fa", h: 900, min: 750 },
         { arg: "pantRack", label: "Trouser Rack", kind: "pantRack", color: "#8b5cf6", h: 150 },
         { arg: "shoe", label: "Shoe Rack", kind: "shoe", color: "#a16207", h: 180 },
         { arg: "jewellery", label: "Jewellery Tray", kind: "jewellery", color: "#f59e0b", h: 90 },
@@ -12284,34 +12286,79 @@ const frontendHTML = `<!DOCTYPE html>
         }));
         setMsel(keys); setMmsg(keys.length ? "" : "Nothing inside the box.");
       };
-      // EXACT-POSITION insert (spec): split the clicked compartment (si,ci,k) at the clicked height
-      // (clickMM, mm from the wardrobe floor, snapped to 5 mm) so the new accessory's bottom lands
-      // exactly where the user right-clicked, INSIDE that same compartment. Commits itself (one undo step).
-      const insertAt = (si, ci, k, clickMM, arg) => {
-        const n = JSON.parse(JSON.stringify(secs)); const sec = n[si]; if (!sec) return; const col = sec.columns[ci]; if (!col) return; const cells = col.cells, cur = cells[k];
-        if (!cur || cur.covered) return;
+      // §7 smart-adjust — find the nearest OTHER compartment (same column first, then whole section)
+      // at least needH tall, ranked by vertical distance to the clicked cell. Returns {si,ci,k,bottom}.
+      const nearestFit = (arr, si, ci0, k, needH) => {
+        const sec = arr[si]; const src = sec.columns[ci0]; if (!src || !src.cells[k]) return null;
+        let base = 0; for (let j = 0; j < k; j++) base += src.cells[j].hMM; const srcMid = base + src.cells[k].hMM / 2;
+        let best = null;
+        sec.columns.forEach((c, cci) => {
+          let b = 0;
+          c.cells.forEach((cell, kk) => {
+            const mid = b + cell.hMM / 2;
+            if (!(cci === ci0 && kk === k) && !cell.covered && !cell.locked && cell.hMM >= needH) {
+              const d = Math.abs(mid - srcMid) + (cci === ci0 ? 0 : 1e6);
+              if (!best || d < best.d) best = { si: si, ci: cci, k: kk, bottom: Math.round(b), d: d };
+            }
+            b += cell.hMM;
+          });
+        });
+        return best;
+      };
+      // §10 keep the freshly-inserted compartment selected + editable (handles/convert/delete/lock).
+      const selectInserted = (r) => { if (!r) return; setMergeMode(true); setLasso(false); setMsel([r.si + "-" + r.ci + "-" + r.k]); setMmsg("Inserted — selected. Double-click its mm size to retype it, or Convert / Delete / Ctrl+Z."); };
+      // EXACT-POSITION insert (owner spec): the clicked height is the TOP of the new accessory — the whole
+      // area BELOW it inside the clicked compartment (si,ci,k) becomes the shelf/drawer; the area above
+      // keeps the original kind. So a right-click at 300 mm gives a 300-mm-from-base shelf/drawer zone.
+      // Commits itself (one undo step). Returns {si,ci,k} of the new accessory (for §10 select) or null.
+      // opts.reduce = fill the whole compartment; opts.nearest = relocate to the nearest fitting
+      // compartment (§7 — only ever on explicit user choice, never silently).
+      const insertAt = (si, ci, k, clickMM, arg, opts) => {
+        opts = opts || {};
+        const n = JSON.parse(JSON.stringify(secs)); const sec = n[si]; if (!sec) return null; const col = sec.columns[ci]; if (!col) return null; const cells = col.cells, cur = cells[k];
+        if (!cur || cur.covered) return null;
         const ins = WARD_INSERTS.find((x) => x.arg === arg) || { arg: arg, label: String(arg), kind: (CONVERT_KINDS.find((c) => c.kind === arg) || {}).kind || arg, color: "#94a3b8", h: 250 };
-        const cnt = Math.max(1, ins.n || 1), nh = cnt * ins.h;
-        if (cur.hMM < nh + 40) { setMmsg("Only " + Math.round(cur.hMM) + " mm here — " + ins.label + " needs " + (nh + 40) + " mm. Pick a taller compartment or a smaller accessory."); return; }
+        const cnt = Math.max(1, ins.n || 1); const minTotal = cnt * (ins.min != null ? ins.min : 60);
         let cellBottom = 0; for (let j = 0; j < k; j++) cellBottom += cells[j].hMM;   // this compartment's floor height (mm)
-        const want = (clickMM != null ? clickMM : cellBottom + cur.hMM / 2) - cellBottom;   // desired component-bottom offset within the cell
-        let below = Math.max(0, Math.min(Math.round(want / 5) * 5, cur.hMM - nh));
-        let above = cur.hMM - below - nh;
-        if (below < 40) below = 0;      // no sliver compartments — fold tiny remainders into the block
-        if (above < 40) above = 0;
-        const compTotal = cur.hMM - below - above, each = Math.round(compTotal / cnt), made = [];
-        for (let i = 0; i < cnt; i++) made.push({ kind: ins.kind, label: ins.label, color: ins.color, hMM: i === cnt - 1 ? compTotal - each * (cnt - 1) : each });
-        const parts = [];
-        if (below > 0) parts.push({ kind: cur.kind, label: cur.label, color: cur.color, hMM: below });
-        parts.push(...made);
+        if (cur.hMM < minTotal) {
+          // The whole compartment is smaller than the minimum — never silently relocate (§7).
+          if (opts.reduce) { setMmsg("This compartment (" + Math.round(cur.hMM) + " mm) is below the " + minTotal + " mm minimum for " + ins.label + "."); return null; }
+          if (opts.nearest) { const tgt = nearestFit(n, si, ci, k, minTotal); if (!tgt) { setMmsg("No compartment in this section has room for " + ins.label + " (" + minTotal + " mm)."); return null; } const tc = n[tgt.si].columns[tgt.ci].cells[tgt.k]; setAdjust(null); return insertAt(tgt.si, tgt.ci, tgt.k, tgt.bottom + Math.min(cnt * ins.h, tc.hMM), arg); }
+          setAdjust({ si: si, ci: ci, k: k, arg: arg, label: ins.label, avail: Math.round(cur.hMM), need: minTotal, cnt: cnt, canReduce: false });
+          return null;
+        }
+        // accessory height = the area below the clicked height, clamped to [minTotal, whole compartment]
+        let accH = opts.reduce ? cur.hMM : (clickMM != null ? Math.round((clickMM - cellBottom) / 5) * 5 : cur.hMM);
+        accH = Math.max(minTotal, Math.min(accH, cur.hMM));
+        let above = cur.hMM - accH; if (above < 40) { above = 0; accH = cur.hMM; }   // no sliver remnant
+        const each = Math.round(accH / cnt), made = [];
+        for (let i = 0; i < cnt; i++) made.push({ kind: ins.kind, label: ins.label, color: ins.color, hMM: i === cnt - 1 ? accH - each * (cnt - 1) : each });
+        const parts = made.slice();
         if (above > 0) parts.push({ kind: cur.kind, label: cur.label, color: cur.color, hMM: above });
         if (cur.locked) parts.forEach((p) => p.locked = true);
         cells.splice(k, 1, ...parts);
-        commit(n, "Insert " + ins.label + " at " + (cellBottom + below) + " mm" + (sec.label ? " · " + sec.label : ""));
+        setAdjust(null);
+        commit(n, "Insert " + ins.label + " (" + accH + " mm from base)" + (sec.label ? " · " + sec.label : ""));
+        return { si: si, ci: ci, k: k };   // the accessory occupies the below zone → same index k
+      };
+      // Double-click a compartment's mm size to retype it — resizes it to the exact value, borrowing from
+      // (or giving to) the neighbouring compartment so the column height stays fixed (owner spec).
+      const applyCellHeight = (si, ci, k, newH) => {
+        if (!newH || isNaN(newH)) return;
+        const nn = JSON.parse(JSON.stringify(secs)); const cells = nn[si] && nn[si].columns[ci] && nn[si].columns[ci].cells; if (!cells) return;
+        const cell = cells[k]; if (!cell || cell.covered) return;
+        if (cell.locked) { setMmsg("Unlock this compartment before resizing it."); return; }
+        newH = Math.max(60, Math.round(newH / 5) * 5); if (newH === cell.hMM) return;
+        const nbi = (cells[k + 1] && !cells[k + 1].covered && !cells[k + 1].locked) ? k + 1 : ((cells[k - 1] && !cells[k - 1].covered && !cells[k - 1].locked) ? k - 1 : -1);
+        if (nbi < 0) { setMmsg("Only one adjustable compartment in this column — resize the column instead."); return; }
+        const delta = newH - cell.hMM;
+        if (cells[nbi].hMM - delta < 60) { setMmsg("Not enough room in the next compartment (only " + cells[nbi].hMM + " mm)."); return; }
+        cell.hMM = newH; cells[nbi].hMM -= delta;
+        commit(nn, "Set " + (cell.label || cell.kind) + " to " + newH + " mm");
       };
       // dev test-hook (matches the file's window.__ads* pattern) — lets headless tests drive the exact
       // insert since React onContextMenu on SVG cells can't be fired by a dispatched event.
-      React.useEffect(() => { try { window.__adsWardInsertAt = insertAt; window.__adsWardSecs = () => JSON.parse(JSON.stringify(secs)); } catch (z) {} });
+      React.useEffect(() => { try { window.__adsWardInsertAt = insertAt; window.__adsWardSecs = () => JSON.parse(JSON.stringify(secs)); window.__adsWardAdjust = () => (adjust ? JSON.parse(JSON.stringify(adjust)) : null); window.__adsWardMsel = () => msel.slice(); window.__adsWardMergeMode = () => mergeMode; window.__adsWardInsertSel = (si, ci, k, h, arg, o) => { const r = insertAt(si, ci, k, h, arg, o); selectInserted(r); return r; }; window.__adsWardSetH = applyCellHeight; } catch (z) {} });
       const op = (kind, arg) => {
         if (!menu) return;
         const n = JSON.parse(JSON.stringify(secs)); const sec = n[menu.si], col = sec.columns[menu.ci], cells = col.cells, k = menu.k;
@@ -12340,7 +12387,7 @@ const frontendHTML = `<!DOCTYPE html>
         else if (kind === "dup") { const c = cells[k]; if (c.hMM < 120) { setMenu(null); return; } const half = Math.round(c.hMM / 2); c.hMM = c.hMM - half; const cp = { kind: c.kind, label: c.label, color: c.color, hMM: half }; if (c.locked) cp.locked = true; cells.splice(k + 1, 0, cp); }
         else if (kind === "copyProps") { const c = cells[k]; clip.current = { kind: c.kind, label: c.label, color: c.color }; setMenu(null); return; }   // copy only — no commit
         else if (kind === "pasteProps") { if (!clip.current) { setMenu(null); return; } cells[k].kind = clip.current.kind; cells[k].label = clip.current.label; cells[k].color = clip.current.color; }
-        else if (kind === "insert") { insertAt(menu.si, menu.ci, menu.k, menu.clickMM, arg); setMenu(null); return; }   // exact-position insert commits itself
+        else if (kind === "insert") { const r = insertAt(menu.si, menu.ci, menu.k, (menu.heightMM != null ? menu.heightMM : menu.clickMM), arg); setMenu(null); selectInserted(r); return; }   // exact-position insert commits itself + keeps the new cell selected (§10)
         else if (kind === "splitV") {   // split one compartment into N stacked compartments of the same kind
           const N = Math.max(2, Math.min(6, +arg || 2)), cur = cells[k];
           if (cur.span > 1) { const mid = cur.mergeId; delete cur.span; delete cur.mergeId; if (mid != null) for (const cc of sec.columns) for (const cl of (cc.cells || [])) if (cl.mergeId === mid) { delete cl.covered; delete cl.mergeId; } }
@@ -12359,7 +12406,7 @@ const frontendHTML = `<!DOCTYPE html>
       };
       // Capture the EXACT clicked height (mm from the wardrobe floor) so an Insert lands where the user
       // right-clicked — not at a default position. The saved clickMM is used later, not the live cursor.
-      const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); const sp = toSvg(e); const clickMM = Math.max(0, Math.round((floorY - sp.y) / scale)); setMenu({ x: e.clientX, y: e.clientY, si, ci, k, clickMM }); };
+      const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); const sp = toSvg(e); const clickMM = Math.max(0, Math.round((floorY - sp.y) / scale / 5) * 5); setMmsg(""); setMenu({ x: e.clientX, y: e.clientY, si, ci, k, clickMM, heightMM: clickMM }); };
       const els = [];
       secs.forEach((sec, si) => { const sx = xOf(sec.x), sw = sec.width * scale; const tint = sec.kind === "male" ? "#eff6ff" : sec.kind === "female" ? "#fdf2f8" : "#fefce8"; const hc = sec.kind === "male" ? "#2563eb" : sec.kind === "female" ? "#db2777" : "#ca8a04"; els.push(<rect key={"st" + si} x={sx} y={y0} width={sw} height={hpx} fill={tint} />); els.push(<text key={"sh" + si} x={sx + sw / 2} y={y0 - 8} fill={hc} fontSize="11" fontWeight="700" textAnchor="middle">{sec.label}</text>); });
       if (opt.hasLoft) { els.push(<rect key="loft" x={x0} y={y0} width={wpx} height={loftPx} fill="#fcd34d55" stroke="#a16207" strokeWidth="0.8" />); els.push(<text key="loftt" x={x0 + wpx / 2} y={y0 + loftPx / 2 + 3} fill="#a16207" fontSize="9" fontWeight="600" textAnchor="middle">{"LOFT " + opt.loftH + " mm"}</text>); }
@@ -12370,9 +12417,9 @@ const frontendHTML = `<!DOCTYPE html>
             const ch = cell.hMM * scale, yt = yb - ch;
             if (cell.covered) { yb = yt; return; }   // absorbed into a merge on the left
             const selK = si + "-" + ci + "-" + k, isSel = msel.indexOf(selK) >= 0, cw = spanWmm(sec.columns, ci, cell) * scale, nxt = col.cells[k + 1];
-            els.push(<rect key={"c" + selK} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={isSel ? "rgba(79,70,229,0.30)" : (cell.color || "#cbd5e1") + "33"} stroke={isSel ? "#4338ca" : (cell.color || "#cbd5e1")} strokeWidth={isSel ? 2 : (cell.span > 1 ? 1.1 : 0.7)} style={{ cursor: mergeMode ? "pointer" : "context-menu" }} onClick={(e) => { if (suppressClick.current) { suppressClick.current = false; return; } if (mergeMode) { e.stopPropagation(); toggleSel(si, ci, k, e); } }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
+            els.push(<rect key={"c" + selK} x={cx + 1} y={yt} width={cw - 2} height={ch - 1} fill={isSel ? "rgba(79,70,229,0.30)" : (cell.color || "#cbd5e1") + "33"} stroke={isSel ? "#4338ca" : (cell.color || "#cbd5e1")} strokeWidth={isSel ? 2 : (cell.span > 1 ? 1.1 : 0.7)} style={{ cursor: mergeMode ? "pointer" : "context-menu" }} onClick={(e) => { if (suppressClick.current) { suppressClick.current = false; return; } if (mergeMode) { e.stopPropagation(); toggleSel(si, ci, k, e); } }} onDoubleClick={(e) => { e.stopPropagation(); e.preventDefault(); if (cell.locked) { setMmsg("Unlock this compartment before resizing it."); return; } setEditH({ si, ci, k, x: Math.min(e.clientX, window.innerWidth - 96), y: Math.max(4, e.clientY - 12), val: String(cell.hMM) }); }} onContextMenu={(e) => openMenu(e, si, ci, k)} />);
             if (ch > 12) els.push(<text key={"cl" + selK} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
-            if (ch > 22) els.push(<text key={"cd" + selK} x={cx + cw / 2} y={yb - 3} fill="#94a3b8" fontSize="5.5" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.hMM + " mm"}</text>);
+            if (ch > 22 || isSel) els.push(<text key={"cd" + selK} x={cx + cw / 2} y={yb - 3} fill={isSel ? "#4338ca" : "#94a3b8"} fontSize={isSel ? 7.5 : 5.5} fontWeight={isSel ? 700 : 400} textAnchor="middle" style={{ cursor: "text" }} onDoubleClick={(e) => { e.stopPropagation(); e.preventDefault(); if (cell.locked) { setMmsg("Unlock this compartment before resizing it."); return; } setEditH({ si, ci, k, x: Math.min(e.clientX, window.innerWidth - 96), y: Math.max(4, e.clientY - 12), val: String(cell.hMM) }); }}>{cell.hMM + " mm"}</text>);
             if (cell.locked && ch > 10) els.push(<text key={"lk" + selK} x={cx + cw - 7} y={yt + 9} fontSize="8" textAnchor="middle" style={{ pointerEvents: "none" }}>🔒</text>);
             if (k < col.cells.length - 1 && !cell.locked && !nxt.locked && !mergeMode && !(cell.span > 1) && !nxt.covered && !(nxt.span > 1)) { els.push(<line key={"hl" + selK} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" style={{ pointerEvents: "none" }} />); els.push(<rect key={"hh" + selK} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
             yb = yt;
@@ -12389,15 +12436,18 @@ const frontendHTML = `<!DOCTYPE html>
       if (lassoPath && lassoPath.length > 1) els.push(<polygon key="lassopath" points={lassoPath.map((q) => q[0].toFixed(1) + "," + q[1].toFixed(1)).join(" ")} fill="rgba(139,92,246,0.12)" stroke="#7c3aed" strokeWidth="1.2" strokeDasharray="4 3" style={{ pointerEvents: "none" }} />);
       // §1 insert target: while the context menu is open, highlight the clicked compartment + draw a red
       // insertion line at the exact clicked height so the user sees where the accessory will land.
-      if (menu && menu.clickMM != null && secs[menu.si] && secs[menu.si].columns[menu.ci]) {
+      if (menu && (menu.heightMM != null || menu.clickMM != null) && secs[menu.si] && secs[menu.si].columns[menu.ci]) {
         const tcol = secs[menu.si].columns[menu.ci], tcell = tcol.cells[menu.k];
+        const hMM = menu.heightMM != null ? menu.heightMM : menu.clickMM;
         if (tcell && !tcell.covered) {
           const tcx = xOf(tcol.x), tcw = spanWmm(secs[menu.si].columns, menu.ci, tcell) * scale;
           let yb = floorY; for (let j = 0; j < menu.k; j++) yb -= tcol.cells[j].hMM * scale; const yt = yb - tcell.hMM * scale;
-          const ly = Math.max(yt, Math.min(yb, floorY - menu.clickMM * scale));
-          els.push(<rect key="instgt" x={tcx} y={yt} width={tcw} height={yb - yt} fill="rgba(225,29,72,0.10)" stroke="#e11d48" strokeWidth="1.2" strokeDasharray="4 3" pointerEvents="none" />);
+          const ly = Math.max(yt, Math.min(yb, floorY - hMM * scale));
+          const accH = Math.max(0, Math.round((yb - ly) / scale));   // the below zone that becomes the accessory
+          els.push(<rect key="instgt" x={tcx} y={yt} width={tcw} height={yb - yt} fill="none" stroke="#e11d48" strokeWidth="1.1" strokeDasharray="4 3" pointerEvents="none" />);
+          els.push(<rect key="inszone" x={tcx + 1} y={ly} width={tcw - 2} height={yb - ly} fill="rgba(34,197,94,0.20)" pointerEvents="none" />);
           els.push(<line key="insline" x1={tcx} y1={ly} x2={tcx + tcw} y2={ly} stroke="#e11d48" strokeWidth="2" pointerEvents="none" />);
-          els.push(<text key="inslbl" x={tcx + 3} y={ly - 2.5} fill="#e11d48" fontSize="8" fontWeight="700" pointerEvents="none">{menu.clickMM + " mm"}</text>);
+          els.push(<text key="inslbl" x={tcx + 3} y={ly - 2.5} fill="#059669" fontSize="8" fontWeight="700" pointerEvents="none">{"↥ " + accH + " mm below"}</text>);
         }
       }
       const mCol = menu && secs[menu.si] && secs[menu.si].columns[menu.ci];
@@ -12437,7 +12487,9 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="px-3 py-1 text-slate-500">🔒 Locked section</div>
               {mi("🔓 Unlock section", () => op("unlock"))}
             </React.Fragment>) : (<React.Fragment>
-              <div className="px-3 py-0.5 text-rose-500 font-semibold">Insert here{menu.clickMM != null ? " · " + menu.clickMM + " mm" : ""}…</div>
+              <div className="px-3 py-0.5 text-rose-500 font-semibold flex items-center gap-1">Insert at
+                <input type="number" value={menu.heightMM != null ? menu.heightMM : (menu.clickMM || 0)} step="5" min="0" onClick={(e) => e.stopPropagation()} onChange={(e) => { const v = Math.max(0, Math.round((+e.target.value || 0) / 5) * 5); setMenu((m) => m ? { ...m, heightMM: v } : m); }} className="w-16 px-1 py-0 border border-rose-200 rounded text-rose-700 text-[11px]" title="Type an exact height in mm from the floor" /> mm
+              </div>
               {WARD_INSERTS.map((t) => mi("+ " + t.label, () => op("insert", t.arg)))}
               {mi("⧉ Duplicate", () => op("dup"))}
               {mi("🗑 Delete", () => op("delete"))}
@@ -12462,6 +12514,25 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="border-t border-slate-100 my-1" />
               {mi("🔒 Lock section", () => op("lock"))}
             </React.Fragment>)}
+          </div>
+        </React.Fragment>)}
+        {adjust && (<React.Fragment>
+          <div className="fixed inset-0 z-40 bg-slate-900/20" onClick={() => setAdjust(null)} />
+          <div style={{ position: "fixed", left: "50%", top: "42%", transform: "translate(-50%,-50%)", zIndex: 55, minWidth: 300, maxWidth: 360 }} className="bg-white border border-rose-200 rounded-lg shadow-2xl p-3 text-[12px]">
+            <div className="font-semibold text-rose-600 mb-1">Not enough room here</div>
+            <div className="text-slate-600 mb-2">This position has only <b>{adjust.avail} mm</b> free. <b>{adjust.label}</b> needs at least <b>{adjust.need} mm</b>. Choose how to proceed — nothing moves unless you pick:</div>
+            <div className="flex flex-col gap-1.5">
+              {adjust.canReduce && <button onClick={() => { const a = adjust; setAdjust(null); selectInserted(insertAt(a.si, a.ci, a.k, null, a.arg, { reduce: true })); }} className="px-2 py-1 rounded bg-amber-500 hover:bg-amber-600 text-white text-left">↧ Reduce {adjust.label} to fit this compartment</button>}
+              <button onClick={() => { const a = adjust; setAdjust(null); selectInserted(insertAt(a.si, a.ci, a.k, null, a.arg, { nearest: true })); }} className="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-left">⇲ Insert at the nearest compartment that fits</button>
+              <button onClick={() => setAdjust(null)} className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-left">✕ Cancel</button>
+            </div>
+          </div>
+        </React.Fragment>)}
+        {editH && (<React.Fragment>
+          <div className="fixed inset-0 z-40" onClick={() => setEditH(null)} onContextMenu={(e) => { e.preventDefault(); setEditH(null); }} />
+          <div style={{ position: "fixed", left: editH.x, top: editH.y, zIndex: 60 }} className="bg-white border-2 border-indigo-500 rounded shadow-xl flex items-center gap-1 px-1 py-0.5">
+            <input autoFocus type="number" defaultValue={editH.val} step="5" min="60" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Enter") { e.target.blur(); } else if (e.key === "Escape") { e.target.dataset.cancel = "1"; e.target.blur(); } }} onBlur={(e) => { if (e.target.dataset.cancel !== "1") applyCellHeight(editH.si, editH.ci, editH.k, +e.target.value); setEditH(null); }} className="w-16 px-1 py-0 text-[12px] text-indigo-700 outline-none" title="Type the exact size in mm — Enter to apply, Esc to cancel" />
+            <span className="text-[10px] text-slate-400 pr-1">mm</span>
           </div>
         </React.Fragment>)}
         {tip && <div style={{ position: "fixed", left: tip.x + 12, top: tip.y - 10, zIndex: 50, pointerEvents: "none" }} className="bg-slate-800 text-white text-[10px] px-1.5 py-0.5 rounded">{tip.text}</div>}

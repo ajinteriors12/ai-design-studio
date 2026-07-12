@@ -1,9 +1,11 @@
-// Verify EXACT-POSITION right-click Insert in the wardrobe editor (SPEC-Right-Click-Insert §2/§13).
+// Verify EXACT-POSITION right-click Insert in the wardrobe editor (SPEC-Right-Click-Insert).
+// NEW owner model: the clicked height is the TOP of the accessory — the whole area BELOW it inside the
+// clicked compartment becomes the shelf/drawer; the area above keeps the original kind.
 // React onContextMenu on SVG cells can't be fired headlessly, so we drive the same code path via the
 // dev hook window.__adsWardInsertAt(si,ci,k,clickMM,arg) and read back window.__adsWardSecs().
-// Asserts: an accessory inserted at height H lands at ~H mm in the compartment that contains H; history
-// records the exact height; Ctrl+Z removes it and Ctrl+Y restores it at the same height; a too-tall
-// accessory in a small cell is refused (no silent relocate); the accessory list is wired.
+// Asserts: an accessory inserted at height H has its TOP at ~H mm (fills below); history records it;
+// Ctrl+Z removes it and Ctrl+Y restores it; a too-tall hanging in a small cell is refused (no silent
+// relocate); the accessory list is wired.
 import puppeteer from "puppeteer-core";
 const CHROME = "C:\\Users\\hp\\AppData\\Local\\ms-playwright\\chromium-1223\\chrome-win64\\chrome.exe";
 const B = "http://127.0.0.1:3000";
@@ -26,32 +28,32 @@ for (let i = 0; i < 40; i++) { if (await page.evaluate(() => typeof window.__ads
 await sleep(2000);
 ok(await page.evaluate(() => typeof window.__adsWardInsertAt === "function"), "editor mounted + insert hook available");
 
-// insert `arg` at absolute height H into the compartment that CONTAINS H (fresh find each time so no stale index)
-const insertAtHeight = (H, arg, minH) => page.evaluate((H, arg, minH) => {
+// insert `arg` with its TOP at absolute height H, into the compartment that CONTAINS H and has room below
+const insertTopAt = (H, arg, minBelow) => page.evaluate((H, arg, minBelow) => {
   const secs = window.__adsWardSecs();
-  for (let si = 0; si < secs.length; si++) for (let ci = 0; ci < secs[si].columns.length; ci++) { const cells = secs[si].columns[ci].cells; let bot = 0; for (let k = 0; k < cells.length; k++) { const top = bot + cells[k].hMM; if (!cells[k].covered && bot <= H && top >= H && cells[k].hMM >= minH) { window.__adsWardInsertAt(si, ci, k, H, arg); return { si, ci, k, bot: Math.round(bot) }; } bot = top; } }
+  for (let si = 0; si < secs.length; si++) for (let ci = 0; ci < secs[si].columns.length; ci++) { const cells = secs[si].columns[ci].cells; let bot = 0; for (let k = 0; k < cells.length; k++) { const top = bot + cells[k].hMM; if (!cells[k].covered && bot <= H && top >= H && (H - bot) >= minBelow) { window.__adsWardInsertAt(si, ci, k, H, arg); return { si, ci, k, bot: Math.round(bot) }; } bot = top; } }
   return null;
-}, H, arg, minH);
-// floor height of the accessory kind nearest H in column (si,ci)
-const floorOf = (si, ci, kind, H) => page.evaluate((si, ci, kind, H) => { const cells = window.__adsWardSecs()[si].columns[ci].cells; let bot = 0, best = null; for (const c of cells) { if (c.kind === kind && (best == null || Math.abs(bot - H) < Math.abs(best - H))) best = Math.round(bot); bot += c.hMM; } return best; }, si, ci, kind, H);
+}, H, arg, minBelow);
+// top (bottom+hMM) of the accessory of `kind` nearest H in column (si,ci)
+const topOf = (si, ci, kind, H) => page.evaluate((si, ci, kind, H) => { const cells = window.__adsWardSecs()[si].columns[ci].cells; let bot = 0, best = null; for (const c of cells) { const top = bot + c.hMM; if (c.kind === kind && (best == null || Math.abs(top - H) < Math.abs(best - H))) best = Math.round(top); bot = top; } return best; }, si, ci, kind, H);
 const kindCount = (si, ci, kind) => page.evaluate((si, ci, kind) => window.__adsWardSecs()[si].columns[ci].cells.filter((c) => c.kind === kind).length, si, ci, kind);
 
-// 1. Insert a Shelf at exactly 900 mm
-const t1 = await insertAtHeight(900, "shelf", 320);
+// 1. Insert a Shelf with its TOP at exactly 900 mm (area below → the shelf zone)
+const t1 = await insertTopAt(900, "shelf", 120);
 await sleep(900);
-ok(t1, "found a compartment spanning 900 mm (" + JSON.stringify(t1) + ")");
-const shelf900 = t1 && await floorOf(t1.si, t1.ci, "shelf", 900);
-console.log("  shelf floor = " + shelf900 + " mm (target 900)");
-ok(shelf900 != null && Math.abs(shelf900 - 900) <= 6, "shelf inserted at ~900 mm in the clicked compartment (" + shelf900 + ")");
+ok(t1, "found a compartment spanning 900 mm with room below (" + JSON.stringify(t1) + ")");
+const shelf900 = t1 && await topOf(t1.si, t1.ci, "shelf", 900);
+console.log("  shelf top = " + shelf900 + " mm (target 900)");
+ok(shelf900 != null && Math.abs(shelf900 - 900) <= 6, "shelf top lands at ~900 mm — area below is the shelf (" + shelf900 + ")");
 
-// 2. History records the exact height + section (render tick before reading)
+// 2. History records the insert (render tick before reading)
 await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((e) => /🕘 History/.test(e.textContent)); if (b) b.click(); });
 await sleep(500);
-ok(await page.evaluate(() => /Insert Shelf at 900 mm/.test(document.body.innerText)), "history step reads 'Insert Shelf at 900 mm'");
+ok(await page.evaluate(() => /Insert Shelf \(\d+ mm from base\)/.test(document.body.innerText)), "history step reads 'Insert Shelf (N mm from base)'");
 await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((e) => /🕘 History/.test(e.textContent)); if (b) b.click(); });
 await sleep(300);
 
-// 3. Ctrl+Z removes the shelf, Ctrl+Y restores it at the same 900 mm
+// 3. Ctrl+Z removes the shelf, Ctrl+Y restores it at the same top
 const before = await kindCount(t1.si, t1.ci, "shelf");
 await page.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true })));
 await sleep(700);
@@ -59,23 +61,23 @@ const afterUndo = await kindCount(t1.si, t1.ci, "shelf");
 ok(afterUndo === before - 1, "Ctrl+Z removed the inserted shelf (" + before + " → " + afterUndo + ")");
 await page.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "y", ctrlKey: true, bubbles: true })));
 await sleep(700);
-const shelfBack = await floorOf(t1.si, t1.ci, "shelf", 900);
-ok(shelfBack != null && Math.abs(shelfBack - 900) <= 6, "Ctrl+Y restored the shelf at 900 mm (" + shelfBack + ")");
+const shelfBack = await topOf(t1.si, t1.ci, "shelf", 900);
+ok(shelfBack != null && Math.abs(shelfBack - 900) <= 6, "Ctrl+Y restored the shelf top at 900 mm (" + shelfBack + ")");
 
-// 4. A Single Drawer at a DIFFERENT height lands where clicked (proves it's not a default position)
-const t2 = await insertAtHeight(1500, "drawer", 240);
+// 4. A Single Drawer with its TOP at a DIFFERENT height (proves exact, not default)
+const t2 = await insertTopAt(1500, "drawer", 120);
 await sleep(800);
 ok(t2, "found a compartment spanning 1500 mm (" + JSON.stringify(t2) + ")");
-const drawer1500 = t2 && await floorOf(t2.si, t2.ci, "drawer", 1500);
-console.log("  drawer floor = " + drawer1500 + " mm (target 1500)");
-ok(drawer1500 != null && Math.abs(drawer1500 - 1500) <= 6, "drawer inserted at ~1500 mm (a second exact position) (" + drawer1500 + ")");
+const drawer1500 = t2 && await topOf(t2.si, t2.ci, "drawer", 1500);
+console.log("  drawer top = " + drawer1500 + " mm (target 1500)");
+ok(drawer1500 != null && Math.abs(drawer1500 - 1500) <= 6, "drawer top lands at ~1500 mm (a second exact position) (" + drawer1500 + ")");
 
-// 5. Insufficient space is refused (no silent relocation) — Long Hanging (1050) in a <500 mm cell
-const guard = await page.evaluate(() => { const secs = window.__adsWardSecs(); for (let si = 0; si < secs.length; si++) for (let ci = 0; ci < secs[si].columns.length; ci++) { const cells = secs[si].columns[ci].cells; let bot = 0; for (let k = 0; k < cells.length; k++) { if (!cells[k].covered && cells[k].hMM < 500) { const b = cells.length; window.__adsWardInsertAt(si, ci, k, Math.round(bot + 20), "longHang"); return { b, a: window.__adsWardSecs()[si].columns[ci].cells.length }; } bot += cells[k].hMM; } } return null; });
+// 5. Insufficient space is refused (no silent relocation) — Long Hanging (min 900) in a <500 mm cell
+const guard = await page.evaluate(() => { const secs = window.__adsWardSecs(); for (let si = 0; si < secs.length; si++) for (let ci = 0; ci < secs[si].columns.length; ci++) { const cells = secs[si].columns[ci].cells; let bot = 0; for (let k = 0; k < cells.length; k++) { if (!cells[k].covered && cells[k].hMM < 500) { const b = cells.length; window.__adsWardInsertAt(si, ci, k, Math.round(bot + cells[k].hMM), "longHang"); return { b, a: window.__adsWardSecs()[si].columns[ci].cells.length }; } bot += cells[k].hMM; } } return null; });
 ok(!guard || guard.a === guard.b, "Long Hanging refused in a too-small compartment (no silent relocate)" + (guard ? " (" + guard.b + "→" + guard.a + ")" : ""));
 
 // 6. Accessory list wired — a jewellery tray inserts
-const t3 = await insertAtHeight(600, "jewellery", 130);
+const t3 = await insertTopAt(600, "jewellery", 90);
 await sleep(500);
 ok(t3 && (await kindCount(t3.si, t3.ci, "jewellery")) > 0, "Jewellery Tray inserts (accessory list wired)");
 
