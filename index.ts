@@ -12490,6 +12490,7 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="px-3 py-0.5 text-rose-500 font-semibold flex items-center gap-1">Insert at
                 <input type="number" value={menu.heightMM != null ? menu.heightMM : (menu.clickMM || 0)} step="5" min="0" onClick={(e) => e.stopPropagation()} onChange={(e) => { const v = Math.max(0, Math.round((+e.target.value || 0) / 5) * 5); setMenu((m) => m ? { ...m, heightMM: v } : m); }} className="w-16 px-1 py-0 border border-rose-200 rounded text-rose-700 text-[11px]" title="Type an exact height in mm from the floor" /> mm
               </div>
+              {(() => { const mc = secs[menu.si] && secs[menu.si].columns[menu.ci]; const cell = mc && mc.cells[menu.k]; if (!cell) return null; let cb = 0; for (let j = 0; j < menu.k; j++) cb += mc.cells[j].hMM; const h = menu.heightMM != null ? menu.heightMM : menu.clickMM; let below = Math.max(0, Math.min(Math.round((h - cb) / 5) * 5, cell.hMM)); let above = cell.hMM - below; if (above < 40) { above = 0; below = cell.hMM; } return <div className="px-3 pb-0.5 text-[10px] text-slate-500">Below → new: <b className="text-emerald-600">{below} mm</b> · above kept: <b className="text-slate-600">{above} mm</b></div>; })()}
               {WARD_INSERTS.map((t) => mi("+ " + t.label, () => op("insert", t.arg)))}
               {mi("⧉ Duplicate", () => op("dup"))}
               {mi("🗑 Delete", () => op("delete"))}

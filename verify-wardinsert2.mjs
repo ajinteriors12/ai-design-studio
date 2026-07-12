@@ -98,8 +98,8 @@ ok(szAfter.h === 300, "double-click size edit set the compartment to exactly 300
 ok(Math.abs(szAfter.total - szBefore.total) <= 1, "column total height preserved after resize (" + szBefore.total + "→" + szAfter.total + ")");
 
 // 7. Keyboard mm-input markup shipped in the client bundle
-const hasInputMarkup = await page.evaluate(async () => { try { const r = await fetch("/?dev=1"); const html = await r.text(); return /Type an exact height in mm/.test(html) && /Type the exact size in mm/.test(html); } catch (e) { return false; } });
-ok(hasInputMarkup, "keyboard mm-height input + inline size-editor markup present in the served client");
+const hasInputMarkup = await page.evaluate(async () => { try { const r = await fetch("/?dev=1"); const html = await r.text(); return /Type an exact height in mm/.test(html) && /Type the exact size in mm/.test(html) && /above kept/.test(html); } catch (e) { return false; } });
+ok(hasInputMarkup, "keyboard input + inline size-editor + live below/above readout markup present in the served client");
 
 ok(errs.length === 0, "zero console/page errors" + (errs.length ? " — " + errs.slice(0, 3).join(" | ") : ""));
 
