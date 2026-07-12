@@ -12397,13 +12397,26 @@ const frontendHTML = `<!DOCTYPE html>
       // (or giving to) the neighbouring compartment so the column height stays fixed (owner spec).
       const applyCellHeight = (si, ci, k, newH) => {
         if (!newH || isNaN(newH)) return;
-        const nn = JSON.parse(JSON.stringify(secs)); const cells = nn[si] && nn[si].columns[ci] && nn[si].columns[ci].cells; if (!cells) return;
+        const nn = JSON.parse(JSON.stringify(secs)); const sec = nn[si]; const cells = sec && sec.columns[ci] && sec.columns[ci].cells; if (!cells) return;
         const cell = cells[k]; if (!cell || cell.covered) return;
         if (cell.locked) { setMmsg("Unlock this compartment before resizing it."); return; }
         newH = Math.max(60, Math.round(newH / 5) * 5); if (newH === cell.hMM) return;
-        const nbi = (cells[k + 1] && !cells[k + 1].covered && !cells[k + 1].locked) ? k + 1 : ((cells[k - 1] && !cells[k - 1].covered && !cells[k - 1].locked) ? k - 1 : -1);
-        if (nbi < 0) { setMmsg("Only one adjustable compartment in this column — resize the column instead."); return; }
         const delta = newH - cell.hMM;
+        const aboveIdx = (arr, ck) => (arr[ck + 1] && !arr[ck + 1].covered && !arr[ck + 1].locked) ? ck + 1 : -1;
+        if (cell.span > 1 && cell.mergeId != null) {
+          // Spanned master → keep the band bottom fixed (always borrow from the compartment ABOVE) and
+          // resize the covered twin in every spanned column too, so the wide unit stays consistent live.
+          const mid = cell.mergeId; const edits = []; const mAb = aboveIdx(cells, k);
+          if (mAb < 0) { setMmsg("No adjustable compartment above the spanned unit — resize the one above it first."); return; }
+          if (cells[mAb].hMM - delta < 60) { setMmsg("Not enough room above the spanned unit."); return; }
+          edits.push({ arr: cells, k: k, ab: mAb });
+          for (let jc = 0; jc < sec.columns.length; jc++) { if (jc === ci) continue; const cc = sec.columns[jc].cells; let idx = -1; for (let z = 0; z < cc.length; z++) if (cc[z].covered && cc[z].mergeId === mid) { idx = z; break; } if (idx < 0) continue; const ab = aboveIdx(cc, idx); if (ab < 0 || cc[ab].hMM - delta < 60) { setMmsg("The spanned unit can't grow — column " + (jc + 1) + " has no room above it."); return; } edits.push({ arr: cc, k: idx, ab: ab }); }
+          edits.forEach((e) => { e.arr[e.k].hMM = newH; e.arr[e.ab].hMM -= delta; });
+          commit(nn, "Resize spanned " + (cell.label || cell.kind) + " → " + newH + " mm");
+          return;
+        }
+        const nbi = aboveIdx(cells, k) >= 0 ? aboveIdx(cells, k) : ((cells[k - 1] && !cells[k - 1].covered && !cells[k - 1].locked) ? k - 1 : -1);
+        if (nbi < 0) { setMmsg("Only one adjustable compartment in this column — resize the column instead."); return; }
         if (cells[nbi].hMM - delta < 60) { setMmsg("Not enough room in the next compartment (only " + cells[nbi].hMM + " mm)."); return; }
         cell.hMM = newH; cells[nbi].hMM -= delta;
         commit(nn, "Set " + (cell.label || cell.kind) + " to " + newH + " mm");

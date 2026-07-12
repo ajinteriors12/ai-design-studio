@@ -43,6 +43,16 @@ ok(c1 && c1.covH === c1.mh && c1.covKind === c1.kind, "neighbour has a matching 
 ok(c1 && Math.abs(c1.totM - c1.totN) <= 2, "both columns keep the same total height (" + (c1 && c1.totM) + " / " + (c1 && c1.totN) + ")");
 ok(c1 && Math.abs(c1.totN - c1.nbBefore) <= 2, "neighbour column total unchanged by the span (" + (c1 && c1.nbBefore) + "→" + (c1 && c1.totN) + ")");
 
+// 1b. Resizing the spanned master (double-click mm) propagates to the covered twin live
+if (c1 && c1.span === 2) {
+  const newH = c1.mh - 50;
+  await page.evaluate((t, h) => window.__adsWardSetH(t.r.si, t.r.ci, t.r.k, h), t1, newH);
+  await sleep(700);
+  const c1b = await page.evaluate((t) => { const secs = window.__adsWardSecs(); const col = secs[t.r.si].columns[t.r.ci]; const master = col.cells[t.r.k]; const nb = secs[t.r.si].columns[t.r.ci + 1].cells; const cov = nb.find((c) => c.covered && c.mergeId === master.mergeId); return { mh: master.hMM, covH: cov ? cov.hMM : null, totM: col.cells.reduce((a, c) => a + c.hMM, 0), totN: nb.reduce((a, c) => a + c.hMM, 0) }; }, t1);
+  ok(Math.abs(c1b.mh - newH) <= 1 && c1b.covH === c1b.mh, "resizing the spanned master updates the covered twin live (master " + c1b.mh + ", twin " + c1b.covH + ")");
+  ok(Math.abs(c1b.totM - c1b.totN) <= 2, "spanned resize keeps both column totals equal (" + c1b.totM + "/" + c1b.totN + ")");
+} else { ok(true, "span-resize test skipped (no span master)"); ok(true, "(skipped)"); }
+
 // 2. SAFE span never corrupts — pick another column pair; whether it applies or refuses, totals stay equal
 const t2 = await page.evaluate(() => {
   const secs = window.__adsWardSecs();
