@@ -13132,6 +13132,13 @@ const frontendHTML = `<!DOCTYPE html>
           </div>)}
         </div>
 
+        {sel && sel.suggestions && sel.suggestions.length > 0 && (<div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4">
+          <div className="text-sm font-semibold text-amber-800 mb-2">💡 Space suggestions <span className="text-indigo-600">· Option {selIdx + 1} · {sel.label}</span> <span className="text-[11px] font-normal text-amber-600">— make the most of every millimetre</span></div>
+          <div className="space-y-1.5">
+            {sel.suggestions.map((s, i) => (<div key={i} className="flex items-start gap-2 text-[12px] text-slate-700"><span className="text-base leading-none">{s.icon}</span><span>{s.text}</span></div>))}
+          </div>
+        </div>)}
+
         {sel && (<div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
             <h3 className="text-sm font-semibold text-slate-700">✏️ Edit — <span className="text-indigo-600">Option {selIdx + 1} · {sel.label}</span> <span className="text-xs font-normal text-slate-400">· drag dividers (↕ bands · ↔ partitions · ↔ male/female split) · right-click for add / delete / convert / lock</span></h3>
@@ -15051,6 +15058,30 @@ function wardCNC(opt: any): any {
   if (opt.hasLoft) push("Loft shelf", "Support pin Ø5", 4, "corner supports");
   return { ops, totalHoles: holes, system: "32 mm (LINE-32)", tooling: "Ø5 · Ø8 · Ø15 · Ø35 boring bits" };
 }
+// SPACE SUGGESTIONS — analyse a generated wardrobe and propose how to use its space: notes any
+// reclaimed space that was auto-filled, flags missing essentials, and recommends premium add-ons.
+// Pure local logic (no API). Each suggestion has an icon + text; the client renders them per option.
+function wardSuggestions(opt: any): { icon: string; text: string }[] {
+  const out: { icon: string; text: string }[] = [];
+  const kinds = new Set<string>(); let extraShelves = 0, hang = 0, drawers = 0, shelves = 0, biggest = { kind: "", mm: 0, sec: "" };
+  for (const s of (opt.sections || [])) for (const col of (s.columns || [])) for (const cell of (col.cells || [])) {
+    if (cell.covered) continue; const k = String(cell.kind); kinds.add(k);
+    if (cell.label === "Extra Shelf") extraShelves++;
+    if (k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit") hang++;
+    else if (k === "drawer") drawers++; else if (k === "shelf") shelves++;
+    if (cell.hMM > biggest.mm) biggest = { kind: cell.label || k, mm: Math.round(cell.hMM), sec: s.label || s.kind || "" };
+  }
+  if (extraShelves > 0) out.push({ icon: "📚", text: (extraShelves > 1 ? extraShelves + " adjustable shelves were" : "An adjustable shelf was") + " auto-added in the reclaimed space below hanging so nothing is wasted — right-click any in the ✏️ editor to convert to drawers, a pull-out pant rack, or a shoe rack." });
+  if (biggest.mm >= 900) out.push({ icon: "📐", text: "Largest single zone: " + biggest.kind + " (" + biggest.mm + " mm" + (biggest.sec ? ", " + biggest.sec + " section" : "") + ") — great for full-length wear; or split it into a shelf stack + drawers for mixed storage." });
+  if (!kinds.has("pantRack")) out.push({ icon: "👖", text: "No dedicated trouser rack — add a pull-out pant rack to keep trousers crease-free." });
+  if (!kinds.has("shoe")) out.push({ icon: "👟", text: "No shoe rack — a base shoe unit (200 mm pitch) keeps footwear tidy." });
+  if (!kinds.has("safe")) out.push({ icon: "🔒", text: "Add a locker/safe compartment for jewellery, documents & valuables." });
+  if (!kinds.has("tieBelt") && !kinds.has("jewellery")) out.push({ icon: "👔", text: "A pull-out tie/belt or velvet jewellery tray organises small accessories." });
+  if (!opt.hasLoft) out.push({ icon: "🧳", text: "No loft — a top loft (400–600 mm) is ideal for suitcases & seasonal bedding." });
+  if (!kinds.has("mirror")) out.push({ icon: "🪞", text: "Add a full-length mirror on an end panel or the inside of a shutter." });
+  out.push({ icon: "💡", text: "Add warm profile/LED strip lighting under shelves & the loft for a premium, showroom finish." });
+  return out.slice(0, 7);
+}
 function wardScorecard(opt: any): any {
   const s = opt.stats, tot = Math.max(1, s.totalItems), cl = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
   const hangingCap = cl(45 + (s.hanging / tot) * 130), shelfCap = cl(45 + (s.shelves / tot) * 150), drawerCap = cl(45 + (s.drawers / tot) * 150);
@@ -15851,7 +15882,7 @@ function wardrobeOptions(input: any): any {
   const options = ["balanced", "balanced-hang", "balanced-fold"].map((st) => {
     const o = buildWardrobeOption(st, input);
     o.reports = wardReports(o);
-    o.scorecard = wardScorecard(o);
+    o.scorecard = wardScorecard(o); o.suggestions = wardSuggestions(o);
     o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o), "Item Art": renderWardrobeItemCatalog() };
     o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
@@ -16167,7 +16198,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
     const allCells = o.sections.flatMap((s: any) => (s.columns || []).flatMap((cc: any) => (cc.cells || []).filter((x: any) => !x.covered)));
     const cnt = (pred: (k: string) => boolean) => allCells.filter((cc: any) => pred(cc.kind)).length;
     o.stats = { hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"), shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"), drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"), shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"), columns: o.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0), totalItems: allCells.length };
-    o.reports = wardReports(o); o.scorecard = wardScorecard(o);
+    o.reports = wardReports(o); o.scorecard = wardScorecard(o); o.suggestions = wardSuggestions(o);
     o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o), "Item Art": renderWardrobeItemCatalog() };
     o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
