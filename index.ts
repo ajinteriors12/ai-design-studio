@@ -9463,7 +9463,7 @@ const frontendHTML = `<!DOCTYPE html>
                       {[A, Bv].map((v, idx) => (
                         <div key={idx} className="border border-slate-200 rounded-lg overflow-hidden">
                           <div className={"px-3 py-1.5 text-xs font-semibold text-white " + (idx === 0 ? "bg-slate-600" : "bg-indigo-600")}>{idx === 0 ? "A · " : "B · "}{v.label}</div>
-                          <div className="p-2 bg-slate-50 flex items-center justify-center" style={{ minHeight: 180 }}>{v.planSvg ? <div style={{ maxWidth: "100%" }} dangerouslySetInnerHTML={{ __html: v.planSvg }} /> : <span className="text-slate-400 text-xs">no plan drawing stored</span>}</div>
+                          <div className="p-2 bg-slate-50">{v.planSvg ? <PanZoom html={v.planSvg} height={300} bg="#f8fafc" /> : <div className="flex items-center justify-center text-slate-400 text-xs" style={{ minHeight: 180 }}>no plan drawing stored</div>}</div>
                         </div>
                       ))}
                     </div>
@@ -10687,7 +10687,7 @@ const frontendHTML = `<!DOCTYPE html>
                           <button onClick={() => setSpecSvg(null)} className="px-2.5 py-1 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white rounded">✕ Close</button>
                         </div>
                       </div>
-                      <div style={{ width: "100%", overflow: "auto", border: "1px solid #e2e8f0", borderRadius: 4 }} dangerouslySetInnerHTML={{ __html: specSvg }} />
+                      <PanZoom html={specSvg} height={640} />
                     </div>
                   </div>
                 )}
