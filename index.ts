@@ -12787,7 +12787,7 @@ const frontendHTML = `<!DOCTYPE html>
       }, []);
       // fit the drawing to the frame whenever the drawing changes
       React.useEffect(() => { const el = ref.current, ic = inner.current; if (!el || !ic) return; const svg = ic.querySelector("svg"); if (!svg) return; const fw = el.clientWidth || 1, fh = el.clientHeight || 1; const bb = svg.getBoundingClientRect(); const sw = (bb.width / (t.s || 1)) || fw, sh = (bb.height / (t.s || 1)) || fh; const s = clamp(Math.min(fw / sw, fh / sh) * 0.98); setT({ s: s, x: (fw - sw * s) / 2, y: (fh - sh * s) / 2 }); }, [html]);
-      const onDown = (e) => { drag.current = { x: e.clientX, y: e.clientY, ox: t.x, oy: t.y }; setGrabbing(true); try { e.currentTarget.setPointerCapture(e.pointerId); } catch (z) {} };
+      const onDown = (e) => { e.stopPropagation(); drag.current = { x: e.clientX, y: e.clientY, ox: t.x, oy: t.y }; setGrabbing(true); try { e.currentTarget.setPointerCapture(e.pointerId); } catch (z) {} };
       const onMove = (e) => { const d = drag.current; if (!d) return; setT((p) => ({ s: p.s, x: d.ox + (e.clientX - d.x), y: d.oy + (e.clientY - d.y) })); };
       const onUp = (e) => { drag.current = null; setGrabbing(false); try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (z) {} };
       const zoomCentre = (f) => setT((p) => { const el = ref.current; const w = (el ? el.clientWidth : 400) / 2, h = (el ? el.clientHeight : 400) / 2; const ns = clamp(p.s * f); const k = ns / p.s; return { s: ns, x: w - (w - p.x) * k, y: h - (h - p.y) * k }; });
@@ -13095,14 +13095,15 @@ const frontendHTML = `<!DOCTYPE html>
             <h3 className="text-sm font-semibold text-slate-700">Layout Options <span className="text-xs font-normal text-slate-400">· 3 AI variants · click to select</span></h3>
             <div className="flex gap-1 flex-wrap">{["Front", "Internal", "Shop Drawing", "Shutters", "Top", "Side", "Loft", "Item Art"].map((v) => (<button key={v} onClick={() => setView(v)} className={"px-2 py-0.5 rounded text-[11px] border " + (view === v ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{v === "Shop Drawing" ? "📐 Shop Drawing" : v === "Shutters" ? "🚪 Shutters ⇄ Open" : v === "Item Art" ? "📖 Item Art" : v}</button>))}</div>
           </div>
-          <div className="grid md:grid-cols-3 gap-3">
-            {opts.map((o, i) => (<div key={o.id} onClick={() => setSelIdx(i)} className={"rounded-lg border overflow-hidden cursor-pointer transition " + (i === selIdx ? "border-indigo-400 ring-1 ring-indigo-200" : "border-slate-200 hover:border-slate-300")}>
-              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200">
-                <span className="text-sm font-semibold text-slate-800">Option {i + 1} · {o.label}</span>
+          <div className="text-[11px] text-slate-400 mb-2">All 3 options shown as the selected view ({view === "Shop Drawing" ? "📐 Shop Drawing" : view === "Shutters" ? "🚪 Shutters ⇄ Open" : view === "Item Art" ? "📖 Item Art" : view}) · each zoomable — 🖱 drag to pan, scroll / +− to zoom · click the header to select</div>
+          <div className="grid xl:grid-cols-3 gap-3">
+            {opts.map((o, i) => (<div key={o.id} className={"rounded-lg border overflow-hidden transition " + (i === selIdx ? "border-indigo-400 ring-2 ring-indigo-200" : "border-slate-200 hover:border-slate-300")}>
+              <div onClick={() => setSelIdx(i)} className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200 cursor-pointer">
+                <span className="text-sm font-semibold text-slate-800">{i === selIdx ? "✓ " : ""}Option {i + 1} · {o.label}</span>
                 {i === best ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 font-semibold">⭐ Recommended</span> : <span className="text-[10px] text-slate-400">{o.scorecard.overallConfidence}%</span>}
               </div>
-              <div className="p-2 bg-white overflow-auto" dangerouslySetInnerHTML={{ __html: (o.views && o.views[view]) || o.svg }} />
-              <div className="flex items-center justify-between px-3 py-1.5 border-t border-slate-200 text-[11px] text-slate-500">
+              <div className="p-2 bg-white"><PanZoom html={(o.views && o.views[view]) || o.svg} height={440} /></div>
+              <div onClick={() => setSelIdx(i)} className="flex items-center justify-between px-3 py-1.5 border-t border-slate-200 text-[11px] text-slate-500 cursor-pointer">
                 <span>⬆ {o.scorecard.spaceUtil}% space</span><span>🪝 {o.stats.hanging} hang</span><span>📚 {o.stats.shelves} shelf</span><span>🗄 {o.stats.drawers} drw</span>
               </div>
             </div>))}
