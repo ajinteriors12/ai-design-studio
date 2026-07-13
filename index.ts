@@ -12828,7 +12828,14 @@ const frontendHTML = `<!DOCTYPE html>
           <button onClick={rescan} disabled={busy} className="px-2.5 py-1 rounded bg-indigo-600 text-white text-[11px] font-medium disabled:opacity-50">{busy ? "Learning…" : "↻ Rescan folder"}</button>
         </div>
         {msg && <div className="text-[11px] text-indigo-600">{msg}</div>}
-        <div className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">✓ Always-on: any new image dropped in the folder is auto-learned. Standards below are applied to generation, glass-doors, palettes &amp; the presentation board.</div>
+        <div className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">✓ Always-on: any new image dropped in the folder is auto-learned (needs a funded vision key). The medians below OVERRIDE the defaults and are applied live to all 3 generated options.</div>
+        {ln.applied && ln.applied.count > 0 && Object.keys((ln.learned && ln.learned.dims) || {}).length > 0 && (<div className="rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-2">
+          <div className="font-semibold text-indigo-700 text-[11px] mb-1">✓ Learned from {ln.applied.count} of your images — these override the defaults in every option</div>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.keys(ln.learned.dims).map((k) => <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-white border border-indigo-200 text-indigo-700">{k}: <b>{ln.learned.dims[k].def} mm</b> <span className="text-indigo-300">({ln.learned.dims[k].n} refs)</span></span>)}
+          </div>
+          {(ln.learned.palette && ln.learned.palette.length) ? <div className="text-[10px] text-slate-500 mt-1">Learned palette: {ln.learned.palette.join(", ")}{ln.learned.glass && ln.learned.glass.length ? " · glass: " + ln.learned.glass.join(", ") : ""}</div> : null}
+        </div>)}
         <div>
           <div className="font-semibold text-slate-600 mb-1">📐 Dimension standards (mm)</div>
           <table className="w-full"><tbody>{Object.keys(D).filter((k) => D[k] && typeof D[k] === "object" && D[k].def != null).map((k) => dimRow(k, D[k]))}</tbody></table>
@@ -14586,6 +14593,42 @@ const WARDROBE_STD = {
   handle: "Profile / knob / long handle",
   finishes: ["Laminate", "Acrylic", "PU", "Veneer", "Rattan", "Glass"],
 };
+// ── LEARNED DESIGN STANDARDS ── aggregate the vision-learned reference images (wardrobe_learnings)
+// into effective standards that OVERRIDE the hardcoded defaults, so all 3 generated options reflect
+// what the reference folder taught. Recomputed whenever a new image is learned (always-on watcher).
+let WARD_LEARNED: { std: Record<string, number>; dims: Record<string, { def: number; n: number }>; palette: string[]; glass: string[]; compartments: string[]; count: number } | null = null;
+function wardLearnedStd() {
+  const out = { std: {} as Record<string, number>, dims: {} as Record<string, { def: number; n: number }>, palette: [] as string[], glass: [] as string[], compartments: [] as string[], count: 0 };
+  let rows: any[] = [];
+  try { rows = sqlite.prepare("SELECT data FROM wardrobe_learnings WHERE engine != 'pending'").all() as any[]; } catch { return out; }
+  // learned dimension key (lower-cased, as vision reports it) → [WARDROBE_STD field, sane min, sane max]
+  const MAP: Record<string, [string, number, number]> = {
+    longhang: ["hangLong", 1300, 1800], shorthang: ["hangShort", 800, 1200],
+    shelfpitch: ["shelfGap", 250, 420], shelfgap: ["shelfGap", 250, 420], shelf: ["shelfGap", 250, 420],
+    drawer: ["drawerH", 150, 260], drawerh: ["drawerH", 150, 260],
+    loft: ["loftBand", 300, 700], depth: ["depth", 500, 700],
+    pantrack: ["pantRack", 350, 680], pant: ["pantRack", 350, 680], shoe: ["shoeH", 250, 350], plinth: ["plinth", 75, 120],
+  };
+  const dimVals: Record<string, number[]> = {}, pal: Record<string, number> = {}, gl: Record<string, number> = {}, comp: Record<string, number> = {};
+  for (const r of rows) {
+    let d: any; try { d = JSON.parse(r.data); } catch { continue; }
+    if (!d || d.subCategory === "pending") continue;
+    out.count++;
+    const dm = d.dimensionsMm || {};
+    for (const k in dm) { const v = +dm[k]; if (!isFinite(v) || v <= 0) continue; const m = MAP[String(k).toLowerCase()]; if (!m) continue; const [f, lo, hi] = m; if (v < lo * 0.55 || v > hi * 1.45) continue; (dimVals[f] = dimVals[f] || []).push(Math.max(lo, Math.min(hi, v))); }
+    for (const p of (d.palette || [])) { const s = String(p).toLowerCase().trim(); if (s && s.length < 24) pal[s] = (pal[s] || 0) + 1; }
+    if (d.glassType && d.glassType !== "none") gl[d.glassType] = (gl[d.glassType] || 0) + 1;
+    for (const c of (d.compartments || [])) { const s = String(c).toLowerCase().trim(); if (s) comp[s] = (comp[s] || 0) + 1; }
+  }
+  const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+  for (const f in dimVals) { if (dimVals[f].length >= 2) { const v = Math.round(median(dimVals[f])); out.std[f] = v; out.dims[f] = { def: v, n: dimVals[f].length }; } }
+  const topK = (o: Record<string, number>, n: number) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n).map((e) => e[0]);
+  out.palette = topK(pal, 5); out.glass = topK(gl, 3); out.compartments = topK(comp, 10);
+  return out;
+}
+function wardLearnedRefresh() { try { WARD_LEARNED = wardLearnedStd(); } catch { WARD_LEARNED = null; } }
+// effective standards = defaults overlaid with the learned medians (only dims ≥2 reference images agreed on)
+function wardEffStd(): typeof WARDROBE_STD { return (WARD_LEARNED && WARD_LEARNED.count && Object.keys(WARD_LEARNED.std).length) ? (Object.assign({}, WARDROBE_STD, WARD_LEARNED.std) as any) : WARDROBE_STD; }
 const WARD_COLORS: Record<string, string> = {
   longHang: "#3b82f6", shortHang: "#8b5cf6", pantRack: "#7c3aed", suit: "#2563eb",
   shelf: "#22c55e", drawer: "#ec4899", shoe: "#d4a574", safe: "#ef4444",
@@ -14628,7 +14671,7 @@ const wardClamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v
 type WCell = { kind: string; label: string; hMM: number };
 // A column recipe → cells bottom→top, normalized to sum to usableH.
 function wardColumn(recipe: string, usableH: number): WCell[] {
-  const S = WARDROBE_STD, cells: WCell[] = [];
+  const S = wardEffStd(), cells: WCell[] = [];
   const push = (kind: string, label: string, hMM: number) => cells.push({ kind, label, hMM: Math.round(Math.max(60, hMM)) });
   const shelves = (h: number, label: string) => { const n = Math.max(2, Math.round(h / S.shelfGap)); for (let i = 0; i < n; i++) push("shelf", label, h / n); };
   switch (recipe) {
@@ -14678,7 +14721,7 @@ function wardShelfCapHang(cells: any[]): any[] {
 }
 // Corner-unit column (L/U-shape §20) — cells for the chosen corner solution.
 function wardCornerColumn(solution: string, usableH: number): WCell[] {
-  const S = WARDROBE_STD, cells: WCell[] = [];
+  const S = wardEffStd(), cells: WCell[] = [];
   const push = (kind: string, label: string, hMM: number) => cells.push({ kind, label, hMM: Math.round(Math.max(60, hMM)) });
   switch (solution) {
     case "carousel": push("cornerCarousel", "Carousel 360°", usableH); break;
@@ -14756,7 +14799,7 @@ function wardSectionRecipes(sec: string, n: number, strategy: string, L: any): s
   return out;
 }
 function buildWardrobeOption(strategy: string, input: any): any {
-  const S = WARDROBE_STD;
+  const S = wardEffStd();
   const mainWidth = wardClamp(Math.round(+input.width || 2400), 1200, 4800);
   // §20 L/U-shape: the lifestyle sections tile across the UNFOLDED total (all wings); the option
   // is then folded into wings with corner units between them. Straight = unchanged.
@@ -15900,7 +15943,7 @@ async function learnWardrobeVision(name: string, media: string, b64: string): Pr
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 60000);
   try {
     if (keys.openai && media !== "application/pdf") {
-      const res = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + keys.openai }, body: JSON.stringify({ model: "gpt-4o", max_tokens: 1500, messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: "data:" + media + ";base64," + b64, detail: "high" } }] }] }), signal: ac.signal });
+      const res = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + keys.openai }, body: JSON.stringify({ model: process.env.WARD_VISION_MODEL || "gpt-4o-mini", max_tokens: 1500, messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: "data:" + media + ";base64," + b64, detail: "high" } }] }] }), signal: ac.signal });
       if (res.ok) { const j: any = await res.json(); const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || ""; const parsed = extractLastJson(txt); if (parsed) return { data: parsed, engine: "GPT-4o vision" }; }
       else console.error("learn vision HTTP", res.status, (await res.text().catch(() => "")).slice(0, 100));
     } else if (keys.anthropic) {
@@ -15944,6 +15987,7 @@ async function wardLearnBulk(): Promise<{ scanned: number; learned: number; pend
   try {
     const files = wardLearnWalk(WARD_LEARN_DIR);
     for (const f of files) { const r = await wardLearnFile(f.abs, f.cat); if (r === "learned") learned++; else if (r === "pending") pending++; }
+    wardLearnedRefresh();   // re-aggregate learned standards → the 3 options pick them up on next generate
     return { scanned: files.length, learned, pending };
   } finally { wardLearnBusy = false; }
 }
@@ -15957,7 +16001,8 @@ function startWardLearnWatcher() {
       wardWatchQueue.add(rel); clearTimeout(wardWatchTimer);
       wardWatchTimer = setTimeout(async () => {
         const items = [...wardWatchQueue]; wardWatchQueue.clear();
-        for (const r of items) { const abs = WARD_LEARN_DIR + "/" + r, cat = r.indexOf("/") >= 0 ? r.slice(0, r.lastIndexOf("/")) : "root"; const res = await wardLearnFile(abs, cat); if (res === "learned") console.log("[learn] learned new image:", r); }
+        let got = false; for (const r of items) { const abs = WARD_LEARN_DIR + "/" + r, cat = r.indexOf("/") >= 0 ? r.slice(0, r.lastIndexOf("/")) : "root"; const res = await wardLearnFile(abs, cat); if (res === "learned") { got = true; console.log("[learn] learned new image:", r); } }
+        if (got) wardLearnedRefresh();   // a single new image immediately updates the standards applied to all 3 options
       }, 1800);
     });
     console.log("[learn] watching for new wardrobe images:", WARD_LEARN_DIR);
@@ -15966,10 +16011,12 @@ function startWardLearnWatcher() {
 // Boot: one-time bulk learn if the KB is empty + a vision key exists, then start the watcher.
 setTimeout(() => {
   try {
-    const cnt = (sqlite.prepare("SELECT COUNT(*) c FROM wardrobe_learnings").get() as any).c, keys = loadAIKeys();
-    if (cnt === 0 && (keys.openai || keys.anthropic) && fsExists(WARD_LEARN_DIR)) {
-      console.log("[learn] first run — learning all wardrobe reference images once…");
-      wardLearnBulk().then((r) => console.log("[learn] first-run complete:", r.learned + " learned / " + r.scanned + " scanned" + (r.pending ? " (" + r.pending + " pending)" : ""))).catch(() => {});
+    const learnedCnt = (sqlite.prepare("SELECT COUNT(*) c FROM wardrobe_learnings WHERE engine != 'pending'").get() as any).c, keys = loadAIKeys();
+    wardLearnedRefresh();   // apply whatever is already learned to generation on boot (no restart needed)
+    // learn/retry if nothing has successfully learned yet AND a vision key exists (retries the pending rows)
+    if (learnedCnt === 0 && (keys.openai || keys.anthropic) && fsExists(WARD_LEARN_DIR)) {
+      console.log("[learn] no learned images yet — vision-analysing the reference folder…");
+      wardLearnBulk().then((r) => console.log("[learn] complete:", r.learned + " learned / " + r.scanned + " scanned" + (r.pending ? " (" + r.pending + " pending — check the vision key/quota)" : ""))).catch(() => {});
     }
   } catch { }
   startWardLearnWatcher();
@@ -15978,12 +16025,32 @@ app.get("/api/wardrobe/learnings", (c) => {
   const rows = sqlite.prepare("SELECT id,category,filename,engine,data FROM wardrobe_learnings ORDER BY category, filename").all() as any[];
   const images = rows.map((r) => { let d: any = {}; try { d = JSON.parse(r.data); } catch { } return { id: r.id, category: r.category, filename: r.filename, engine: r.engine, data: d }; });
   const byCategory: Record<string, number> = {}; images.forEach((im) => { byCategory[im.category] = (byCategory[im.category] || 0) + 1; });
-  return c.json({ dna: WARDROBE_DNA, images, counts: { total: images.length, byCategory, analysed: images.filter((i) => i.engine && i.engine !== "pending").length }, watching: WARD_LEARN_DIR, busy: wardLearnBusy });
+  const learned = WARD_LEARNED || wardLearnedStd();
+  return c.json({ dna: WARDROBE_DNA, learned, applied: { std: wardEffStd(), overrides: learned.std, count: learned.count }, images, counts: { total: images.length, byCategory, analysed: images.filter((i) => i.engine && i.engine !== "pending").length }, watching: WARD_LEARN_DIR, busy: wardLearnBusy });
 });
 app.post("/api/wardrobe/learnings/rescan", async (c) => {
   const keys = loadAIKeys(); if (!keys.openai && !keys.anthropic) return c.json({ error: "No vision key — add \"openai\" to ai-keys.json to learn images." }, 400);
   const r = await wardLearnBulk();
   return c.json({ data: r });
+});
+// Seed / overwrite learnings directly (bypasses the vision API — used when a vision key is unavailable
+// or to record an expert analysis). Body: { items: [{ filename, category?, data:{...vision schema} }] }.
+app.post("/api/wardrobe/learnings/seed", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as any));
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) return c.json({ error: "no items" }, 400);
+    const stmt = sqlite.prepare("INSERT OR REPLACE INTO wardrobe_learnings (id,path,category,filename,mtime,engine,data,created_at) VALUES (?,?,?,?,?,?,?,?)");
+    let n = 0;
+    for (const it of items) {
+      const fn = String(it.filename || "").trim(); if (!fn) continue;
+      const cat = String(it.category || "root"); const id = cat === "root" ? fn : cat + "/" + fn;
+      const abs = WARD_LEARN_DIR + "/" + id; let mt = 1; try { if (fsExists(abs)) mt = Math.round(fsStat(abs).mtimeMs); } catch { }
+      stmt.run(id, abs, cat, fn, mt, String(it.engine || "expert-seed"), JSON.stringify(it.data || {}), Date.now()); n++;
+    }
+    wardLearnedRefresh();
+    return c.json({ data: { seeded: n, learned: WARD_LEARNED } });
+  } catch (err) { console.error(err); return c.json({ error: "seed failed", message: String(err) }, 500); }
 });
 app.post("/api/wardrobe/rerender", async (c) => {
   try {
