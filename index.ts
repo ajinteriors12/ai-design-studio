@@ -11817,6 +11817,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [fly, setFly] = useState(false);           // §13.1 fly-through (auto-orbit)
       const [led, setLed] = useState(false);           // §13 decorative LED strip lighting
       const [dims3d, setDims3d] = useState(false);     // dimension annotations overlay in 3D (W×H×D + per-cell)
+      const [items3d, setItems3d] = useState(true);    // show garments / folded stacks / items inside compartments
       const [menu3d, setMenu3d] = useState(null);      // §13.3 3D right-click menu
       const modeRef = React.useRef("persp"), explRef = React.useRef(0), secRef = React.useRef(0), shadRef = React.useRef(false), qualRef = React.useRef("med"), lightRef = React.useRef("day"), flyRef = React.useRef(false), exportRef = React.useRef(null), opRef = React.useRef(null);
       React.useEffect(() => { modeRef.current = vmode; }, [vmode]);
@@ -11828,6 +11829,8 @@ const frontendHTML = `<!DOCTYPE html>
       React.useEffect(() => { flyRef.current = fly; }, [fly]);
       const dimRef = React.useRef(false);
       React.useEffect(() => { dimRef.current = dims3d; }, [dims3d]);   // toggle-only: no scene rebuild (visibility flipped in the render loop)
+      const itemsRef = React.useRef(true);
+      React.useEffect(() => { itemsRef.current = items3d; }, [items3d]);   // toggle-only item art visibility (no scene rebuild)
       React.useEffect(() => {
         const THREE = window.THREE; if (!THREE || !ref.current || !opt) return;
         const host = ref.current, Wv = host.clientWidth || 640, Hv = 440;
@@ -11856,6 +11859,7 @@ const frontendHTML = `<!DOCTYPE html>
         let lodSkipEdges = false;   // §13 LOD: on large/busy wardrobes drop interior edge overlays + rod segments
         let boxTarget = g;          // §20 folded L/U build routes meshes into per-wing sub-groups
         let dimObjs = [];           // dimension overlay objects (lines + label sprites), toggled via dimRef
+        let itemObjs = [];          // item art meshes (garments/folds/shoes/pants), toggled via itemsRef
         // §20 folded L/U-shape 3D: fold the flat run into wings + corners (mirrors renderWardrobePlanShaped geometry)
         const isFolded = (opt.shape === "l" || opt.shape === "u") && Array.isArray(opt.wings) && opt.wings.length > 0;
         let foldCx = 0, foldCz = 0, foldBw = Wd;   // footprint centre + span for explode/section in folded mode
@@ -11889,6 +11893,28 @@ const frontendHTML = `<!DOCTYPE html>
           const off = o.loff || [0, 0, 0];
           dimLabel([(p1[0] + p2[0]) / 2 + off[0], (p1[1] + p2[1]) / 2 + off[1], (p1[2] + p2[2]) / 2 + off[2]], label, { mm: o.mm || 95, color: o.color || "#334155" });
         };
+        // ── Item art inside compartments (garments on hangers, folded stacks, drawer handles, shoes) ──
+        const itemMesh = (w, h, d, x, y, z, col, opac) => { const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(1, w), Math.max(1, h), Math.max(1, d)), new THREE.MeshStandardMaterial({ color: col, roughness: 0.85, transparent: opac != null, opacity: opac == null ? 1 : opac, clippingPlanes: [clipPlane] })); m.position.set(x, y, z); m.userData = { base: { x, y, z } }; m.raycast = function () {}; m.visible = itemsRef.current; boxTarget.add(m); itemObjs.push(m); return m; };
+        const addGarments = (cxMid, yt, cw, ch, kind) => {
+          const kl = String(kind).toLowerCase();
+          const col = kl.indexOf("saree") >= 0 ? 0xd98aa8 : kl.indexOf("dress") >= 0 ? 0xc9a0d0 : kl.indexOf("lehenga") >= 0 ? 0xd4a373 : kl.indexOf("kids") >= 0 ? 0xf6a5c0 : kl.indexOf("short") >= 0 ? 0x8fae86 : kl.indexOf("suit") >= 0 ? 0x4a5568 : 0x6b8fb5;
+          const isGown = kl.indexOf("saree") >= 0 || kl.indexOf("dress") >= 0 || kl.indexOf("lehenga") >= 0;
+          const gl = Math.max(120, isGown ? ch - 60 : Math.min(700, ch - 60));
+          const n = Math.max(2, Math.min(5, Math.round(cw / 220))), gap = cw / n, gw = Math.min(150, gap - 24);
+          for (let i = 0; i < n; i++) {
+            const gx = cxMid - cw / 2 + gap * (i + 0.5), top = yt - 12;
+            itemMesh(gw * 0.9, 5, 5, gx, top, 8, 0x9aa3af);                                  // hanger bar
+            itemMesh(gw, gl * 0.15, 34, gx, top - gl * 0.075, 8, col);                       // shoulders
+            itemMesh(gw * 0.8, gl * 0.82, 28, gx, top - gl * 0.15 - gl * 0.41, 8, col, 0.98); // body
+          }
+        };
+        const addFolds = (cxMid, yt, cw) => {
+          const stacks = Math.max(1, Math.min(3, Math.round(cw / 300)));
+          const pal = [0xe2c4a6, 0xbcd0e6, 0xc9b8d8, 0xd8cfa8];
+          for (let s = 0; s < stacks; s++) { const sx = cxMid - cw / 2 + (cw / stacks) * (s + 0.5), sw = Math.min(150, cw / stacks - 22); for (let l = 0; l < 3; l++) itemMesh(sw, 22, 120, sx, yt + 15 + l * 25, 0, pal[(s + l) % pal.length]); }
+        };
+        const addShoes = (cxMid, yt, cw) => { const n = Math.max(1, Math.min(3, Math.round(cw / 240))), gap = cw / n; for (let i = 0; i < n; i++) { const sx = cxMid - cw / 2 + gap * (i + 0.5); itemMesh(70, 26, 150, sx - 22, yt + 16, 0, 0x8a5a44); itemMesh(70, 26, 150, sx + 22, yt + 16, 40, 0x8a5a44); } };
+        const addPants = (cxMid, yt, cw, ch) => { const n = Math.max(2, Math.min(5, Math.round(cw / 200))), gap = cw / n; for (let i = 0; i < n; i++) { const px = cxMid - cw / 2 + gap * (i + 0.5); itemMesh(gap * 0.7, 5, 5, px, yt - 14, 10, 0x9aa3af); itemMesh(gap * 0.5, Math.min(420, ch - 60), 16, px, yt - 14 - Math.min(420, ch - 60) / 2, 10, 0x6b7a8f); } };
         // shared column renderer — partition + cells (+ per-column shutter & LED strip), at local run offset localX
         const emitColumn = (col, si, ci, localX, secKind, cols) => {
           const colCw = col.w, colMid = localX + colCw / 2, usableH = H - plinth - loftH;
@@ -11907,6 +11933,11 @@ const frontendHTML = `<!DOCTYPE html>
             else if (kind === "cornerLemans") box(cw - 20, T + 4, D - 60, cxMid - 8, yt - 10, 8, hl ? 0x818cf8 : 0x5eead4, null, ud);
             else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
             else box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
+            // real items inside the compartment (mirrors the 2D wardCellArt art) — toggled via 🧥 Items
+            if (kl.indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga" || kind === "suit") addGarments(cxMid, yt - 58, cw, ch, kind);
+            else if (kind === "pantRack") addPants(cxMid, yt, cw, ch);
+            else if (kind === "shoe") addShoes(cxMid, yt, cw);
+            else if (kind === "shelf" || kind === "handbag" || kind === "kidsShelf" || kind === "cornerShelf") addFolds(cxMid, yt, cw);
             if (ch >= 90) dimLabel([cxMid, yb + ch / 2, D / 2 + 34], String(Math.round(ch)), { mm: Math.min(80, Math.max(50, ch * 0.5)), color: "#3730a3", bg: "rgba(238,242,255,0.92)" });
             yb = yt;
           });
@@ -12003,7 +12034,7 @@ const frontendHTML = `<!DOCTYPE html>
         const buildGroup = (secsData) => {
           g.traverse((o) => { if (o !== g) { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.dispose) o.material.dispose(); } });
           while (g.children.length) g.remove(g.children[0]);
-          boxTarget = g; ledMatShared = null; dimObjs.length = 0;
+          boxTarget = g; ledMatShared = null; dimObjs.length = 0; itemObjs.length = 0;
           const cellCnt = secsData.reduce((a, s) => a + s.columns.reduce((b, c) => b + c.cells.length, 0), 0);
           lodSkipEdges = cellCnt > 36;   // §13 LOD kicks in on busy layouts
           if (isFolded) buildFolded(secsData); else buildFlat(secsData);
@@ -12049,7 +12080,7 @@ const frontendHTML = `<!DOCTYPE html>
           }
           dirty = true; if (onEdit) onEdit(JSON.parse(JSON.stringify(work)));
         };
-        try { window.__adsWard3DInsert = (si, ci, k, mm, a) => { if (opRef.current) opRef.current("insert", a, si, ci, k, mm); }; window.__adsWard3DSecs = () => JSON.parse(JSON.stringify(work)); window.__adsWard3DDims = () => ({ n: dimObjs.length, vis: dimObjs.filter((o) => o.visible).length }); } catch (z) {}
+        try { window.__adsWard3DInsert = (si, ci, k, mm, a) => { if (opRef.current) opRef.current("insert", a, si, ci, k, mm); }; window.__adsWard3DSecs = () => JSON.parse(JSON.stringify(work)); window.__adsWard3DDims = () => ({ n: dimObjs.length, vis: dimObjs.filter((o) => o.visible).length }); window.__adsWard3DItems = () => ({ n: itemObjs.length, vis: itemObjs.filter((o) => o.visible).length }); } catch (z) {}
         const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
         let drag = null, dirty = false;
         const pick = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, true); for (const h of hits) { if (h.object.userData && h.object.userData.cell) return h.object.userData; } return null; };
@@ -12060,7 +12091,7 @@ const frontendHTML = `<!DOCTYPE html>
         const onCtx = (e) => { const b = renderer.domElement.getBoundingClientRect(); mouse.x = ((e.clientX - b.left) / b.width) * 2 - 1; mouse.y = -((e.clientY - b.top) / b.height) * 2 + 1; ray.setFromCamera(mouse, activeCam); const hits = ray.intersectObjects(g.children, true); let u = null, frac = 0.5; for (const h of hits) { if (h.object.userData && h.object.userData.cell) { u = h.object.userData; const bb = new THREE.Box3().setFromObject(h.object); const span = bb.max.y - bb.min.y; if (span > 1 && h.point) frac = Math.max(0, Math.min(1, (h.point.y - bb.min.y) / span)); break; } } if (!u) return; e.preventDefault(); selKey = u.key; dirty = true; const cs = work[u.si].columns[u.ci].cells; let cb = 0; for (let j = 0; j < u.k; j++) cb += cs[j].hMM; const clickMM = Math.round((cb + frac * cs[u.k].hMM) / 5) * 5; setMenu3d({ x: e.clientX, y: e.clientY, si: u.si, ci: u.ci, k: u.k, clickMM: clickMM }); };
         renderer.domElement.addEventListener("pointerdown", onDown); renderer.domElement.addEventListener("contextmenu", onCtx);
         window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp);
-        let raf, lastMode = null, lastExpl = -1, lastQ = "", lastLight = "", lastDim = null;
+        let raf, lastMode = null, lastExpl = -1, lastQ = "", lastLight = "", lastDim = null, lastItems = null;
         const loop = () => {
           raf = requestAnimationFrame(loop);
           if (dirty) { buildGroup(work); dirty = false; lastExpl = -1; }
@@ -12068,6 +12099,7 @@ const frontendHTML = `<!DOCTYPE html>
           if (ex !== lastExpl) { const cX = isFolded ? foldCx : Wd / 2, cZ = isFolded ? foldCz : 0; g.children.forEach((ch) => { const b = ch.userData && ch.userData.base; if (b) ch.position.set(b.x + (b.x - cX) * ex, b.y + (b.y - H / 2) * ex, b.z + (b.z - cZ) * ex * 1.8); }); lastExpl = ex; }
           if (modeRef.current !== lastMode) { applyMode(modeRef.current); lastMode = modeRef.current; }
           if (dimRef.current !== lastDim) { for (let i = 0; i < dimObjs.length; i++) dimObjs[i].visible = dimRef.current; lastDim = dimRef.current; }
+          if (itemsRef.current !== lastItems) { for (let i = 0; i < itemObjs.length; i++) itemObjs[i].visible = itemsRef.current; lastItems = itemsRef.current; }
           clipPlane.constant = secRef.current > 0 ? (foldBw / 2 - secRef.current * foldBw) : 1e7;
           if (dl.castShadow !== shadRef.current) dl.castShadow = shadRef.current;
           if (qualRef.current !== lastQ) { const q = qualRef.current, pr = q === "low" ? 1 : q === "high" ? Math.min(window.devicePixelRatio || 1, 2) : 1.5; renderer.setPixelRatio(pr); renderer.setSize(host.clientWidth || Wv, Hv); lastQ = q; }
@@ -12091,6 +12123,7 @@ const frontendHTML = `<!DOCTYPE html>
           <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={fly} onChange={(e) => setFly(e.target.checked)} /> Fly</label>
           <label className="flex items-center gap-1 text-slate-500"><input type="checkbox" checked={led} onChange={(e) => setLed(e.target.checked)} /> 💡LED</label>
           <label className="flex items-center gap-1 text-slate-500" title="Show mm dimensions (overall W×H×D, per-column widths, per-cell heights)"><input type="checkbox" checked={dims3d} onChange={(e) => setDims3d(e.target.checked)} /> 📐 Dim</label>
+          <label className="flex items-center gap-1 text-slate-500" title="Show garments / folded stacks / shoes inside the compartments"><input type="checkbox" checked={items3d} onChange={(e) => setItems3d(e.target.checked)} /> 🧥 Items</label>
           <button onClick={() => setShutters((s) => !s)} className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">{shutters ? "Hide shutters" : "Show shutters"}</button>
           <span className="text-slate-400">Export</span>
           {["obj", "gltf", "stl"].map((f) => <button key={f} onClick={() => exportRef.current && exportRef.current(f)} className="px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 uppercase">{f === "gltf" ? "GLB" : f}</button>)}
