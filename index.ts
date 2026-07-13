@@ -10280,7 +10280,7 @@ const frontendHTML = `<!DOCTYPE html>
                       {options3.options.map((o, i) => (
                         <div key={o.id} className={"rounded-lg border overflow-hidden " + (i === options3.recommendation.bestIndex ? "border-emerald-400 ring-1 ring-emerald-200" : "border-slate-200")}>
                           <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200"><span className="text-sm font-semibold text-slate-800">{o.label}</span>{i === options3.recommendation.bestIndex ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 font-semibold">⭐ Recommended</span> : <span className="text-[10px] text-slate-400">{o.tag}</span>}</div>
-                          <div className="p-2 bg-white overflow-auto" style={{ maxHeight: 210 }} dangerouslySetInnerHTML={{ __html: o.svg }} />
+                          <div className="p-2 bg-white"><PanZoom html={(o.views && o.views.Plan) || o.svg} height={300} /></div>
                           <div className="px-3 py-1.5 text-[11px] text-slate-500 border-t border-slate-100" style={{ minHeight: 52 }}>{o.description}</div>
                           <div className="grid grid-cols-4 gap-1 px-3 py-1.5 text-[10px] text-center border-t border-slate-100 bg-slate-50">
                             <div><div className="text-slate-400">Store</div><div className="font-semibold text-slate-700">{o.metrics.storageScorePct}%</div></div>
