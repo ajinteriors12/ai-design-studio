@@ -12971,7 +12971,7 @@ const frontendHTML = `<!DOCTYPE html>
           "Estimated total (incl. GST): " + rs(o.boq.grandTotal),
         ].forEach((l) => { P.text(l, M, y); y += 13; });
         y += 8;
-        for (const v of ["Front", "Internal", "Shop Drawing", "Shutters", "Top", "Side", "Loft"]) {
+        for (const v of ["Front", "Internal", "Shop Drawing", "Shutters", "Top", "Side", "Loft", "Item Art"]) {
           const svg = o.views[v]; if (!svg) continue;
           let png; try { png = await svgToPng(svg, 2); } catch (e) { continue; }
           const aw = png.w || 560, ah = png.h || 400, imgW = PW - 2 * M, imgH = imgW * ah / aw;
@@ -13093,7 +13093,7 @@ const frontendHTML = `<!DOCTYPE html>
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
             <h3 className="text-sm font-semibold text-slate-700">Layout Options <span className="text-xs font-normal text-slate-400">· 3 AI variants · click to select</span></h3>
-            <div className="flex gap-1 flex-wrap">{["Front", "Internal", "Shop Drawing", "Shutters", "Top", "Side", "Loft"].map((v) => (<button key={v} onClick={() => setView(v)} className={"px-2 py-0.5 rounded text-[11px] border " + (view === v ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{v === "Shop Drawing" ? "📐 Shop Drawing" : v === "Shutters" ? "🚪 Shutters ⇄ Open" : v}</button>))}</div>
+            <div className="flex gap-1 flex-wrap">{["Front", "Internal", "Shop Drawing", "Shutters", "Top", "Side", "Loft", "Item Art"].map((v) => (<button key={v} onClick={() => setView(v)} className={"px-2 py-0.5 rounded text-[11px] border " + (view === v ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300")}>{v === "Shop Drawing" ? "📐 Shop Drawing" : v === "Shutters" ? "🚪 Shutters ⇄ Open" : v === "Item Art" ? "📖 Item Art" : v}</button>))}</div>
           </div>
           <div className="grid md:grid-cols-3 gap-3">
             {opts.map((o, i) => (<div key={o.id} onClick={() => setSelIdx(i)} className={"rounded-lg border overflow-hidden cursor-pointer transition " + (i === selIdx ? "border-indigo-400 ring-1 ring-indigo-200" : "border-slate-200 hover:border-slate-300")}>
@@ -15199,6 +15199,45 @@ function wardCellArt(k: string, cx: number, yt: number, cw: number, ch: number):
   if (isCorner(k)) return `<line x1="${f1(cx + 4)}" y1="${f1(yt + ch - 4)}" x2="${f1(cx + cw - 4)}" y2="${f1(yt + 4)}" stroke="${MID}" stroke-width="0.9" stroke-dasharray="4 3"/>`;
   return shelfArt();
 }
+// A one-page "clothes & accessories" symbol catalog — every wardrobe item drawn in our own clean
+// monochrome CAD line-art (the exact glyphs used inside the elevations), labelled + typical mm size.
+function renderWardrobeItemCatalog(): string {
+  const esc = wardEsc;
+  // shelf art picks folded/rolled/cushion/hat/stool from a per-cell hash; replicate it so the catalog
+  // can force each variant by finding an x-offset that hashes to it, then translating the glyph back.
+  const hashV = (cx: number, yt: number) => { let h = (Math.imul(Math.round(cx), 374761393) ^ Math.imul(Math.round(yt), 668265263)) >>> 0; h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0; h = (h ^ (h >>> 16)) >>> 0; return h % 10; };
+  const forceCx = (baseCx: number, yt: number, vs: number[]) => { for (let d = 0; d < 6000; d++) { if (vs.indexOf(hashV(baseCx + d, yt)) >= 0) return baseCx + d; } return baseCx; };
+  const items: { k: string; label: string; mm: number; force?: number[] }[] = [
+    { k: "longHang", label: "Long Hanging", mm: 1500 }, { k: "shortHang", label: "Short Hanging", mm: 1000 },
+    { k: "suit", label: "Suits / Blazers", mm: 1200 }, { k: "garmentHang", label: "Garment Bag", mm: 1350 },
+    { k: "saree", label: "Saree", mm: 1200 }, { k: "dress", label: "Dress", mm: 1200 }, { k: "lehenga", label: "Lehenga", mm: 1200 },
+    { k: "skirtHang", label: "Skirt", mm: 735 }, { k: "kidsHang", label: "Kids Hanging", mm: 800 }, { k: "pantRack", label: "Trouser Rack", mm: 500 },
+    { k: "blazerHook", label: "Blazer / Coat Hook", mm: 640 }, { k: "towelHook", label: "Towel Hook", mm: 640 },
+    { k: "shelf", label: "Folded Shelf", mm: 350, force: [6, 7, 8, 9] }, { k: "shelf", label: "Rolled Towels", mm: 350, force: [1, 2] },
+    { k: "shelf", label: "Cushions", mm: 350, force: [3, 4] }, { k: "shelf", label: "Hat", mm: 350, force: [0] }, { k: "shelf", label: "Stool / Pouffe", mm: 450, force: [5] },
+    { k: "shoe", label: "Shoe Rack", mm: 300 }, { k: "handbag", label: "Handbags", mm: 400 }, { k: "drawer", label: "Drawer", mm: 200 },
+    { k: "jewellery", label: "Jewellery", mm: 150 }, { k: "cosmetics", label: "Cosmetics", mm: 150 }, { k: "tieBelt", label: "Tie & Belt", mm: 150 }, { k: "safe", label: "Safe Locker", mm: 300 },
+    { k: "suitcase", label: "Suitcase (loft)", mm: 500 }, { k: "box", label: "Storage Box", mm: 400 }, { k: "bedding", label: "Bedding", mm: 400 },
+  ];
+  const cols = 5, cw = 150, ch = 190, gx = 18, gy = 20, lblH = 34, headH = 64;
+  const rows = Math.ceil(items.length / cols);
+  const W = cols * cw + (cols + 1) * gx, Hh = headH + rows * (ch + lblH + gy) + gy;
+  const p: string[] = [];
+  p.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" font-family="Inter,Arial,sans-serif"><rect width="${W}" height="${Hh}" fill="#ffffff"/>`);
+  p.push(`<text x="${gx}" y="30" fill="#111827" font-size="17" font-weight="800">WARDROBE ITEM ART — CLOTHES &amp; ACCESSORIES</text>`);
+  p.push(`<text x="${gx}" y="48" fill="#6b7280" font-size="10.5">Clean CAD symbols used inside every elevation &amp; shop drawing · typical clear height in mm</text>`);
+  items.forEach((it, i) => {
+    const cxb = gx + (i % cols) * (cw + gx);
+    const yt = headH + Math.floor(i / cols) * (ch + lblH + gy);
+    p.push(`<rect x="${cxb.toFixed(1)}" y="${yt.toFixed(1)}" width="${cw}" height="${ch}" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="0.8"/>`);
+    if (it.force) { const fcx = forceCx(cxb, yt, it.force); p.push(`<g transform="translate(${(cxb - fcx).toFixed(1)},0)">${wardCellArt(it.k, fcx, yt, cw, ch)}</g>`); }
+    else p.push(wardCellArt(it.k, cxb, yt, cw, ch));
+    p.push(`<text x="${(cxb + cw / 2).toFixed(1)}" y="${(yt + ch + 16).toFixed(1)}" fill="#0f172a" font-size="10.5" font-weight="600" text-anchor="middle">${esc(it.label)}</text>`);
+    p.push(`<text x="${(cxb + cw / 2).toFixed(1)}" y="${(yt + ch + 29).toFixed(1)}" fill="#6b7280" font-size="9" text-anchor="middle">${it.mm} mm</text>`);
+  });
+  p.push(`</svg>`);
+  return p.join("");
+}
 // Classic Indian wardrobe FRONT-ELEVATION shop drawing: every compartment illustrated
 // (hanging rods+garments, folded stacks, drawers, loft storage boxes, open shelves) and fully
 // dimensioned in millimetres — outer + internal widths, per-cell heights, overall body height, thada.
@@ -15744,12 +15783,14 @@ app.post("/api/wardrobe/photoreal-view", async (c) => {
     return c.json({ data: { image: img } });
   } catch (err) { console.error(err); return c.json({ error: "Photoreal view failed", message: String(err) }, 500); }
 });
+// Direct SVG of the item-art symbol catalog (also available as the "Item Art" view tab in every wardrobe).
+app.get("/api/wardrobe/item-catalog", (c) => c.body(renderWardrobeItemCatalog(), 200, { "Content-Type": "image/svg+xml; charset=utf-8" }));
 function wardrobeOptions(input: any): any {
   const options = ["balanced", "balanced-hang", "balanced-fold"].map((st) => {
     const o = buildWardrobeOption(st, input);
     o.reports = wardReports(o);
     o.scorecard = wardScorecard(o);
-    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o), "Item Art": renderWardrobeItemCatalog() };
     o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
     return o;
@@ -15981,7 +16022,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
     const cnt = (pred: (k: string) => boolean) => allCells.filter((cc: any) => pred(cc.kind)).length;
     o.stats = { hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"), shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"), drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"), shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"), columns: o.sections.reduce((a: number, s: any) => a + (s.columns || []).length, 0), totalItems: allCells.length };
     o.reports = wardReports(o); o.scorecard = wardScorecard(o);
-    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o) };
+    o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o), "Item Art": renderWardrobeItemCatalog() };
     o.boq = wardBOQ(o); o.cnc = wardCNC(o);
     o.svg = o.views.Front;
     return c.json({ data: o });
