@@ -575,7 +575,7 @@ async function visionReadDrawing(name: string, fileType: string, category: strin
       const block = media === "application/pdf"
         ? { type: "document", source: { type: "base64", media_type: media, data: b64 } }
         : { type: "image", source: { type: "base64", media_type: media, data: b64 } };
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await gwFetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": keys.anthropic, "anthropic-version": "2023-06-01" },
         body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5", max_tokens: 2000, messages: [{ role: "user", content: [block, { type: "text", text: ask }] }] }), // regular tier: Sonnet 5 high-res vision reads drawings well at ~cheapest cost (override via ANTHROPIC_MODEL)
@@ -590,7 +590,7 @@ async function visionReadDrawing(name: string, fileType: string, category: strin
     }
     // ── GPT-4o vision (images only — chat/completions can't take a PDF) ──
     if (keys.openai && media !== "application/pdf") {
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      const res = await gwFetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + keys.openai },
         body: JSON.stringify({
@@ -2795,6 +2795,20 @@ function loadAIKeys(): { openai?: string; deepseek?: string; stability?: string;
   try { if (fsExists(AI_KEYS_FILE)) { const f = JSON.parse(fsRead(AI_KEYS_FILE, "utf8")); if (f.openai) k.openai = f.openai; if (f.deepseek) k.deepseek = f.deepseek; if (f.stability) k.stability = f.stability; if (f.anthropic) k.anthropic = f.anthropic; } } catch { /* no/invalid key file — fine */ }
   return k;
 }
+// ── Local-First AI Gateway wiring (Rule No.1 Part C) ────────────────────────
+// Routes Anthropic + OpenAI-chat calls through the gateway when AI_GATEWAY_URL is
+// set; DeepSeek/image endpoints stay direct. Falls back to the direct API on any
+// gateway error/>=500. Fully no-op when AI_GATEWAY_URL is unset.
+const AI_GATEWAY_URL = (process.env.AI_GATEWAY_URL || "").replace(/\/$/, "");
+async function gwFetch(directUrl, init) {
+  if (!AI_GATEWAY_URL) return fetch(directUrl, init);
+  let routed = null;
+  if (directUrl.startsWith("https://api.anthropic.com/v1/messages")) routed = directUrl.replace("https://api.anthropic.com", AI_GATEWAY_URL);
+  else if (directUrl.startsWith("https://api.openai.com/v1/chat/completions")) routed = directUrl.replace("https://api.openai.com", AI_GATEWAY_URL);
+  if (!routed) return fetch(directUrl, init);
+  try { const r = await fetch(routed, init); if (r.status < 500) return r; } catch (e) {}
+  return fetch(directUrl, init); // fallback: direct API
+}
 const AI_PROVIDERS: Record<string, { url: string; model: string; keyName: "openai" | "deepseek"; label: string; jsonMode?: boolean; noThink?: boolean }> = {
   chatgpt: { url: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini", keyName: "openai", label: "ChatGPT", jsonMode: true },
   // deepseek-v4-flash (~1.6s) is used for the per-click AI Design — the v4-pro thinking model is correct but
@@ -2835,7 +2849,7 @@ async function askExternalAI(providerId: string, brief: any, type: string): Prom
     // model (ChatGPT ~2 s, deepseek-v4-flash ~1.6 s) yet caps the worst case; on timeout the provider is skipped.
     const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 30000);
     let res;
-    try { res = await fetch(p.url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + key }, body: JSON.stringify(reqBody), signal: ac.signal }); }
+    try { res = await gwFetch(p.url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + key }, body: JSON.stringify(reqBody), signal: ac.signal }); }
     finally { clearTimeout(t); }
     if (!res.ok) return { provider: p.label, error: "HTTP " + res.status + " " + (await res.text().catch(() => "")).slice(0, 80) };
     const j: any = await res.json();
@@ -12978,6 +12992,11 @@ const frontendHTML = `<!DOCTYPE html>
           "Estimated total (incl. GST): " + rs(o.boq.grandTotal),
         ].forEach((l) => { P.text(l, M, y); y += 13; });
         y += 8;
+        if (o.suggestions && o.suggestions.length) {
+          ensure(30); P.setFontSize(11); P.text("Space suggestions — make the most of every mm", M, y); y += 15; P.setFontSize(9);
+          o.suggestions.forEach((s) => { const lines = P.splitTextToSize("- " + s.text, PW - 2 * M); ensure(lines.length * 11 + 3); P.text(lines, M, y); y += lines.length * 11 + 3; });
+          y += 10;
+        }
         for (const v of ["Front", "Internal", "Shop Drawing", "Shutters", "Top", "Side", "Loft", "Item Art"]) {
           const svg = o.views[v]; if (!svg) continue;
           let png; try { png = await svgToPng(svg, 2); } catch (e) { continue; }
@@ -15998,11 +16017,11 @@ async function learnWardrobeVision(name: string, media: string, b64: string): Pr
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 60000);
   try {
     if (keys.openai && media !== "application/pdf") {
-      const res = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + keys.openai }, body: JSON.stringify({ model: process.env.WARD_VISION_MODEL || "gpt-4o-mini", max_tokens: 1500, messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: "data:" + media + ";base64," + b64, detail: "high" } }] }] }), signal: ac.signal });
+      const res = await gwFetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + keys.openai }, body: JSON.stringify({ model: process.env.WARD_VISION_MODEL || "gpt-4o-mini", max_tokens: 1500, messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: "data:" + media + ";base64," + b64, detail: "high" } }] }] }), signal: ac.signal });
       if (res.ok) { const j: any = await res.json(); const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || ""; const parsed = extractLastJson(txt); if (parsed) return { data: parsed, engine: "GPT-4o vision" }; }
       else console.error("learn vision HTTP", res.status, (await res.text().catch(() => "")).slice(0, 100));
     } else if (keys.anthropic) {
-      const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": keys.anthropic, "anthropic-version": "2023-06-01" }, body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5", max_tokens: 1500, messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: media, data: b64 } }, { type: "text", text: ask }] }] }), signal: ac.signal });
+      const res = await gwFetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": keys.anthropic, "anthropic-version": "2023-06-01" }, body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5", max_tokens: 1500, messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: media, data: b64 } }, { type: "text", text: ask }] }] }), signal: ac.signal });
       if (res.ok) { const j: any = await res.json(); const txt = (j.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n"); const parsed = extractLastJson(txt); if (parsed) return { data: parsed, engine: "Claude vision" }; }
     }
   } catch (e: any) { console.error("learn vision failed:", String((e && e.message) || e).slice(0, 120)); }
