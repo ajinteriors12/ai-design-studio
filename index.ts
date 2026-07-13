@@ -11934,7 +11934,7 @@ const frontendHTML = `<!DOCTYPE html>
             else if (kl.indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga") { const rod = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, cw - 20, lodSkipEdges ? 6 : 12), new THREE.MeshStandardMaterial({ color: hl ? 0x6366f1 : 0x9aa3af, metalness: 0.6, roughness: 0.4, clippingPlanes: [clipPlane] })); rod.rotation.z = Math.PI / 2; rod.position.set(cxMid, yt - 70, 0); rod.userData = Object.assign({}, ud, { base: { x: cxMid, y: yt - 70, z: 0 } }); rod.castShadow = true; boxTarget.add(rod); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
             else if (kind === "cornerCarousel") { const cyl = new THREE.Mesh(new THREE.CylinderGeometry(Math.max(20, (cw - 60) / 2), Math.max(20, (cw - 60) / 2), Math.max(20, ch - 30), 20), new THREE.MeshStandardMaterial({ color: hl ? 0x818cf8 : 0x5eead4, roughness: 0.6, clippingPlanes: [clipPlane] })); cyl.position.set(cxMid, yb + ch / 2, 0); cyl.userData = Object.assign({}, ud, { base: { x: cxMid, y: yb + ch / 2, z: 0 } }); cyl.castShadow = true; boxTarget.add(cyl); box(cw - 6, ch - 6, D - 40, cxMid, yb + ch / 2, 0, 0xffffff, 0.001, ud); }
             else if (kind === "cornerLemans") box(cw - 20, T + 4, D - 60, cxMid - 8, yt - 10, 8, hl ? 0x818cf8 : 0x5eead4, null, ud);
-            else if (kind === "safe" || kind === "tieBelt") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
+            else if (kind === "safe" || kind === "tieBelt" || kind === "blazerHook" || kind === "towelHook") box(cw - 8, ch - 6, D - 30, cxMid, yb + ch / 2, 0, hl ? 0x818cf8 : colColor, 0.85, ud);
             else box(cw - 4, T, D - 20, cxMid, yt, 0, hl ? 0x818cf8 : SHELF, null, ud);
             // real items inside the compartment (mirrors the 2D wardCellArt art) — toggled via 🧥 Items
             if (kl.indexOf("hang") >= 0 || kind === "saree" || kind === "dress" || kind === "lehenga" || kind === "suit") addGarments(cxMid, yt - 58, cw, ch, kind);
@@ -12183,6 +12183,8 @@ const frontendHTML = `<!DOCTYPE html>
       { kind: "pantRack", label: "Trouser Rack", color: "#7c3aed" }, { kind: "shelf", label: "Shelf", color: "#22c55e" },
       { kind: "drawer", label: "Drawer", color: "#ec4899" }, { kind: "shoe", label: "Shoe Rack", color: "#d4a574" },
       { kind: "safe", label: "Safe Locker", color: "#ef4444" },
+      { kind: "garmentHang", label: "Garment Bag", color: "#6366f1" }, { kind: "skirtHang", label: "Skirt Hanging", color: "#c084fc" },
+      { kind: "blazerHook", label: "Blazer / Coat Hook", color: "#38bdf8" }, { kind: "towelHook", label: "Towel Hook", color: "#2dd4bf" },
     ];
     // §4 accessories that can be inserted at an exact height (shared by the 2D editor + the 3D view).
     // kind = renderable wardrobe compartment kind; h = natural per-cell height (mm); n = stacked cells;
@@ -12198,6 +12200,10 @@ const frontendHTML = `<!DOCTYPE html>
       { arg: "drawer3", label: "Triple Drawer", kind: "drawer", color: "#ec4899", h: 180, n: 3 },
       { arg: "longHang", label: "Long Hanging", kind: "longHang", color: "#3b82f6", h: 1050, min: 900 },
       { arg: "shortHang", label: "Short Hanging", kind: "shortHang", color: "#60a5fa", h: 900, min: 750 },
+      { arg: "garmentHang", label: "Garment Bag", kind: "garmentHang", color: "#6366f1", h: 1350, min: 900 },
+      { arg: "skirtHang", label: "Skirt Hanging", kind: "skirtHang", color: "#c084fc", h: 900, min: 600 },
+      { arg: "blazerHook", label: "Blazer / Coat Hook", kind: "blazerHook", color: "#38bdf8", h: 640, min: 400 },
+      { arg: "towelHook", label: "Towel Hook", kind: "towelHook", color: "#2dd4bf", h: 640, min: 400 },
       { arg: "pantRack", label: "Trouser Rack", kind: "pantRack", color: "#8b5cf6", h: 150 },
       { arg: "shoe", label: "Shoe Rack", kind: "shoe", color: "#a16207", h: 180 },
       { arg: "jewellery", label: "Jewellery Tray", kind: "jewellery", color: "#f59e0b", h: 90 },
@@ -14572,7 +14578,7 @@ const WARDROBE_STD = {
   depth: 600, loftDepth: 550, plinth: 100,
   hangLong: 1050, hangShort: 900, pantRack: 900,
   drawerH: 200, drawerMinH: 150, shelfGap: 350, shelfMinH: 200,
-  loftBand: 600, shoeH: 300, safeH: 300, accH: 150, handbagH: 400, kidsHang: 800,
+  loftBand: 600, shoeH: 300, safeH: 300, accH: 150, handbagH: 400, kidsHang: 800, garmentBagH: 1350, skirtHangH: 850, hookH: 640,
   colTarget: 500, colMin: 350, colMax: 650,
   carcass: "18mm BWP / MR-grade plywood", back: "6mm BWP plywood",
   edgeBand: "1-2mm PVC", hinge: "Soft-close hinge (110°)", drawerBox: "Tandem box, soft-close",
@@ -14585,6 +14591,7 @@ const WARD_COLORS: Record<string, string> = {
   tieBelt: "#f59e0b", laptop: "#dc2626", loft: "#fcd34d",
   saree: "#ec4899", sareeShelf: "#f472b6", dress: "#f472b6", lehenga: "#db2777",
   salwar: "#f9a8d4", jewellery: "#fcd34d", cosmetics: "#fca5a5", handbag: "#a78bfa",
+  skirtHang: "#c084fc", garmentHang: "#6366f1", blazerHook: "#38bdf8", towelHook: "#2dd4bf",
   dupatta: "#f472b6", seasonal: "#78716c", winter: "#78716c",
   kidsHang: "#60a5fa", kidsShelf: "#34d399", mirror: "#94a3b8", filler: "#e2e8f0",
   cornerLemans: "#14b8a6", cornerCarousel: "#0d9488", cornerHang: "#0ea5e9", cornerShelf: "#5eead4",
@@ -14595,6 +14602,7 @@ const WARD_LEGEND: [string, string][] = [
   ["shoe", "Shoe Rack"], ["safe", "Safe Locker — valuables"], ["tieBelt", "Tie & Belt Rack"],
   ["saree", "Saree Hanging"], ["sareeShelf", "Saree (folded)"], ["dress", "Dress Hanging"], ["lehenga", "Lehenga"],
   ["jewellery", "Jewellery Drawer"], ["cosmetics", "Cosmetics Drawer"], ["handbag", "Handbag Shelf"],
+  ["skirtHang", "Skirt Hanging"], ["garmentHang", "Garment Bag"], ["blazerHook", "Blazer / Coat Hook"], ["towelHook", "Towel Hook"],
   ["dupatta", "Dupatta"], ["loft", "Loft Area"], ["mirror", "Mirror"],
   ["cornerLemans", "LeMans corner pull-out"], ["cornerCarousel", "Carousel (360°)"], ["cornerHang", "Diagonal corner hanging"], ["cornerShelf", "Blind-corner shelf"],
 ];
@@ -14638,6 +14646,9 @@ function wardColumn(recipe: string, usableH: number): WCell[] {
     case "lehenga": push("drawer", "Petticoat", S.drawerH); push("lehenga", "Lehenga", usableH - S.drawerH); break;
     case "female-acc": push("jewellery", "Jewellery", S.accH); push("cosmetics", "Cosmetics", S.accH); push("drawer", "Dupatta", S.drawerH); push("handbag", "Handbags", S.handbagH); shelves(usableH - 2 * S.accH - S.drawerH - S.handbagH, "Shelf"); break;
     case "kids-hang": push("drawer", "Kids", S.drawerH); push("kidsHang", "Kids Hanging", S.kidsHang); shelves(usableH - S.drawerH - S.kidsHang, "Kids Folded"); break;
+    case "garment-bag": { push("drawer", "Storage", S.drawerH); const gb = Math.min(S.garmentBagH, usableH - S.drawerH); push("garmentHang", "Garment Bag", gb); const rem = usableH - S.drawerH - gb; if (rem > S.shelfMinH) shelves(rem, "Folded"); break; }
+    case "skirt": { push("drawer", "Innerwear", S.drawerH); const sk = Math.min(S.skirtHangH, usableH - S.drawerH); push("skirtHang", "Skirt Hanging", sk); const rem = usableH - S.drawerH - sk; if (rem > S.shelfMinH) shelves(rem, "Folded"); break; }
+    case "hooks": { const hh = Math.min(S.hookH, Math.max(300, (usableH - S.shelfGap) / 2)); push("blazerHook", "Blazer Hook", hh); push("towelHook", "Towel Hook", hh); shelves(Math.max(S.shelfMinH, usableH - 2 * hh), "Shelf"); break; }
     default: push("longHang", "Hanging", usableH);
   }
   const sum = cells.reduce((a, c) => a + c.hMM, 0) || 1;
@@ -14723,18 +14734,18 @@ function wardSectionRecipes(sec: string, n: number, strategy: string, L: any): s
     //   balanced       (Everyday)     = even hang/fold alternation (the classic mix)
     //   balanced-hang  (Hanging-Led)  = same mix but leans to hanging, hang columns first
     //   balanced-fold  (Storage-Led)  = same mix but leans to shelves/drawers first
-    if (strategy === "balanced-hang") { pool = ["hang-long", "hang-short-double", "pant+shelves", "shoe+drawers", "accessories"]; if (prof) pool.unshift("hang-long"); }
-    else if (strategy === "balanced-fold") pool = ["shelves", "shoe+drawers", "hang-long", "pant+shelves", "accessories"];
-    else pool = ["hang-long", "shoe+drawers", "pant+shelves", "accessories", "hang-short-double"];
+    if (strategy === "balanced-hang") { pool = ["hang-long", "hang-short-double", "garment-bag", "pant+shelves", "shoe+drawers", "accessories"]; if (prof) pool.unshift("hang-long"); }
+    else if (strategy === "balanced-fold") pool = ["shelves", "shoe+drawers", "hang-long", "hooks", "pant+shelves", "accessories"];
+    else pool = ["hang-long", "garment-bag", "pant+shelves", "hooks", "shoe+drawers", "accessories", "hang-short-double"];
   } else if (sec === "female") {
     const hangItems: string[] = [], foldItems: string[] = [];
     if (L.traditional !== "low") { hangItems.push("saree"); foldItems.push("saree-shelves"); }
     if (L.western !== "low") hangItems.push("dress");
     if (L.traditional === "high") hangItems.push("lehenga");
     if (!hangItems.length) hangItems.push("dress");
-    if (strategy === "balanced-hang") pool = [hangItems[0], ...(hangItems[1] ? [hangItems[1]] : []), "female-acc", ...foldItems, "shoe+drawers"];
-    else if (strategy === "balanced-fold") pool = [...foldItems, "shelves", hangItems[0], "female-acc", "shoe+drawers"];
-    else pool = [hangItems[0], "female-acc", ...(hangItems[1] ? [hangItems[1]] : []), ...foldItems, "shoe+drawers"];
+    if (strategy === "balanced-hang") pool = [hangItems[0], ...(hangItems[1] ? [hangItems[1]] : []), "skirt", "female-acc", ...foldItems, "shoe+drawers"];
+    else if (strategy === "balanced-fold") pool = [...foldItems, "shelves", hangItems[0], "skirt", "female-acc", "shoe+drawers"];
+    else pool = [hangItems[0], "female-acc", "skirt", ...(hangItems[1] ? [hangItems[1]] : []), ...foldItems, "shoe+drawers"];
     if (!pool.length) pool = ["shelves"];
   } else {
     for (let i = 0; i < n; i++) out.push(i === n - 1 ? "shelves" : "kids-hang");
@@ -14807,7 +14818,7 @@ function buildWardrobeOption(strategy: string, input: any): any {
     hanging: cnt(k => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit"),
     shelves: cnt(k => k === "shelf" || k === "handbag" || k === "kidsShelf"),
     drawers: cnt(k => k === "drawer" || k === "jewellery" || k === "cosmetics"),
-    shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt"),
+    shoe: cnt(k => k === "shoe"), accessories: cnt(k => k === "safe" || k === "tieBelt" || k === "blazerHook" || k === "towelHook"),
     columns: sections.reduce((a: number, s: any) => a + s.columns.length, 0), totalItems: allCells.length,
   };
   const label = strategy === "balanced-hang" ? "Balanced · Hanging-Led" : strategy === "balanced-fold" ? "Balanced · Storage-Led" : "Balanced · Everyday";
@@ -15100,16 +15111,20 @@ function wardCellArt(k: string, cx: number, yt: number, cw: number, ch: number):
   const gSaree = (gx: number, topY: number, gh: number, gw: number) => { const w = gw * 0.86, by = topY + gh; let s = `<path d="M${f1(gx - w * 0.3)},${f1(topY + 1)} L${f1(gx + w * 0.3)},${f1(topY + 1)} L${f1(gx + w / 2)},${f1(by)} L${f1(gx - w / 2)},${f1(by)} Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.65"/>`; for (let i = 1; i < 4; i++) { const px = gx - w * 0.3 + (w * 0.6) * (i / 4); s += `<line x1="${f1(px)}" y1="${f1(topY + 3)}" x2="${f1(px + (i - 2) * 2.2)}" y2="${f1(by - 2)}" stroke="${THIN}" stroke-width="0.4"/>`; } s += `<line x1="${f1(gx - w / 2)}" y1="${f1(by - 2.4)}" x2="${f1(gx + w / 2)}" y2="${f1(by - 2.4)}" stroke="${INK}" stroke-width="0.9"/>`; s += `<path d="M${f1(gx - w * 0.26)},${f1(topY + 2)} q${f1(-w * 0.32)},${f1(gh * 0.32)} ${f1(-w * 0.12)},${f1(gh * 0.6)}" fill="none" stroke="${MID}" stroke-width="0.45"/>`; return s; };
   const gDress = (gx: number, topY: number, gh: number, gw: number) => { const wt = topY + gh * 0.42, ty = topY + 2.4, by = topY + gh, ny = topY + gh * 0.08; return `<path d="M${f1(gx - gw * 0.34)},${f1(ty)} L${f1(gx - gw * 0.1)},${f1(ty)} L${f1(gx)},${f1(ny)} L${f1(gx + gw * 0.1)},${f1(ty)} L${f1(gx + gw * 0.34)},${f1(ty)} L${f1(gx + gw * 0.22)},${f1(wt)} L${f1(gx + gw / 2)},${f1(by)} L${f1(gx - gw / 2)},${f1(by)} L${f1(gx - gw * 0.22)},${f1(wt)} Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/><line x1="${f1(gx)}" y1="${f1(wt)}" x2="${f1(gx)}" y2="${f1(by - 1)}" stroke="${MID}" stroke-width="0.35"/>`; };
   const gLehenga = (gx: number, topY: number, gh: number, gw: number) => { const wt = topY + gh * 0.3, by = topY + gh; return `<rect x="${f1(gx - gw * 0.18)}" y="${f1(topY + 1)}" width="${f1(gw * 0.36)}" height="${f1(gh * 0.29)}" fill="${WHITE}" stroke="${INK}" stroke-width="0.6"/><path d="M${f1(gx - gw * 0.18)},${f1(wt)} L${f1(gx + gw * 0.18)},${f1(wt)} L${f1(gx + gw / 2)},${f1(by)} L${f1(gx - gw / 2)},${f1(by)} Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/><line x1="${f1(gx - gw * 0.3)}" y1="${f1(by - 2)}" x2="${f1(gx + gw * 0.3)}" y2="${f1(by - 2)}" stroke="${MID}" stroke-width="0.5"/>`; };
+  // hanging skirt on a clip-hanger — waistband bar + A-line skirt + pleats
+  const gSkirt = (gx: number, topY: number, gh: number, gw: number) => { const wTop = gw * 0.5, wBot = gw * 0.66, ty = topY + 2, by = topY + gh; let s = `<rect x="${f1(gx - wTop / 2)}" y="${f1(ty)}" width="${f1(wTop)}" height="3.2" rx="1" fill="${WHITE}" stroke="${INK}" stroke-width="0.6"/>`; s += `<path d="M${f1(gx - wTop / 2)},${f1(ty + 3.2)} L${f1(gx + wTop / 2)},${f1(ty + 3.2)} L${f1(gx + wBot / 2)},${f1(by)} L${f1(gx - wBot / 2)},${f1(by)} Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/>`; for (let i = 1; i < 4; i++) { const px = gx - wTop * 0.35 + wTop * 0.7 * (i / 4); s += `<line x1="${f1(px)}" y1="${f1(ty + 5)}" x2="${f1(px + (i - 2) * 1.8)}" y2="${f1(by - 2)}" stroke="${THIN}" stroke-width="0.4"/>`; } return s; };
+  // garment / suit bag on a hanger — rounded shoulders, straight sides, centre zipper
+  const gGarmentBag = (gx: number, topY: number, gh: number, gw: number) => { const w = gw * 0.6, sT = topY + 1, by = topY + gh; let s = `<path d="M${f1(gx - w / 2)},${f1(sT + w * 0.3)} Q${f1(gx - w / 2)},${f1(sT)} ${f1(gx - w * 0.22)},${f1(sT)} L${f1(gx + w * 0.22)},${f1(sT)} Q${f1(gx + w / 2)},${f1(sT)} ${f1(gx + w / 2)},${f1(sT + w * 0.3)} L${f1(gx + w / 2)},${f1(by)} L${f1(gx - w / 2)},${f1(by)} Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/>`; s += `<line x1="${f1(gx)}" y1="${f1(sT + 2)}" x2="${f1(gx)}" y2="${f1(by - 3)}" stroke="${MID}" stroke-width="0.5" stroke-dasharray="2 2"/><circle cx="${f1(gx)}" cy="${f1(by - 4)}" r="1" fill="${MID}"/>`; return s; };
   const drawGarment = (t: string, gx: number, topY: number, gh: number, gw: number) =>
-    t === "coat" ? gCoat(gx, topY, gh, gw) : t === "saree" ? gSaree(gx, topY, gh, gw) : t === "dress" ? gDress(gx, topY, gh, gw) : t === "lehenga" ? gLehenga(gx, topY, gh, gw) : t === "kid" ? gShirt(gx, topY, gh * 0.72, gw * 0.82) : gShirt(gx, topY, gh, gw);
-  const HANG_SET: Record<string, string[]> = { longHang: ["shirt", "coat", "shirt", "coat"], shortHang: ["shirt", "shirt", "shirt"], suit: ["coat", "coat"], saree: ["saree", "saree", "saree"], dress: ["dress", "dress", "dress"], lehenga: ["lehenga", "lehenga"], dupatta: ["saree", "dress"], kidsHang: ["kid", "kid", "kid"], hang: ["shirt", "coat", "shirt"] };
+    t === "coat" ? gCoat(gx, topY, gh, gw) : t === "saree" ? gSaree(gx, topY, gh, gw) : t === "dress" ? gDress(gx, topY, gh, gw) : t === "lehenga" ? gLehenga(gx, topY, gh, gw) : t === "skirt" ? gSkirt(gx, topY, gh, gw) : t === "garmentBag" ? gGarmentBag(gx, topY, gh, gw) : t === "kid" ? gShirt(gx, topY, gh * 0.72, gw * 0.82) : gShirt(gx, topY, gh, gw);
+  const HANG_SET: Record<string, string[]> = { longHang: ["shirt", "coat", "shirt", "coat"], shortHang: ["shirt", "shirt", "shirt"], suit: ["coat", "coat"], saree: ["saree", "saree", "saree"], dress: ["dress", "dress", "dress"], lehenga: ["lehenga", "lehenga"], dupatta: ["saree", "dress"], kidsHang: ["kid", "kid", "kid"], skirtHang: ["skirt", "skirt", "skirt"], garmentHang: ["garmentBag", "garmentBag"], hang: ["shirt", "coat", "shirt"] };
   const hangItems = (k: string, cx: number, yt: number, cw: number, ch: number) => {
     const rodY = yt + Math.min(13, ch * 0.13), botY = yt + ch - 4;
     let g = `<line x1="${f1(cx + 5)}" y1="${f1(rodY)}" x2="${f1(cx + cw - 5)}" y2="${f1(rodY)}" stroke="${INK}" stroke-width="1.3"/><line x1="${f1(cx + 5)}" y1="${f1(rodY - 3)}" x2="${f1(cx + 5)}" y2="${f1(rodY + 3)}" stroke="${INK}" stroke-width="1.1"/><line x1="${f1(cx + cw - 5)}" y1="${f1(rodY - 3)}" x2="${f1(cx + cw - 5)}" y2="${f1(rodY + 3)}" stroke="${INK}" stroke-width="1.1"/>`;
     const set = HANG_SET[k] || (k.toLowerCase().indexOf("kids") >= 0 ? ["kid", "kid"] : ["shirt", "coat", "shirt"]);
     const shY = rodY + 5;
     const n = cw < 60 ? 1 : cw < 150 ? 2 : 3;
-    const isSlim = set[0] === "saree" || set.indexOf("dress") >= 0 || set.indexOf("lehenga") >= 0;
+    const isSlim = set[0] === "saree" || set.indexOf("dress") >= 0 || set.indexOf("lehenga") >= 0 || set.indexOf("skirt") >= 0;
     const gw = Math.min(((cw - 12) / n) * (isSlim ? 0.9 : 1.02), isSlim ? 30 : 50);
     const gh = Math.max(10, Math.min(botY - shY, ch * 0.74, gw * (isSlim ? 7 : 5)));
     for (let i = 0; i < n; i++) { const gx = n === 1 ? cx + cw / 2 : cx + gw / 2 + 5 + (cw - gw - 10) * (i / (n - 1)); g += hanger(gx, rodY, shY, gw * 0.9) + drawGarment(set[i % set.length], gx, shY, gh, gw); }
@@ -15146,7 +15161,11 @@ function wardCellArt(k: string, cx: number, yt: number, cw: number, ch: number):
   // ---- pants folded over a horizontal bar: waistband + two legs ----
   const iPants = (cx: number, yt: number, cw: number, ch: number) => { const railY = yt + 7, botY = yt + ch - 4; let g = `<line x1="${f1(cx + 4)}" y1="${f1(railY)}" x2="${f1(cx + cw - 4)}" y2="${f1(railY)}" stroke="${INK}" stroke-width="1.1"/><line x1="${f1(cx + 4)}" y1="${f1(railY - 3)}" x2="${f1(cx + 4)}" y2="${f1(railY + 3)}" stroke="${INK}" stroke-width="1"/><line x1="${f1(cx + cw - 4)}" y1="${f1(railY - 3)}" x2="${f1(cx + cw - 4)}" y2="${f1(railY + 3)}" stroke="${INK}" stroke-width="1"/>`; const n = Math.max(1, Math.min(4, Math.round(cw / 26))); for (let i = 0; i < n; i++) { const px = cx + (cw / n) * (i + 0.5), pw = Math.min((cw / n) * 0.5, 16), legH = botY - (railY + 4), legW = pw * 0.44; g += `<path d="M${f1(px - pw / 2)},${f1(railY)} q0,${f1(-3.5)} ${f1(pw / 2)},${f1(-3.5)} q${f1(pw / 2)},0 ${f1(pw / 2)},3.5" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/><rect x="${f1(px - pw / 2)}" y="${f1(railY)}" width="${f1(pw)}" height="4" fill="${WHITE}" stroke="${INK}" stroke-width="0.6"/><rect x="${f1(px - pw / 2)}" y="${f1(railY + 4)}" width="${f1(legW)}" height="${f1(legH)}" fill="${WHITE}" stroke="${INK}" stroke-width="0.6"/><rect x="${f1(px + pw / 2 - legW)}" y="${f1(railY + 4)}" width="${f1(legW)}" height="${f1(legH)}" fill="${WHITE}" stroke="${INK}" stroke-width="0.6"/>`; } return g; };
   // ---- accessories (monochrome line-art) ----
-  const iHandbag = (cx: number, yt: number, cw: number, ch: number) => { const n = cw > 90 ? 2 : 1, slot = cw / n; let g = ""; for (let i = 0; i < n; i++) { const bcx = cx + i * slot + slot * 0.5, bw = Math.min(slot * 0.5, ch * 0.5), bh = Math.min(ch * 0.56, bw * 0.85), by = yt + ch / 2 - bh / 2 + 2; g += `<path d="M${f1(bcx - bw / 2)},${f1(by)} q${f1(bw / 2)},${f1(-bh * 0.55)} ${f1(bw)},0" fill="none" stroke="${INK}" stroke-width="0.7"/><rect x="${f1(bcx - bw / 2)}" y="${f1(by)}" width="${f1(bw)}" height="${f1(bh)}" rx="2" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/><line x1="${f1(bcx - bw / 2)}" y1="${f1(by + bh * 0.3)}" x2="${f1(bcx + bw / 2)}" y2="${f1(by + bh * 0.3)}" stroke="${MID}" stroke-width="0.4"/>`; } return g; };
+  const iHandbag = (cx: number, yt: number, cw: number, ch: number) => { const n = cw > 90 ? 2 : 1, slot = cw / n; let g = ""; for (let i = 0; i < n; i++) { const bcx = cx + i * slot + slot * 0.5, bw = Math.min(slot * 0.5, ch * 0.5), bh = Math.min(ch * 0.56, bw * 0.85), by = yt + ch / 2 - bh / 2 + 2; g += `<path d="M${f1(bcx - bw / 2)},${f1(by)} q${f1(bw / 2)},${f1(-bh * 0.55)} ${f1(bw)},0" fill="none" stroke="${INK}" stroke-width="0.7"/><rect x="${f1(bcx - bw / 2)}" y="${f1(by)}" width="${f1(bw)}" height="${f1(bh)}" rx="2" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/><path d="M${f1(bcx - bw / 2)},${f1(by)} L${f1(bcx + bw / 2)},${f1(by)} L${f1(bcx + bw / 2)},${f1(by + bh * 0.32)} Q${f1(bcx)},${f1(by + bh * 0.46)} ${f1(bcx - bw / 2)},${f1(by + bh * 0.32)} Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.5"/><rect x="${f1(bcx - 1.6)}" y="${f1(by + bh * 0.33)}" width="3.2" height="2.4" rx="0.6" fill="${MID}"/>`; } return g; };
+  // a blazer / coat draped on a wall hook (single-point mount, not a rod)
+  const iBlazerHook = (cx: number, yt: number, cw: number, ch: number) => { const hx = cx + cw * 0.5, hookY = yt + 8, w = Math.min(cw * 0.5, 40), by = yt + ch - 6, topY = hookY + 2, bt = w * 0.5; let s = `<path d="M${f1(hx)},${f1(yt + 4)} L${f1(hx)},${f1(hookY)} q0,3 3,3" fill="none" stroke="${INK}" stroke-width="0.9"/>`; s += `<path d="M${f1(hx)},${f1(topY)} L${f1(hx - w * 0.34)},${f1(topY + 8)} L${f1(hx - bt)},${f1(by)} L${f1(hx + bt)},${f1(by)} L${f1(hx + w * 0.34)},${f1(topY + 7)} Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/>`; s += `<path d="M${f1(hx)},${f1(topY)} L${f1(hx - w * 0.13)},${f1(topY + ch * 0.22)} M${f1(hx)},${f1(topY)} L${f1(hx + w * 0.13)},${f1(topY + ch * 0.2)}" fill="none" stroke="${INK}" stroke-width="0.5"/><line x1="${f1(hx)}" y1="${f1(topY + ch * 0.2)}" x2="${f1(hx)}" y2="${f1(by - 2)}" stroke="${MID}" stroke-width="0.5"/>`; return s; };
+  // a towel folded over a wall hook — rounded top fold, hanging with texture + a fringe line
+  const iTowelHook = (cx: number, yt: number, cw: number, ch: number) => { const hx = cx + cw * 0.5, hookY = yt + 8, w = Math.min(cw * 0.42, 32), by = yt + ch - 6, topY = hookY + 1; let s = `<path d="M${f1(hx)},${f1(yt + 4)} L${f1(hx)},${f1(hookY)} q0,3 3,3" fill="none" stroke="${INK}" stroke-width="0.9"/>`; s += `<path d="M${f1(hx - w / 2)},${f1(topY + 4)} q0,-4 ${f1(w / 2)},-4 q${f1(w / 2)},0 ${f1(w / 2)},4 L${f1(hx + w / 2)},${f1(by)} L${f1(hx - w / 2)},${f1(by)} Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.7"/>`; for (let i = 1; i < 4; i++) { const px = hx - w / 2 + w * (i / 4); s += `<line x1="${f1(px)}" y1="${f1(topY + 6)}" x2="${f1(px)}" y2="${f1(by - 3)}" stroke="${THIN}" stroke-width="0.4"/>`; } s += `<line x1="${f1(hx - w / 2)}" y1="${f1(by - 2.5)}" x2="${f1(hx + w / 2)}" y2="${f1(by - 2.5)}" stroke="${MID}" stroke-width="0.5"/>`; return s; };
   const iShoe = (cx: number, yt: number, cw: number, ch: number) => { const n = Math.max(2, Math.min(4, Math.round(cw / 22))), by = yt + ch - 5; let g = ""; for (let i = 0; i < n; i++) { const sx = cx + 8 + (cw - 20) * (n === 1 ? 0.5 : i / (n - 1)) - 6; g += `<path d="M${f1(sx)},${f1(by)} l0,-3.5 q0.6,-3 5,-3 l3.5,0 q3.5,0 4.5,3 l0,3.5 Z" fill="${WHITE}" stroke="${INK}" stroke-width="0.6"/>`; } return g; };
   const iJewel = (cx: number, yt: number, cw: number, ch: number) => { const r = Math.min(cw * 0.28, ch * 0.26), my = yt + ch * 0.34; return `<path d="M${f1(cx + cw / 2 - r)},${f1(my)} q${f1(r)},${f1(r * 1.1)} ${f1(2 * r)},0" fill="none" stroke="${INK}" stroke-width="0.8"/><circle cx="${f1(cx + cw / 2)}" cy="${f1(my + r * 0.9)}" r="2" fill="${WHITE}" stroke="${INK}" stroke-width="0.6"/><circle cx="${f1(cx + cw / 2 - r * 0.6)}" cy="${f1(my + r * 0.55)}" r="1.2" fill="${MID}"/><circle cx="${f1(cx + cw / 2 + r * 0.6)}" cy="${f1(my + r * 0.55)}" r="1.2" fill="${MID}"/>`; };
   const iCosmetic = (cx: number, yt: number, cw: number, ch: number) => { const n = Math.max(2, Math.min(4, Math.round(cw / 16))), by = yt + ch - 5; let g = ""; for (let i = 0; i < n; i++) { const bx = cx + 7 + (cw - 14) * (n === 1 ? 0.5 : i / (n - 1)), bh = ch * 0.42 + (i % 2) * 4; g += `<rect x="${f1(bx - 2.2)}" y="${f1(by - bh)}" width="4.4" height="${f1(bh)}" rx="1" fill="${WHITE}" stroke="${INK}" stroke-width="0.55"/><rect x="${f1(bx - 1)}" y="${f1(by - bh - 2.2)}" width="2" height="2.4" fill="${MID}"/>`; } return g; };
@@ -15167,6 +15186,8 @@ function wardCellArt(k: string, cx: number, yt: number, cw: number, ch: number):
   if (isHang(k)) return hangItems(k, cx, yt, cw, ch);
   if (k === "pantRack") return iPants(cx, yt, cw, ch);
   if (k === "handbag") return iHandbag(cx, yt, cw, ch);
+  if (k === "blazerHook") return iBlazerHook(cx, yt, cw, ch);
+  if (k === "towelHook") return iTowelHook(cx, yt, cw, ch);
   if (k === "shoe") return iShoe(cx, yt, cw, ch);
   if (k === "jewellery") return iJewel(cx, yt, cw, ch);
   if (k === "cosmetics") return iCosmetic(cx, yt, cw, ch);
@@ -15774,6 +15795,9 @@ const WARDROBE_DNA = {
     drawer: { min: 150, max: 250, def: 180 }, deepDrawer: { def: 250 },
     loft: { min: 300, max: 600, def: 400, depth: 550 },
     pantRackZone: { min: 350, max: 680, def: 500 }, shoePitch: { def: 200 },
+    garmentBag: { min: 1100, max: 1500, def: 1350, note: "hanging suit / garment cover bag" },
+    skirtHang: { min: 650, max: 900, def: 735, note: "skirt on a clip-hanger" },
+    hookZone: { min: 500, max: 700, def: 640, note: "blazer / coat / towel on a wall hook" },
     plinth: { min: 75, max: 100, def: 90 }, depth: { def: 600 },
     hingedLeaf: { min: 400, max: 600, def: 500 }, slidingPanel: { def: 800 },
     heightTiers: [2100, 2400, 2700, 3000], widthTiers: [1200, 1500, 1800, 2100, 2400, 2700, 3000],
