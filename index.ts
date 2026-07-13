@@ -14698,7 +14698,24 @@ function wardColumn(recipe: string, usableH: number): WCell[] {
   }
   const sum = cells.reduce((a, c) => a + c.hMM, 0) || 1;
   if (Math.abs(sum - usableH) > 1) { const f = usableH / sum; cells.forEach(c => c.hMM = Math.round(c.hMM * f)); }
-  return wardShelfCapHang(cells);
+  return wardShelfCapHang(wardSuggestFillBlank(cells));
+}
+// SUGGEST A USE FOR BLANK SPACE: a hanging cell stretched taller than the garment needs leaves dead
+// space below the clothes. Cap each oversized hang at its natural clear height and fill the reclaimed
+// height with useful shelves (placed below the rod) so no wardrobe has a large unused void.
+function wardSuggestFillBlank(cells: WCell[]): WCell[] {
+  const NAT: Record<string, number> = { longHang: 1650, hang: 1650, shortHang: 1050, suit: 1300, saree: 1350, dress: 1400, lehenga: 1400, dupatta: 1350, kidsHang: 950, skirtHang: 950, garmentHang: 1400 };
+  const isHang = (k: string) => k.toLowerCase().indexOf("hang") >= 0 || k === "saree" || k === "dress" || k === "lehenga" || k === "suit" || k === "dupatta";
+  const out: WCell[] = [];
+  for (const c of cells) {
+    const nat = NAT[c.kind] || (isHang(c.kind) ? 1650 : 0);
+    if (nat && isHang(c.kind) && c.hMM > nat + 260) {
+      const excess = c.hMM - nat, n = Math.max(1, Math.min(4, Math.round(excess / 340))), sh = Math.round(excess / n);
+      for (let i = 0; i < n; i++) out.push({ kind: "shelf", label: "Extra Shelf", hMM: sh });   // reclaimed space → adjustable shelves (suggested use)
+      out.push({ kind: c.kind, label: c.label, hMM: nat });   // capped hang sits on top of the new shelves
+    } else out.push(c);
+  }
+  return out;
 }
 // DESIGN RULE (owner 2026-07-12): a short/long hanging section must always have a SHELF above it, so two
 // stacked hanging sections read as separate. Inserts a thin divider shelf above any hanging cell whose
