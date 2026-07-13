@@ -1,12 +1,13 @@
 // Verify shared garment/item artwork (wardCellArt) renders in Shop Drawing, Shutters (internal
-// side) and the Internal elevation. The new art uses distinctive garment fills the old simple
-// line-art never produced (#eef2ff shirt, #dbe3f4 coat, #fce7f3 saree, hanger <path> shoulders).
+// side) and the Internal elevation. The art is clean monochrome CAD line-art whose item glyphs
+// use the distinctive item-ink #1f2937 (never used by the structural cell borders / dim lines /
+// the drawing's own #111827 ink) — plus hanger <path> shoulders.
 const B = "http://localhost:3000";
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log("  PASS " + m); } else { fail++; console.log("  FAIL " + m); } };
 
-// distinctive markers of the real item artwork (never present in the old simple lines)
-const GARMENT = ["#eef2ff", "#dbe3f4", "#fce7f3", "#fdecf5", "#f3f4f6"]; // shirt/coat/saree/dress fills + folded-stack band
+// distinctive marker of the real item artwork (item-ink used only by wardCellArt glyphs)
+const GARMENT = ["#1f2937"];
 const hasGarment = (svg) => GARMENT.some((h) => svg.includes(h));
 const countHangerShoulders = (svg) => (svg.match(/L[\d.]+,[\d.]+ L[\d.]+,[\d.]+ L[\d.]+,[\d.]+ Z/g) || []).length;
 
