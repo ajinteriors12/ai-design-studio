@@ -11804,7 +11804,7 @@ const frontendHTML = `<!DOCTYPE html>
 
     // 3D preview — reconstruct a wardrobe option as real panel meshes (carcass, partitions,
     // shelves, drawers, hanging rods, loft, plinth, optional shutters) in Three.js r128.
-    function Wardrobe3D({ opt, onEdit, onSnap }) {
+    function Wardrobe3D({ opt, input, onEdit, onSnap }) {
       const ref = React.useRef(null);
       const [shutters, setShutters] = useState(false);
       const [selInfo, setSelInfo] = useState(null);   // {label, mm} of the picked/dragged cell
@@ -11819,6 +11819,8 @@ const frontendHTML = `<!DOCTYPE html>
       const [dims3d, setDims3d] = useState(false);     // dimension annotations overlay in 3D (W×H×D + per-cell)
       const [items3d, setItems3d] = useState(true);    // show garments / folded stacks / items inside compartments
       const [menu3d, setMenu3d] = useState(null);      // §13.3 3D right-click menu
+      const [photoView, setPhotoView] = useState("");  // AI photoreal still, overlaid over the live 3D
+      const [prBusy, setPrBusy] = useState(false);      // photoreal render in-flight
       const modeRef = React.useRef("persp"), explRef = React.useRef(0), secRef = React.useRef(0), shadRef = React.useRef(false), qualRef = React.useRef("med"), lightRef = React.useRef("day"), flyRef = React.useRef(false), exportRef = React.useRef(null), opRef = React.useRef(null);
       React.useEffect(() => { modeRef.current = vmode; }, [vmode]);
       React.useEffect(() => { explRef.current = explode; }, [explode]);
@@ -11831,6 +11833,7 @@ const frontendHTML = `<!DOCTYPE html>
       React.useEffect(() => { dimRef.current = dims3d; }, [dims3d]);   // toggle-only: no scene rebuild (visibility flipped in the render loop)
       const itemsRef = React.useRef(true);
       React.useEffect(() => { itemsRef.current = items3d; }, [items3d]);   // toggle-only item art visibility (no scene rebuild)
+      React.useEffect(() => { setPhotoView(""); }, [opt]);   // drop a stale photoreal still when the design changes
       React.useEffect(() => {
         const THREE = window.THREE; if (!THREE || !ref.current || !opt) return;
         const host = ref.current, Wv = host.clientWidth || 640, Hv = 440;
@@ -12111,6 +12114,17 @@ const frontendHTML = `<!DOCTYPE html>
         window.addEventListener("resize", onResize);
         return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", onResize); renderer.domElement.removeEventListener("pointerdown", onDown); renderer.domElement.removeEventListener("contextmenu", onCtx); window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); controls.dispose(); renderer.dispose(); host.innerHTML = ""; };
       }, [opt, shutters, led]);
+      const renderPhoto3D = async () => {
+        if (prBusy) return;
+        setPrBusy(true);
+        try {
+          const res = await fetch("/api/wardrobe/photoreal-view", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option: opt, input: input || {}, view: "hero" }) });
+          const j = await res.json();
+          if (j && j.data && j.data.image) setPhotoView(j.data.image);
+          else alert("Photoreal render: " + ((j && j.message) || (j && j.error) || "failed"));
+        } catch (e) { alert("Photoreal render failed: " + e); }
+        setPrBusy(false);
+      };
       const mi3 = (label, fn) => <button key={label} onClick={fn} className="block w-full text-left px-3 py-1 hover:bg-indigo-50 text-slate-700">{label}</button>;
       return (<div style={{ position: "relative" }}>
         <div className="flex items-center gap-2 mb-2 flex-wrap text-[11px]">
@@ -12128,10 +12142,19 @@ const frontendHTML = `<!DOCTYPE html>
           <span className="text-slate-400">Export</span>
           {["obj", "gltf", "stl"].map((f) => <button key={f} onClick={() => exportRef.current && exportRef.current(f)} className="px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 uppercase">{f === "gltf" ? "GLB" : f}</button>)}
           {onSnap && <button onClick={() => { const cnv = ref.current && ref.current.querySelector("canvas"); if (cnv) onSnap(cnv.toDataURL("image/png")); }} className="px-2 py-1 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 font-medium" title="Use this 3D view as the presentation-board hero">🖼 To Board</button>}
+          <button onClick={renderPhoto3D} disabled={prBusy} className="px-2 py-1 rounded border border-fuchsia-300 text-fuchsia-700 hover:bg-fuchsia-50 font-medium disabled:opacity-60" title="Render a photoreal AI image of this exact wardrobe (Stability) over the live 3D">{prBusy ? "✨ Rendering… (~15s)" : "✨ Photoreal"}</button>
+          {photoView && <button onClick={() => setPhotoView("")} className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Back to the live interactive 3D">↺ Live 3D</button>}
           {selInfo && <span className="text-indigo-600 font-medium">{selInfo.label}: {selInfo.mm} mm</span>}
         </div>
         <div className="text-[10px] text-slate-400 mb-1">click a shelf / drawer / rack & drag ↕ to resize · right-click for edit menu · drag empty space to orbit</div>
-        <div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} />
+        <div style={{ position: "relative" }}>
+          <div ref={ref} style={{ width: "100%", height: 440, borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0", background: "#f1f5f9" }} />
+          {photoView && (<div style={{ position: "absolute", inset: 0 }}>
+            <img src={photoView} alt="AI photoreal render" style={{ width: "100%", height: 440, objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0" }} />
+            <div style={{ position: "absolute", left: 8, bottom: 8 }} className="text-[10px] bg-white/85 border border-fuchsia-200 text-fuchsia-700 rounded px-2 py-1">✨ AI photoreal render (Stability) — this exact wardrobe · ↺ Live 3D to interact</div>
+            <button onClick={() => setPhotoView("")} style={{ position: "absolute", top: 8, right: 8 }} className="px-2 py-1 rounded bg-white/90 border border-slate-300 text-slate-700 hover:bg-white text-[11px] font-medium">↺ Live 3D</button>
+          </div>)}
+        </div>
         {(opt.shape === "l" || opt.shape === "u") && <div style={{ position: "absolute", left: 8, bottom: 8, zIndex: 10 }} className="text-[10px] bg-white/85 border border-teal-200 text-teal-700 rounded px-2 py-1">◱ Folded {opt.shape === "u" ? "U-shape" : "L-shape"} — wings turn 90° at each teal corner unit. Orbit to inspect; section-cut &amp; exploded are approximate in folded view.</div>}
         {menu3d && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu3d(null)} onContextMenu={(e) => { e.preventDefault(); setMenu3d(null); }} />
@@ -13160,7 +13183,7 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="space-y-1">{mathW.constraints.map((cn, i) => (<div key={i} className={"rounded border px-2.5 py-1 " + (cn.ok ? "border-slate-200 bg-white" : cn.level === "error" ? "border-rose-300 bg-rose-50" : "border-amber-300 bg-amber-50")}><div className="text-[11px] font-semibold text-slate-700">{cn.ok ? "✓" : cn.level === "error" ? "⛔" : "⚠️"} {cn.name}</div><div className="text-[10px] text-slate-500">{cn.note}</div>{!cn.ok && <div className="text-[10px] text-cyan-700">Fix: {cn.fix}</div>}</div>))}</div>
             </div>)}
           </div>)}
-          {repTab === "3D" && sel && <Wardrobe3D opt={sel} onEdit={commitEdit} onSnap={(d) => { setBoardHero(d); setRepTab("Board"); }} />}
+          {repTab === "3D" && sel && <Wardrobe3D opt={sel} input={input} onEdit={commitEdit} onSnap={(d) => { setBoardHero(d); setRepTab("Board"); }} />}
           {repTab === "Board" && sel && (<div>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               <button onClick={renderPhotoBoard} disabled={photoBusy} className="px-2.5 py-1 rounded bg-gradient-to-r from-violet-600 to-indigo-600 text-white hover:from-violet-700 hover:to-indigo-700 text-xs font-semibold disabled:opacity-50 shadow-sm">{photoBusy ? "✨ Rendering photoreal…" : "✨ Photoreal Board"}</button>
@@ -15682,6 +15705,23 @@ app.post("/api/wardrobe/photoreal-board", async (c) => {
     const svg = wardrobePresentationBoard(opt, input, images);
     return c.json({ data: { svg, rendered: got } });
   } catch (err) { console.error(err); return c.json({ error: "Photoreal board failed" }, 500); }
+});
+// Single photoreal render of the EXACT wardrobe config — powers the 3D view's one-click ✨ Photoreal
+// button (overlaid over the live Three.js render for a presentation-quality still). Reuses the same
+// config-faithful prompt builder + Stability generator as the presentation board.
+app.post("/api/wardrobe/photoreal-view", async (c) => {
+  try {
+    const key = loadAIKeys().stability;
+    if (!key) return c.json({ error: "no-key", message: "Add a Stability AI key to ai-keys.json to render a photoreal image." }, 400);
+    const body = await c.req.json().catch(() => ({} as any));
+    const opt = body.option || body.opt;
+    if (!opt || !Array.isArray(opt.sections)) return c.json({ error: "no wardrobe option supplied" }, 400);
+    const input = body.input || {};
+    const view = ["hero", "angle", "inside"].indexOf(String(body.view)) >= 0 ? String(body.view) : "hero";
+    const img = await stabilityGenerate(wardrobePhotoPrompt(opt, input, view), "3:2", key);
+    if (!img) return c.json({ error: "render-failed", message: "Stability AI returned no image (check the key / quota)." }, 502);
+    return c.json({ data: { image: img } });
+  } catch (err) { console.error(err); return c.json({ error: "Photoreal view failed", message: String(err) }, 500); }
 });
 function wardrobeOptions(input: any): any {
   const options = ["balanced", "balanced-hang", "balanced-fold"].map((st) => {
