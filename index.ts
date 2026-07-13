@@ -12886,7 +12886,7 @@ const frontendHTML = `<!DOCTYPE html>
       const firstSig = React.useRef(true);
       const suppressGen = React.useRef(false);       // skip auto-regen when restoring a saved design
       const set = (k, v) => setInput((p) => { const n = Object.assign({}, p); n[k] = v; return n; });
-      React.useEffect(() => { fetch("/api/wardrobe/meta").then((r) => r.json()).then((j) => setMeta(j.data)).catch(() => {}); }, []);
+      React.useEffect(() => { fetch("/api/wardrobe/meta").then((r) => r.json()).then((j) => { setMeta(j.data); const ld = j.data && j.data.learned; if (ld && ld.count > 0 && ld.defaults) setInput((p) => Object.assign({}, p, { loftH: ld.defaults.loftH, drawerH: ld.defaults.drawerH, depth: ld.defaults.depth })); }).catch(() => {}); }, []);
       const generate = (ov) => {
         setBusy(true); setEdited(null);
         const body = Object.assign({}, input, ov || {});
@@ -13048,6 +13048,7 @@ const frontendHTML = `<!DOCTYPE html>
             {levelSel("traditional", "🥻 Traditional")}{levelSel("western", "👗 Western")}{levelSel("winter", "🧣 Winter")}{levelSel("luxury", "💎 Luxury")}
             {numIn(input.shape === "u" ? "width" : "width", input.shape === "straight" ? "📐 Width (mm)" : input.shape === "u" ? "📐 Back wall (mm)" : "📐 Wall A (mm)", 1200, 4800, 100)}{numIn("height", "📐 Height (mm)", 1800, 3000, 100)}{numIn("depth", "📐 Depth (mm)", 450, 900, 50)}
           </div>
+          {meta && meta.learned && meta.learned.count > 0 && (<div className="mt-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">🧠 Standards learned from {meta.learned.count} of your reference images are applied to all 3 options — loft {input.loftH} mm · drawer {input.drawerH} mm · depth {input.depth} mm{meta.learned.applied && meta.learned.applied.length ? " · " + meta.learned.applied.length + " dims" : ""}. Edit any value to override.</div>)}
           {/* §20 L/U-shape + corner solution */}
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 bg-teal-50/60 border border-teal-100 rounded-lg p-2">
             <label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">🔲 Shape</span>
@@ -15848,15 +15849,21 @@ function wardrobeOptions(input: any): any {
     meta: { finishes: WARDROBE_STD.finishes, std: WARDROBE_STD },
   };
 }
-app.get("/api/wardrobe/meta", (c) => c.json({
-  data: {
-    templates: Object.entries(WARD_TEMPLATES).map(([k, v]) => ({ key: k, ...v })),
-    legend: WARD_LEGEND.map(([k, l]) => ({ kind: k, color: WARD_COLORS[k], label: l })),
-    finishes: WARDROBE_STD.finishes, std: WARDROBE_STD,
-    shapes: [{ key: "straight", label: "Straight" }, { key: "l", label: "L-Shape" }, { key: "u", label: "U-Shape" }],
-    corners: Object.entries(WARD_CORNERS).map(([k, v]) => ({ key: k, label: v.label, note: v.note, hardware: v.hardware })),
-  },
-}));
+app.get("/api/wardrobe/meta", (c) => {
+  const eff: any = wardEffStd(), learned = WARD_LEARNED || wardLearnedStd();
+  return c.json({
+    data: {
+      templates: Object.entries(WARD_TEMPLATES).map(([k, v]) => ({ key: k, ...v })),
+      legend: WARD_LEGEND.map(([k, l]) => ({ kind: k, color: WARD_COLORS[k], label: l })),
+      finishes: WARDROBE_STD.finishes, std: WARDROBE_STD,
+      // learned effective form defaults — so the 3 options are generated from what the folder taught
+      learned: { count: learned.count, applied: Object.keys(learned.std || {}), dims: learned.dims || {}, palette: learned.palette || [],
+        defaults: { loftH: eff.loftBand, drawerH: eff.drawerH, shoeH: eff.shoeH, depth: eff.depth } },
+      shapes: [{ key: "straight", label: "Straight" }, { key: "l", label: "L-Shape" }, { key: "u", label: "U-Shape" }],
+      corners: Object.entries(WARD_CORNERS).map(([k, v]) => ({ key: k, label: v.label, note: v.note, hardware: v.hardware })),
+    },
+  });
+});
 app.post("/api/wardrobe/options", async (c) => {
   try { const body = await c.req.json().catch(() => ({})); return c.json({ data: wardrobeOptions(body || {}) }); }
   catch (err) { console.error(err); return c.json({ error: "Wardrobe options generation failed" }, 500); }
