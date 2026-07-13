@@ -15954,6 +15954,60 @@ async function learnWardrobeVision(name: string, media: string, b64: string): Pr
   finally { clearTimeout(t); }
   return null;
 }
+// ── NO-API LEARNING ── read the dimension callouts printed on a wardrobe drawing with a LOCAL OCR
+// engine (Tesseract, pure WASM, offline after a one-time model cache) → structured mm standards.
+// Used as the fallback whenever a vision key is absent/failed, so the app keeps learning with no key.
+let wardOcrWorker: any = null, wardOcrOff = false;
+async function wardOcrGetWorker(): Promise<any> {
+  if (wardOcrWorker) return wardOcrWorker;
+  if (wardOcrOff) return null;
+  try { const tj: any = await import("tesseract.js"); wardOcrWorker = await tj.createWorker("eng"); console.log("[learn] local OCR engine ready (no API needed)"); return wardOcrWorker; }
+  catch (e: any) { wardOcrOff = true; console.error("[learn] OCR unavailable:", String((e && e.message) || e).slice(0, 120)); return null; }
+}
+// parse every "<number><unit>" callout in OCR text → the app's standard dim keys (mm). Keyword context
+// first (shelf/hang/drawer/loft/depth/base), else conservative non-overlapping value buckets.
+function wardOcrDims(text: string): { dimensionsMm: Record<string, number>; tokens: string[] } {
+  const dims: Record<string, number[]> = {}, tokens: string[] = [];
+  const push = (f: string, mm: number) => { (dims[f] = dims[f] || []).push(mm); };
+  const classify = (mm: number, ctx: string) => {
+    const c = ctx.toLowerCase(), has = (...k: string[]) => k.some((x) => c.indexOf(x) >= 0);
+    if (has("depth", "profundidad", "prof")) { if (mm >= 450 && mm <= 750) push("depth", mm); return; }
+    if (has("base", "plinth", "rodap", "zocalo", "toe", "skirt")) { if (mm >= 60 && mm <= 160) push("plinth", mm); return; }
+    if (has("drawer", "gaveta", "gav")) { if (mm >= 120 && mm <= 300) push("drawer", mm); return; }
+    if (has("loft", "altillo", "top box")) { if (mm >= 300 && mm <= 700) push("loft", mm); return; }
+    if (has("shelf", "prat", "fold", "prateleira")) { if (mm >= 220 && mm <= 450) push("shelfPitch", mm); return; }
+    if (has("hang", "cabide", "pendur", "clearance")) { if (mm >= 1250) push("longHang", mm); else if (mm >= 800 && mm < 1200) push("shortHang", mm); return; }
+    // no keyword → only accept values in tight, unambiguous ranges
+    if (mm >= 1300 && mm <= 1750) push("longHang", mm);
+    else if (mm >= 900 && mm <= 1150) push("shortHang", mm);
+    else if (mm >= 280 && mm <= 390) push("shelfPitch", mm);
+    else if (mm >= 150 && mm <= 240) push("drawer", mm);
+  };
+  const consider = (numStr: string, unit: string, idx: number) => {
+    let v = parseFloat(numStr.replace(",", ".")); if (!isFinite(v)) return;
+    const u = unit.toLowerCase(); let mm = u === "mm" ? v : u === "cm" ? v * 10 : (u === "in" || u === "inches" || u === '"') ? v * 25.4 : u === "'" ? v * 304.8 : v;
+    mm = Math.round(mm); if (mm < 40 || mm > 3200) return;
+    tokens.push(numStr + (unit || ""));
+    classify(mm, text.slice(Math.max(0, idx - 42), idx + 42));
+  };
+  let m: RegExpExecArray | null;
+  const reUnit = /(\d{1,4}(?:[.,]\d{1,2})?)\s*(cm|mm|inches|in|"|')/gi;
+  while ((m = reUnit.exec(text))) consider(m[1], m[2], m.index);
+  const reIn = /(\d{1,3})\s*IN\b/g;   // inch renders: "14 IN", "40 IN"
+  while ((m = reIn.exec(text))) consider(m[1], "in", m.index);
+  const out: Record<string, number> = {}, median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+  for (const f in dims) if (dims[f].length) out[f] = Math.round(median(dims[f]));
+  return { dimensionsMm: out, tokens: tokens.slice(0, 30) };
+}
+async function learnWardrobeOCR(abs: string): Promise<{ data: any; engine: string } | null> {
+  const w = await wardOcrGetWorker(); if (!w) return null;
+  try {
+    const res: any = await w.recognize(abs); const text = (res && res.data && res.data.text) || "";
+    const { dimensionsMm, tokens } = wardOcrDims(text);
+    if (!Object.keys(dimensionsMm).length) return null;   // nothing usable read → stay pending, retry later
+    return { data: { subCategory: "ocr-dimensioned", layoutArchetype: "dimensions read off the drawing (local OCR, no API)", compartments: [], dimensionsMm, palette: [], doorStyle: "none", glassType: "none", styleTags: ["ocr"], notes: ["local OCR read: " + tokens.join(", ")], confidence: 0.6 }, engine: "local-ocr" };
+  } catch (e: any) { console.error("[learn] OCR recognize failed:", String((e && e.message) || e).slice(0, 120)); return null; }
+}
 function wardLearnWalk(dir: string): { abs: string; cat: string; name: string }[] {
   const out: { abs: string; cat: string; name: string }[] = [];
   const rec = (d: string, cat: string) => {
@@ -15973,7 +16027,8 @@ async function wardLearnFile(abs: string, cat: string): Promise<"learned" | "ski
     const row: any = sqlite.prepare("SELECT mtime, engine FROM wardrobe_learnings WHERE id=?").get(rel);
     if (row && row.mtime === mtime && row.engine && row.engine !== "pending") return "skip";   // already learned this version
     const name = abs.split("/").pop() || abs, media = visionMediaType("", name); if (!media) return "skip";
-    const vis = await learnWardrobeVision(name, media, fsRead(abs).toString("base64"));
+    let vis = await learnWardrobeVision(name, media, fsRead(abs).toString("base64"));
+    if (!vis) vis = await learnWardrobeOCR(abs);   // no-API fallback: read the dimensions locally with OCR
     const data = vis ? vis.data : { subCategory: "pending", notes: ["vision not available / failed — will retry"] };
     const eng = vis ? vis.engine : "pending", mt = vis ? mtime : 0;   // pending keeps mtime=0 so it retries next scan
     sqlite.prepare("INSERT OR REPLACE INTO wardrobe_learnings (id,path,category,filename,mtime,engine,data,created_at) VALUES (?,?,?,?,?,?,?,?)").run(rel, abs, cat, name, mt, eng, JSON.stringify(data), Date.now());
@@ -16013,10 +16068,10 @@ setTimeout(() => {
   try {
     const learnedCnt = (sqlite.prepare("SELECT COUNT(*) c FROM wardrobe_learnings WHERE engine != 'pending'").get() as any).c, keys = loadAIKeys();
     wardLearnedRefresh();   // apply whatever is already learned to generation on boot (no restart needed)
-    // learn/retry if nothing has successfully learned yet AND a vision key exists (retries the pending rows)
-    if (learnedCnt === 0 && (keys.openai || keys.anthropic) && fsExists(WARD_LEARN_DIR)) {
-      console.log("[learn] no learned images yet — vision-analysing the reference folder…");
-      wardLearnBulk().then((r) => console.log("[learn] complete:", r.learned + " learned / " + r.scanned + " scanned" + (r.pending ? " (" + r.pending + " pending — check the vision key/quota)" : ""))).catch(() => {});
+    // learn/retry if nothing has successfully learned yet — works with NO key (local OCR fallback reads the dims)
+    if (learnedCnt === 0 && fsExists(WARD_LEARN_DIR)) {
+      console.log("[learn] no learned images yet — analysing the reference folder (vision key if present, else local OCR)…");
+      wardLearnBulk().then((r) => console.log("[learn] complete:", r.learned + " learned / " + r.scanned + " scanned" + (r.pending ? " (" + r.pending + " unreadable — no dims found)" : ""))).catch(() => {});
     }
   } catch { }
   startWardLearnWatcher();
@@ -16029,8 +16084,7 @@ app.get("/api/wardrobe/learnings", (c) => {
   return c.json({ dna: WARDROBE_DNA, learned, applied: { std: wardEffStd(), overrides: learned.std, count: learned.count }, images, counts: { total: images.length, byCategory, analysed: images.filter((i) => i.engine && i.engine !== "pending").length }, watching: WARD_LEARN_DIR, busy: wardLearnBusy });
 });
 app.post("/api/wardrobe/learnings/rescan", async (c) => {
-  const keys = loadAIKeys(); if (!keys.openai && !keys.anthropic) return c.json({ error: "No vision key — add \"openai\" to ai-keys.json to learn images." }, 400);
-  const r = await wardLearnBulk();
+  const r = await wardLearnBulk();   // uses the vision key if present, else the local OCR engine (no key needed)
   return c.json({ data: r });
 });
 // Seed / overwrite learnings directly (bypasses the vision API — used when a vision key is unavailable
