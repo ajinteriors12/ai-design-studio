@@ -14802,6 +14802,17 @@ function wardFinishFor(finishes: any, scope: string): any { return (finishes && 
 // renderer widen the master and skip the covered twins.
 function wardCellSpan(cell: any): number { const n = Math.round(+((cell && cell.span) || 1)); return n > 1 ? n : 1; }
 function wardSpanWmm(cols: any[], ci: number, cell: any): number { const n = wardCellSpan(cell); let w = 0; for (let j = 0; j < n && ci + j < cols.length; j++) w += (+cols[ci + j].w || 0); return w; }
+// Count the horizontal divider shelves created by editable per-column loftCells
+// (a column split into N loft compartments needs N-1 divider shelves). One band = 0.
+function wardLoftDividers(opt: any): number {
+  if (!opt.hasLoft) return 0;
+  let n = 0;
+  for (const sec of opt.sections) for (const col of (sec.columns || [])) {
+    const lc = Array.isArray(col.loftCells) ? col.loftCells.filter((c: any) => c && +c.hMM > 0) : null;
+    if (lc && lc.length) n += Math.max(0, lc.length - 1);
+  }
+  return n;
+}
 function wardReports(opt: any): any {
   const S = WARDROBE_STD, sqft = (mm2: number) => mm2 / 92903;
   const H = opt.height, D = opt.depth, W = opt.width;
@@ -14828,6 +14839,8 @@ function wardReports(opt: any): any {
   add("Shelf", W / totalCols, D - 20, shelfCount);
   add("Drawer front", W / totalCols, S.drawerH, drawerFronts);
   if (opt.hasLoft) add("Loft shelf", W, opt.loftDepth, 1);
+  const loftDividers = wardLoftDividers(opt);
+  if (loftDividers > 0) add("Loft divider shelf", W / totalCols - 20, opt.loftDepth - 20, loftDividers);
   add("Shutter", W / shutters, H, shutters);
   const backSqft = sqft(W * H), boardSqft = sqft(boardMm2);
   const hardware = [
@@ -14862,9 +14875,11 @@ function wardPanels(opt: any): { panels: any[]; counts: any } {
   add("Shelf", colW - 36, D - 20, shelves);
   add("Drawer front", colW - 6, opt.drawerH || S.drawerH, drawerFronts, 18, "18mm shutter");
   if (opt.hasLoft) add("Loft shelf", W, opt.loftDepth, 1);
+  const loftDividers = wardLoftDividers(opt);
+  if (loftDividers > 0) add("Loft divider shelf", colW - 36, opt.loftDepth - 20, loftDividers);
   add("Shutter", colW - 4, H - 20, shutters, 18, "18mm shutter / laminate");
   add("Back panel", W, H, 1, 6, "6mm BWP ply");
-  return { panels, counts: { partitions, shelves, drawerFronts, shutters, hangRods } };
+  return { panels, counts: { partitions, shelves, drawerFronts, shutters, hangRods, loftDividers } };
 }
 // Rough guillotine strip-pack → sheet count + utilisation (2440×1220 boards).
 function wardNest(rects: any[], SW: number, SH: number): { sheets: number; utilPct: number } {
@@ -15146,9 +15161,9 @@ function renderWardrobeShopDrawing(opt: any): string {
     for (let s = 0; s < subs; s++) { const sx = cx + gapx + s * (sw + gapx); for (let k = 0; k < stackN; k++) { const py = yt + ch - 6 - k * (bandH + gap); g += `<rect x="${sx.toFixed(1)}" y="${(py - bandH).toFixed(1)}" width="${sw.toFixed(1)}" height="${bandH.toFixed(1)}" rx="${(bandH / 2).toFixed(1)}" fill="#f3f4f6" stroke="${MID}" stroke-width="0.7"/><line x1="${(sx + 2.5).toFixed(1)}" y1="${(py - bandH / 2).toFixed(1)}" x2="${(sx + sw - 2.5).toFixed(1)}" y2="${(py - bandH / 2).toFixed(1)}" stroke="#cbd5e1" stroke-width="0.4"/>`; } }
     return g;
   };
-  const loftBoxes = (bandY: number, bandH: number) => {
-    const nb = Math.max(1, Math.min(10, Math.round(wpx / 175))), slot = wpx / nb; let g = "";
-    for (let i = 0; i < nb; i++) { const bw = slot * 0.66, bx = x0 + i * slot + (slot - bw) / 2, bh = Math.min(bandH * 0.62, bandH - 6), by = bandY + (bandH - bh) / 2; g += `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="#fbfbfd" stroke="${INK}" stroke-width="1"/><line x1="${bx.toFixed(1)}" y1="${(by + bh * 0.28).toFixed(1)}" x2="${(bx + bw).toFixed(1)}" y2="${(by + bh * 0.28).toFixed(1)}" stroke="${MID}" stroke-width="0.8"/><rect x="${(bx + bw / 2 - 6).toFixed(1)}" y="${(by + bh * 0.28 + 2).toFixed(1)}" width="12" height="4" fill="none" stroke="${MID}" stroke-width="0.7"/>`; }
+  const loftBoxes = (bandX: number, bandW: number, bandY: number, bandH: number) => {
+    const nb = Math.max(1, Math.min(6, Math.round(bandW / 130))), slot = bandW / nb; let g = "";
+    for (let i = 0; i < nb; i++) { const bxw = slot * 0.66, bx = bandX + i * slot + (slot - bxw) / 2, bh = Math.min(bandH * 0.62, bandH - 6), by = bandY + (bandH - bh) / 2; if (bh < 5) continue; g += `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bxw.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="#fbfbfd" stroke="${INK}" stroke-width="1"/><line x1="${bx.toFixed(1)}" y1="${(by + bh * 0.28).toFixed(1)}" x2="${(bx + bxw).toFixed(1)}" y2="${(by + bh * 0.28).toFixed(1)}" stroke="${MID}" stroke-width="0.8"/><rect x="${(bx + bxw / 2 - 6).toFixed(1)}" y="${(by + bh * 0.28 + 2).toFixed(1)}" width="12" height="4" fill="none" stroke="${MID}" stroke-width="0.7"/>`; }
     return g;
   };
   // ---- REAL ITEM silhouettes drawn inside each compartment (garments on the rod, goods on shelves) ----
@@ -15200,12 +15215,27 @@ function renderWardrobeShopDrawing(opt: any): string {
     if (isCorner(k)) return `<line x1="${f1(cx + 4)}" y1="${f1(yt + ch - 4)}" x2="${f1(cx + cw - 4)}" y2="${f1(yt + 4)}" stroke="${MID}" stroke-width="0.9" stroke-dasharray="4 3"/>`;
     return foldGlyph(cx, yt, cw, ch);
   };
-  // ---- loft band (storage boxes) ----
+  // ---- loft band: per-column editable compartments (loftCells) with divider shelves ----
   if (opt.hasLoft && loftPx > 6) {
     p.push(`<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${wpx.toFixed(1)}" height="${loftPx.toFixed(1)}" fill="#ffffff" stroke="${INK}" stroke-width="1"/>`);
-    p.push(loftBoxes(y0, loftPx));
+    const loftCellsOf = (col: any) => (Array.isArray(col.loftCells) && col.loftCells.length) ? col.loftCells : [{ kind: "loft", label: "Loft", hMM: opt.loftH, color: "#fcd34d" }];
+    for (const sec of opt.sections) for (const col of sec.columns) {
+      const lcx = xOf(col.x), lcw = col.w * scale, lc = loftCellsOf(col);
+      const lsum = lc.reduce((a: number, c: any) => a + (+c.hMM || 0), 0) || opt.loftH;
+      let ly = y0;
+      for (let li = 0; li < lc.length; li++) {
+        const cell = lc[li], cph = ((+cell.hMM || 0) / lsum) * loftPx, yTop = ly;
+        // divider shelf between this compartment and the one above (skip the band's own top edge)
+        if (li > 0) p.push(`<line class="loft-div" x1="${lcx.toFixed(1)}" y1="${yTop.toFixed(1)}" x2="${(lcx + lcw).toFixed(1)}" y2="${yTop.toFixed(1)}" stroke="${INK}" stroke-width="1.1"/>`);
+        if (cph > 9) p.push(loftBoxes(lcx, lcw, yTop, cph));
+        if (cph > 15) { const lbl = String(cell.label || cell.kind || "Loft").toUpperCase(), maxc = Math.max(3, Math.floor((lcw - 8) / 4.6)), shown = lbl.length > maxc ? lbl.slice(0, maxc) : lbl; p.push(`<text x="${(lcx + 4).toFixed(1)}" y="${(yTop + 9).toFixed(1)}" fill="${MID}" font-size="6.5" font-weight="600">${esc(shown)}</text><text x="${(lcx + lcw - 4).toFixed(1)}" y="${(yTop + 9).toFixed(1)}" fill="${MID}" font-size="6" text-anchor="end">${esc(wardMm(+cell.hMM || 0))}</text>`); }
+        ly += cph;
+      }
+    }
+    // vertical column partitions inside the loft band (align with the columns below)
+    for (const sec of opt.sections) for (const col of sec.columns) if (col.x > 0) p.push(`<line x1="${xOf(col.x).toFixed(1)}" y1="${y0.toFixed(1)}" x2="${xOf(col.x).toFixed(1)}" y2="${usableTopY.toFixed(1)}" stroke="${INK}" stroke-width="1"/>`);
     p.push(`<line x1="${x0.toFixed(1)}" y1="${usableTopY.toFixed(1)}" x2="${(x0 + wpx).toFixed(1)}" y2="${usableTopY.toFixed(1)}" stroke="${INK}" stroke-width="1.2"/>`);
-    p.push(`<text x="${(x0 + 6).toFixed(1)}" y="${(y0 + 11).toFixed(1)}" fill="${MID}" font-size="8" font-weight="600">LOFT — STORAGE</text>`);
+    p.push(`<text x="${(x0 + wpx - 4).toFixed(1)}" y="${(y0 - 4).toFixed(1)}" fill="${MID}" font-size="8" font-weight="600" text-anchor="end">LOFT — STORAGE</text>`);
   }
   // ---- columns: cells floor->up (a merged MASTER cell widens across its covered twins) ----
   for (const sec of opt.sections) { const cols = sec.columns;
