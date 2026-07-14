@@ -12874,7 +12874,9 @@ const frontendHTML = `<!DOCTYPE html>
       </div>);
     }
     function WardrobeAI() {
-      const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300, beamOn: false, beamProj: 200, beamSoffit: 2100, beamPos: 600, beamWidth: 900, shape: "straight", wingB: 1800, wingC: 1800, corner: "lemans" });
+      const [input, setInput] = useState({ maleUsers: 1, femaleUsers: 1, children: 0, professionals: 1, traditional: "medium", western: "medium", winter: "low", travel: "low", luxury: "low", width: 2400, height: 2400, depth: 600, maleRatio: 50, loftH: 600, drawerH: 200, shoeH: 300, beamOn: false, beamProj: 200, beamSoffit: 2100, beamPos: 600, beamWidth: 900, shape: "straight", wingB: 1800, wingC: 1800, corner: "lemans", drawerHardware: "hettich-softclose", hinge: "hettich-sensys-110", handle: "long-d-handle" });
+      const [wardHwGallery, setWardHwGallery] = useState(null);   // null | "drawer" | "hinge" | "handle"
+      const useWardHardware = (id) => { setInput((p) => { const n = { ...p }; if (wardHwGallery === "hinge") n.hinge = id; else if (wardHwGallery === "handle") n.handle = id; else n.drawerHardware = id; return n; }); setWardHwGallery(null); };
       const [data, setData] = useState(null);
       const [meta, setMeta] = useState(null);
       const [busy, setBusy] = useState(false);
@@ -13068,6 +13070,14 @@ const frontendHTML = `<!DOCTYPE html>
             {numIn(input.shape === "u" ? "width" : "width", input.shape === "straight" ? "📐 Width (mm)" : input.shape === "u" ? "📐 Back wall (mm)" : "📐 Wall A (mm)", 1200, 4800, 100)}{numIn("height", "📐 Height (mm)", 1800, 3000, 100)}{numIn("depth", "📐 Depth (mm)", 450, 900, 50)}
           </div>
           {meta && meta.learned && meta.learned.count > 0 && (<div className="mt-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">🧠 Standards learned from {meta.learned.count} of your reference images are applied to all 3 options — loft {input.loftH} mm · drawer {input.drawerH} mm · depth {input.depth} mm{meta.learned.applied && meta.learned.applied.length ? " · " + meta.learned.applied.length + " dims" : ""}. Edit any value to override.</div>)}
+          <div className="mt-2 flex items-center gap-2 flex-wrap bg-violet-50/60 border border-violet-100 rounded-lg px-2 py-1.5">
+            <span className="text-[11px] font-semibold text-violet-700">🔩 Hardware</span>
+            <button onClick={() => setWardHwGallery("drawer")} className="px-2 py-1 rounded border border-violet-300 text-violet-700 hover:bg-violet-100 text-[11px] font-medium">Drawer runners</button>
+            <button onClick={() => setWardHwGallery("hinge")} className="px-2 py-1 rounded border border-violet-300 text-violet-700 hover:bg-violet-100 text-[11px] font-medium">Hinges</button>
+            <button onClick={() => setWardHwGallery("handle")} className="px-2 py-1 rounded border border-violet-300 text-violet-700 hover:bg-violet-100 text-[11px] font-medium">Handles</button>
+            <span className="text-[10px] text-slate-500">runner <b>{input.drawerHardware}</b> · hinge <b>{input.hinge}</b> · handle <b>{input.handle}</b> — drawer boxes auto-size to the runner</span>
+          </div>
+          {wardHwGallery && <HardwareGallery type={wardHwGallery} currentId={wardHwGallery === "hinge" ? input.hinge : wardHwGallery === "handle" ? input.handle : input.drawerHardware} onUse={useWardHardware} onClose={() => setWardHwGallery(null)} />}
           {/* §20 L/U-shape + corner solution */}
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 bg-teal-50/60 border border-teal-100 rounded-lg p-2">
             <label className="flex flex-col gap-1"><span className="text-[11px] text-slate-500">🔲 Shape</span>
@@ -15131,10 +15141,11 @@ function wardReports(opt: any): any {
   if (loftDividers > 0) add("Loft divider shelf", W / totalCols - 20, opt.loftDepth - 20, loftDividers);
   add("Shutter", W / shutters, H, shutters);
   const backSqft = sqft(W * H), boardSqft = sqft(boardMm2);
+  const hs = opt.hwSel || {}, selHinge = FAB_HINGES.find((h) => h.id === hs.hinge), selRun = FAB_DRAWER_HARDWARE.find((h) => h.id === hs.runner), selHand = FAB_HANDLES.find((h) => h.id === hs.handle);
   const hardware = [
-    { item: "Soft-close hinges (110°)", qty: shutters * 3 },
-    { item: "Tandem drawer channels (pairs)", qty: drawerFronts },
-    { item: "Handles (profile / long)", qty: shutters + drawerFronts },
+    { item: selHinge ? selHinge.brand + " " + selHinge.model + " hinges" : "Soft-close hinges (110°)", qty: shutters * 3 },
+    { item: (selRun ? selRun.brand + " " + selRun.model : "Tandem drawer channel") + " (pairs)", qty: drawerFronts },
+    { item: selHand ? selHand.brand + " " + selHand.model : "Handles (profile / long)", qty: shutters + drawerFronts },
     { item: "Hanging rods", qty: hangRods },
     { item: "Safe locker with key", qty: opt.stats.accessories > 0 ? 1 : 0 },
     { item: "LED sensor strip (m)", qty: 2 },
@@ -15215,9 +15226,10 @@ function wardBOQ(opt: any): any {
     if (rem > 0.5) mat += line("Laminate / finish (remaining)", rem, "sq.ft", R.laminate);
   } else mat += line("Laminate / finish", finishArea, "sq.ft", R.laminate);
   let hw = 0;
-  hw += line("Soft-close hinges (110°)", counts.shutters * 3, "no", R.hinge);
-  if (counts.drawerFronts) hw += line("Tandem drawer channels", counts.drawerFronts, "pair", R.slide);
-  hw += line("Handles", counts.shutters + counts.drawerFronts, "no", R.handle);
+  const bhs = opt.hwSel || {}, bHinge = FAB_HINGES.find((h) => h.id === bhs.hinge), bRun = FAB_DRAWER_HARDWARE.find((h) => h.id === bhs.runner), bHand = FAB_HANDLES.find((h) => h.id === bhs.handle);
+  hw += line(bHinge ? bHinge.brand + " " + bHinge.model + " hinges" : "Soft-close hinges (110°)", counts.shutters * 3, "no", R.hinge);
+  if (counts.drawerFronts) hw += line(bRun ? bRun.brand + " " + bRun.model : "Tandem drawer channels", counts.drawerFronts, "pair", R.slide);
+  hw += line(bHand ? bHand.brand + " " + bHand.model : "Handles", counts.shutters + counts.drawerFronts, "no", R.handle);
   if (counts.hangRods) hw += line("Hanging rods", counts.hangRods, "no", R.rod);
   if (opt.stats.accessories > 0) hw += line("Safe locker + key", 1, "no", R.lock);
   hw += line("LED sensor strip", 2, "m", R.led);
@@ -16066,6 +16078,7 @@ app.get("/api/wardrobe/item-catalog", (c) => c.body(renderWardrobeItemCatalog(),
 function wardrobeOptions(input: any): any {
   const options = ["balanced", "balanced-hang", "balanced-fold"].map((st) => {
     const o = buildWardrobeOption(st, input);
+    o.hwSel = { runner: input.drawerHardware || "hettich-softclose", hinge: input.hinge || "hettich-sensys-110", handle: input.handle || "long-d-handle" };
     o.reports = wardReports(o);
     o.scorecard = wardScorecard(o); o.suggestions = wardSuggestions(o);
     o.views = { Front: renderWardrobeElevationSvg(o, "front"), Internal: renderWardrobeElevationSvg(o, "internal"), "Shop Drawing": renderWardrobeShopDrawing(o), Shutters: renderWardrobeShutterCompareSvg(o), Top: renderWardrobeTopSvg(o), Side: renderWardrobeSideSvg(o), Loft: renderWardrobeLoftSvg(o), "Item Art": renderWardrobeItemCatalog() };
