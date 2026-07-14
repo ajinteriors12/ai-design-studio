@@ -13243,14 +13243,39 @@ const frontendHTML = `<!DOCTYPE html>
       </div>);
     }
 
+    // Reusable hardware gallery modal (drawer runners / hinges / handles) with dimensioned diagrams.
+    function HardwareGallery({ type, currentId, onUse, onClose }) {
+      const [items, setItems] = useState(null);
+      React.useEffect(() => { setItems(null); fetch("/api/fabrik/hardware-gallery?type=" + type).then((r) => r.json()).then((j) => setItems(j.data || [])).catch(() => setItems([])); }, [type]);
+      const TITLE = { drawer: "Drawer-runner hardware", hinge: "Cabinet hinges", handle: "Handles & pulls" }[type] || "Hardware";
+      const chips = (h) => type === "hinge" ? [h.category, h.angle + "°", h.softClose ? "soft-close" : h.pushOpen ? "push-open" : "standard", "cup Ø" + h.cupDia, "overlays " + (h.overlays || []).join("/")]
+        : type === "handle" ? [h.type, (h.ccMM && h.ccMM.filter((x) => x > 0).length ? "c/c " + h.ccMM.filter((x) => x > 0).join("/") + "mm" : "continuous"), "projection " + h.projection + "mm", (h.finishes || []).slice(0, 2).join(" / ")]
+        : [h.category, h.load + "kg", h.mount === "under" ? "undermount" : "side-mount", h.metalSide ? "metal box" : "wooden box", h.softClose ? "soft-close" : h.pushOpen ? "push-open" : "standard", "depths " + h.depths[0] + "-" + h.depths[h.depths.length - 1] + "mm"];
+      return (<div className="fixed inset-0 z-50 bg-slate-900/60 flex items-start justify-center overflow-auto p-4" onClick={onClose}>
+        <div className="bg-white rounded-xl shadow-2xl w-full my-6" style={{ maxWidth: 1120 }} onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
+            <div><h3 className="text-base font-bold text-slate-800">🔩 {TITLE} gallery</h3><p className="text-xs text-slate-500">Every system with real dimensions · click <b>Use this</b> to apply it (sizes/drilling auto-update).</p></div>
+            <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-2xl leading-none">×</button>
+          </div>
+          {!items ? <div className="p-8 text-center text-slate-400 text-sm">Loading gallery…</div> : (<div className="p-4 grid md:grid-cols-2 gap-3">
+            {items.map((h) => (<div key={h.id} className={"rounded-lg border overflow-hidden " + (h.id === currentId ? "border-violet-400 ring-2 ring-violet-200" : "border-slate-200")}>
+              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200"><span className="text-sm font-semibold text-slate-800">{h.brand} · {h.model}</span>{h.id === currentId ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 border border-violet-200 font-semibold">✓ In use</span> : <span className="text-[10px] text-slate-400">{h.price}</span>}</div>
+              <div className="bg-white p-1" dangerouslySetInnerHTML={{ __html: h.svg }} />
+              <div className="px-3 py-1.5 text-[11px] text-slate-600 border-t border-slate-100 flex flex-wrap gap-x-3 gap-y-0.5">{chips(h).map((c, i) => <span key={i}>{c}</span>)}<span>📦 {h.availability}</span></div>
+              <div className="px-3 py-1 text-[10px] text-slate-400 border-t border-slate-100">Best for: {(h.use || []).join(", ")}</div>
+              <div className="px-3 py-2 border-t border-slate-100"><button onClick={() => onUse(h.id)} disabled={h.id === currentId} className="w-full px-2 py-1 text-xs bg-violet-600 hover:bg-violet-500 text-white rounded font-medium disabled:opacity-50">{h.id === currentId ? "✓ Currently selected" : "Use this"}</button></div>
+            </div>))}
+          </div>)}
+        </div>
+      </div>);
+    }
     function Fabrik() {
       const blankCab = () => ({ code: "", name: "New Cabinet", w: 600, h: 720, d: 560, material: "18mm BWR Plywood", finish: "Laminate", shutters: "", drawerCount: 0, shutterless: false });
-      const [proj, setProj] = useState({ name: "Kitchen Project", client: "", unitType: "kitchen", material: "18mm BWR Plywood", sheet: "8x4", finish: "Laminate", drawerHardware: "hettich-softclose", drawerType: "kitchen" });
+      const [proj, setProj] = useState({ name: "Kitchen Project", client: "", unitType: "kitchen", material: "18mm BWR Plywood", sheet: "8x4", finish: "Laminate", drawerHardware: "hettich-softclose", drawerType: "kitchen", hinge: "hettich-sensys-110", handle: "long-d-handle" });
       const [cabs, setCabs] = useState([{ code: "C-001", name: "Base Unit", w: 800, h: 720, d: 560, material: "18mm BWR Plywood", finish: "Laminate", shutters: "", drawerCount: 0, shutterless: false }]);
       const [pkg, setPkg] = useState(null);
-      const [hwGallery, setHwGallery] = useState(null);   // 🔩 drawer-runner hardware gallery (null=closed)
-      const openHwGallery = () => { if (hwGallery) { setHwGallery(null); return; } fetch("/api/fabrik/hardware-gallery").then((r) => r.json()).then((j) => setHwGallery(j.data || [])).catch(() => setHwGallery([])); };
-      const useHardware = (id) => { setProj((p) => ({ ...p, drawerHardware: id })); setHwGallery(null); };
+      const [hwGallery, setHwGallery] = useState(null);   // null | "drawer" | "hinge" | "handle"
+      const useHardware = (id) => { setProj((p) => { const n = { ...p }; if (hwGallery === "hinge") n.hinge = id; else if (hwGallery === "handle") n.handle = id; else n.drawerHardware = id; return n; }); setHwGallery(null); };
       const [overrides, setOverrides] = useState({});   // freeform per-panel size overrides {panelCode:{w,h,thk,qty}}
       const [linkMode, setLinkMode] = useState(false);  // true = edits auto-adjust the cabinet (related panels follow)
       const [meta, setMeta] = useState({ materials: FAB_MATERIALS_C, sheets: [{ key: "8x4", label: "8' × 4'" }], finishes: ["Laminate", "Acrylic", "PU Paint", "Veneer", "Membrane", "Glass"] });
@@ -13425,34 +13450,14 @@ const frontendHTML = `<!DOCTYPE html>
               </div>
               <div className="text-[11px] text-slate-500 flex flex-col justify-end pb-1 gap-1">
                 {(() => { const h = (meta.drawerHardware || []).find(x => x.id === proj.drawerHardware); return h ? (<span>{h.category} · {h.mount === "under" ? "undermount" : "side-mount"}{h.metalSide ? " · metal gallery" : " · wooden box"} · depths {h.depths[0]}–{h.depths[h.depths.length - 1]}mm · {h.price} · {(h.use || []).slice(0, 3).join(", ")}</span>) : null; })()}
-                <button onClick={openHwGallery} className="self-start px-2 py-1 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 text-[11px] font-medium">🔩 Browse hardware gallery (with dimensions)</button>
+                <div className="flex flex-wrap gap-1.5">
+                  <button onClick={() => setHwGallery("drawer")} className="px-2 py-1 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 text-[11px] font-medium">🔩 Drawer runners</button>
+                  <button onClick={() => setHwGallery("hinge")} className="px-2 py-1 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 text-[11px] font-medium">🚪 Hinges</button>
+                  <button onClick={() => setHwGallery("handle")} className="px-2 py-1 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 text-[11px] font-medium">🖐 Handles</button>
+                </div>
               </div>
             </div>
-            {hwGallery && (<div className="fixed inset-0 z-50 bg-slate-900/60 flex items-start justify-center overflow-auto p-4" onClick={() => setHwGallery(null)}>
-              <div className="bg-white rounded-xl shadow-2xl w-full my-6" style={{ maxWidth: 1120 }} onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
-                  <div><h3 className="text-base font-bold text-slate-800">🔩 Drawer-runner hardware gallery</h3><p className="text-xs text-slate-500">Every system with real dimensions · click <b>Use this</b> and every drawer auto-resizes to it (box W/D/H, clearances & drilling).</p></div>
-                  <button onClick={() => setHwGallery(null)} className="text-slate-400 hover:text-slate-700 text-2xl leading-none">×</button>
-                </div>
-                <div className="p-4 grid md:grid-cols-2 gap-3">
-                  {hwGallery.map((h) => (<div key={h.id} className={"rounded-lg border overflow-hidden " + (h.id === proj.drawerHardware ? "border-violet-400 ring-2 ring-violet-200" : "border-slate-200")}>
-                    <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200">
-                      <span className="text-sm font-semibold text-slate-800">{h.brand} · {h.model}</span>
-                      {h.id === proj.drawerHardware ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 border border-violet-200 font-semibold">✓ In use</span> : <span className="text-[10px] text-slate-400">{h.price}</span>}
-                    </div>
-                    <div className="bg-white p-1" dangerouslySetInnerHTML={{ __html: h.svg }} />
-                    <div className="px-3 py-1.5 text-[11px] text-slate-600 border-t border-slate-100 flex flex-wrap gap-x-3 gap-y-0.5">
-                      <span>🏷 {h.category}</span><span>💪 {h.load} kg</span><span>{h.mount === "under" ? "⬇ undermount" : "↔ side-mount"}</span><span>{h.metalSide ? "🔩 metal box" : "🪵 wooden box"}</span>
-                      <span>{h.softClose ? "🤫 soft-close" : h.pushOpen ? "👆 push-open" : "— standard"}</span><span>📏 depths {h.depths[0]}–{h.depths[h.depths.length - 1]} mm</span><span>↔ width {h.minW}–{h.maxW} mm</span><span>📦 {h.availability}</span>
-                    </div>
-                    <div className="px-3 py-1.5 text-[10px] text-slate-400 border-t border-slate-100">Best for: {(h.use || []).join(", ")}</div>
-                    <div className="px-3 py-2 border-t border-slate-100">
-                      <button onClick={() => useHardware(h.id)} disabled={h.id === proj.drawerHardware} className="w-full px-2 py-1 text-xs bg-violet-600 hover:bg-violet-500 text-white rounded font-medium disabled:opacity-50">{h.id === proj.drawerHardware ? "✓ Currently selected" : "Use this — auto-resize all drawers"}</button>
-                    </div>
-                  </div>))}
-                </div>
-              </div>
-            </div>)}
+            {hwGallery && <HardwareGallery type={hwGallery} currentId={hwGallery === "hinge" ? proj.hinge : hwGallery === "handle" ? proj.handle : proj.drawerHardware} onUse={useHardware} onClose={() => setHwGallery(null)} />}
             <div className="md:col-span-3 flex items-center gap-2 flex-wrap pt-1 border-t border-slate-100">
               <input ref={fileRef} type="file" accept=".jpg,.jpeg,.png,.webp,.gif,.pdf,.dxf,.svg" style={{ display: "none" }} onChange={onFile} />
               <button onClick={() => fileRef.current && fileRef.current.click()} className="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg">📤 Upload drawing (AI read)</button>
@@ -13997,6 +14002,24 @@ const FAB_DRAWER_TYPES: Record<string, any> = {
   pantry:       { label: "Pantry Pull-out",      weight: "heavy",  defaultHw: "hettich-innotech" },
 };
 const FAB_WEIGHT_MIN: Record<string, number> = { light: 20, medium: 30, heavy: 45 };
+// ── CABINET HINGES ── cup Ø35 is universal; cupCenterFromEdge = distance edge→cup centre; boreDepth ~11.5.
+const FAB_HINGES: any[] = [
+  { id: "hettich-sensys-110", brand: "Hettich", model: "Sensys 8645i (110°)", category: "Soft-close Clip-on", angle: 110, softClose: true, pushOpen: false, cupDia: 35, cupCenterFromEdge: 22.5, boreDepth: 11.5, overlays: ["full", "half", "inset"], doorThk: [16, 24], price: "Premium", availability: "Dealer", use: ["Kitchen", "Wardrobe", "Vanity"] },
+  { id: "blum-clip-110", brand: "Blum", model: "CLIP top BLUMOTION (110°)", category: "Soft-close Clip-on", angle: 110, softClose: true, pushOpen: false, cupDia: 35, cupCenterFromEdge: 22.5, boreDepth: 12.5, overlays: ["full", "half", "inset"], doorThk: [15, 24], price: "Premium", availability: "Import / dealer", use: ["Kitchen", "Wardrobe", "Crockery"] },
+  { id: "hafele-110-standard", brand: "Hafele", model: "Metalla 110° Standard", category: "Standard Clip-on", angle: 110, softClose: false, pushOpen: false, cupDia: 35, cupCenterFromEdge: 22.5, boreDepth: 11.5, overlays: ["full", "half", "inset"], doorThk: [16, 22], price: "Standard", availability: "In stock", use: ["Kitchen", "Wardrobe", "Office"] },
+  { id: "hettich-165-wide", brand: "Hettich", model: "Sensys 165° Wide-angle", category: "Wide-angle Soft-close", angle: 165, softClose: true, pushOpen: false, cupDia: 35, cupCenterFromEdge: 22.5, boreDepth: 11.5, overlays: ["full"], doorThk: [16, 24], price: "Premium", availability: "Dealer", use: ["Corner unit", "Wardrobe", "Pantry"] },
+  { id: "hettich-pushopen-hinge", brand: "Hettich", model: "Push-to-open 110° (handleless)", category: "Push-to-open Clip-on", angle: 110, softClose: false, pushOpen: true, cupDia: 35, cupCenterFromEdge: 22.5, boreDepth: 11.5, overlays: ["full", "half"], doorThk: [16, 22], price: "Premium", availability: "Dealer", use: ["Handleless kitchen", "TV unit", "Wardrobe (handleless)"] },
+  { id: "ebco-110-economy", brand: "Ebco", model: "Auto-close 110°", category: "Auto-close Clip-on", angle: 110, softClose: false, pushOpen: false, cupDia: 35, cupCenterFromEdge: 22.5, boreDepth: 11.5, overlays: ["full", "half", "inset"], doorThk: [16, 20], price: "Economy", availability: "In stock", use: ["Kitchen", "Wardrobe", "Budget"] },
+];
+// ── HANDLES / PULLS ── ccMM = fixing centre-to-centre options; projection = how far it stands off the front.
+const FAB_HANDLES: any[] = [
+  { id: "profile-g", brand: "Generic", model: "Aluminium G-Profile", type: "Continuous profile", ccMM: [], lengthMM: 0, projection: 30, finishes: ["Silver anodised", "Matt black", "Champagne"], price: "Standard", availability: "In stock", use: ["Handleless kitchen", "Wardrobe"] },
+  { id: "long-d-handle", brand: "Hettich", model: "D / Long Bar Handle", type: "Bar / D handle", ccMM: [96, 128, 160, 192, 256, 320], lengthMM: 0, projection: 32, finishes: ["SS", "Matt black", "Rose gold", "Brass"], price: "Standard", availability: "In stock", use: ["Kitchen", "Wardrobe", "TV unit"] },
+  { id: "knob-round", brand: "Hafele", model: "Round Knob", type: "Knob", ccMM: [0], lengthMM: 30, projection: 28, finishes: ["SS", "Antique brass", "Ceramic"], price: "Economy", availability: "In stock", use: ["Wardrobe", "Vanity", "Crockery"] },
+  { id: "edge-j-pull", brand: "Ebco", model: "J / Edge Finger Pull", type: "Edge pull", ccMM: [128, 160, 224, 320], lengthMM: 0, projection: 18, finishes: ["Silver anodised", "Matt black"], price: "Standard", availability: "In stock", use: ["Handleless", "Drawer bank", "Wardrobe"] },
+  { id: "gola-groove", brand: "Hafele", model: "Gola Profile (groove)", type: "Gola / integrated groove", ccMM: [], lengthMM: 0, projection: 0, finishes: ["Silver", "Matt black", "Anthracite"], price: "Premium", availability: "Dealer", use: ["Handleless kitchen", "Wardrobe"] },
+  { id: "recess-flush", brand: "Generic", model: "Recessed Flush Pull", type: "Inset flush pull", ccMM: [0], lengthMM: 96, projection: 0, finishes: ["SS", "Matt black"], price: "Economy", availability: "In stock", use: ["Sliding wardrobe", "TV unit"] },
+];
 function fabHardwareById(id: string): any { return FAB_DRAWER_HARDWARE.find((h) => h.id === id) || null; }
 function fabDefaultHardwareFor(dType: string): string { return (FAB_DRAWER_TYPES[dType] && FAB_DRAWER_TYPES[dType].defaultHw) || "hettich-softclose"; }
 function fabDrawerTypeFor(unitType: string): string {
@@ -14100,6 +14123,68 @@ function fabHardwareGallery(): any[] {
     sample: { frontW: ref.s.frontW, frontH: ref.frontH, boxW: ref.s.boxW, boxH: ref.s.boxH, depth: ref.s.depth, usableDepthIn: ref.s.usableDepthIn },
     svg: fabHardwareCardSvg(hw, ref),
   }; });
+}
+// dimensioned hinge diagram — FRONT (cup bore Ø35 at 22.5 from edge) + SECTION (door thk + bore depth)
+function fabHingeCardSvg(h: any): string {
+  const W = 384, H = 248, INK = "#1f2937", MID = "#6b7280", ACC = "#7c3aed";
+  const f1 = (v: number) => v.toFixed(1);
+  const dimH = (x1: number, x2: number, y: number, txt: string) => `<line x1="${f1(x1)}" y1="${f1(y)}" x2="${f1(x2)}" y2="${f1(y)}" stroke="${MID}" stroke-width="0.6"/><path d="M${f1(x1 + 3)},${f1(y - 2)} L${f1(x1)},${f1(y)} L${f1(x1 + 3)},${f1(y + 2)}" fill="none" stroke="${MID}" stroke-width="0.6"/><path d="M${f1(x2 - 3)},${f1(y - 2)} L${f1(x2)},${f1(y)} L${f1(x2 - 3)},${f1(y + 2)}" fill="none" stroke="${MID}" stroke-width="0.6"/><text x="${f1((x1 + x2) / 2)}" y="${f1(y - 3)}" fill="${INK}" font-size="8" text-anchor="middle">${txt}</text>`;
+  const p: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Inter,Arial,sans-serif"><rect width="${W}" height="${H}" fill="#ffffff"/>`];
+  // FRONT: door face with the Ø35 cup bore, 22.5 from the hinge edge
+  p.push(`<text x="30" y="24" fill="${MID}" font-size="8.5" font-weight="700">DOOR FACE — cup bore</text>`);
+  const edgeX = 44, midY = 132, cupR = 17, cupCx = edgeX + h.cupCenterFromEdge;
+  p.push(`<rect x="${f1(edgeX)}" y="60" width="150" height="150" fill="#f8fafc" stroke="${INK}" stroke-width="1.1"/>`);
+  p.push(`<line x1="${f1(edgeX)}" y1="56" x2="${f1(edgeX)}" y2="214" stroke="${ACC}" stroke-width="1.4"/><text x="${f1(edgeX - 4)}" y="70" fill="${ACC}" font-size="7" text-anchor="end">hinge edge</text>`);
+  p.push(`<circle cx="${f1(cupCx)}" cy="${f1(midY)}" r="${cupR}" fill="none" stroke="${ACC}" stroke-width="1.2"/><circle cx="${f1(cupCx)}" cy="${f1(midY)}" r="1.5" fill="${ACC}"/>`);
+  p.push(dimH(edgeX, cupCx, midY + cupR + 16, h.cupCenterFromEdge + " to centre"));
+  p.push(`<line x1="${f1(cupCx - cupR)}" y1="${f1(midY - cupR - 6)}" x2="${f1(cupCx + cupR)}" y2="${f1(midY - cupR - 6)}" stroke="${MID}" stroke-width="0.6"/><text x="${f1(cupCx)}" y="${f1(midY - cupR - 9)}" fill="${INK}" font-size="8" text-anchor="middle">Ø${h.cupDia}</text>`);
+  p.push(`<text x="${f1(edgeX + 6)}" y="204" fill="${MID}" font-size="7">cups ~100 mm from top &amp; bottom</text>`);
+  // SECTION: door thickness + bore depth
+  p.push(`<text x="234" y="24" fill="${MID}" font-size="8.5" font-weight="700">SECTION — bore</text>`);
+  const dThk = (h.doorThk ? h.doorThk[0] : 18), sx = 250, sy = 90, thkPx = Math.max(24, dThk * 3.2), borePx = Math.max(20, h.boreDepth * 3.2);
+  p.push(`<rect x="${f1(sx)}" y="${f1(sy)}" width="90" height="${f1(thkPx)}" fill="#f8fafc" stroke="${INK}" stroke-width="1.1"/>`);
+  p.push(`<rect x="${f1(sx + 24)}" y="${f1(sy)}" width="${f1(borePx)}" height="${f1(cupR * 2)}" transform="rotate(90 ${f1(sx + 24)} ${f1(sy)})" fill="none" stroke="${ACC}" stroke-width="1" stroke-dasharray="3 2"/>`);
+  p.push(dimH(sx, sx + 90, sy - 8, "carcass"));
+  p.push(`<line x1="${f1(sx + 22)}" y1="${f1(sy + thkPx + 8)}" x2="${f1(sx + 22)}" y2="${f1(sy)}" stroke="${MID}" stroke-width="0.6"/><text x="${f1(sx + 22)}" y="${f1(sy + thkPx + 18)}" fill="${INK}" font-size="8" text-anchor="middle">door ${dThk}</text>`);
+  p.push(`<text x="${f1(sx + 30)}" y="${f1(sy + 14)}" fill="${ACC}" font-size="7.5">bore ${h.boreDepth} deep</text>`);
+  p.push(`<text x="${f1(W / 2)}" y="${f1(H - 8)}" fill="${MID}" font-size="7.5" text-anchor="middle">${h.angle}° opening · ${h.softClose ? "soft-close" : h.pushOpen ? "push-to-open" : "auto/standard"} · overlays: ${(h.overlays || []).join(", ")}</text>`);
+  p.push(`</svg>`); return p.join("");
+}
+// dimensioned handle diagram — FRONT (bar/knob/profile with CC) + SIDE (projection)
+function fabHandleCardSvg(h: any): string {
+  const W = 384, H = 248, INK = "#1f2937", MID = "#6b7280", ACC = "#db2777";
+  const f1 = (v: number) => v.toFixed(1);
+  const dimH = (x1: number, x2: number, y: number, txt: string) => `<line x1="${f1(x1)}" y1="${f1(y)}" x2="${f1(x2)}" y2="${f1(y)}" stroke="${MID}" stroke-width="0.6"/><path d="M${f1(x1 + 3)},${f1(y - 2)} L${f1(x1)},${f1(y)} L${f1(x1 + 3)},${f1(y + 2)}" fill="none" stroke="${MID}" stroke-width="0.6"/><path d="M${f1(x2 - 3)},${f1(y - 2)} L${f1(x2)},${f1(y)} L${f1(x2 - 3)},${f1(y + 2)}" fill="none" stroke="${MID}" stroke-width="0.6"/><text x="${f1((x1 + x2) / 2)}" y="${f1(y - 3)}" fill="${INK}" font-size="8" text-anchor="middle">${txt}</text>`;
+  const p: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Inter,Arial,sans-serif"><rect width="${W}" height="${H}" fill="#ffffff"/>`];
+  const cc = (h.ccMM && h.ccMM.length && h.ccMM[Math.floor(h.ccMM.length / 2)]) || 0;
+  const proj = h.projection || 0, midY = 128;
+  p.push(`<text x="30" y="24" fill="${MID}" font-size="8.5" font-weight="700">FRONT</text>`);
+  if (cc > 0) {           // bar / D handle: two fixing centres + bar
+    const scale = Math.min(1.0, 230 / (cc + 60)), x0 = 60, x1 = x0 + cc * scale;
+    p.push(`<rect x="${f1(x0 - 16)}" y="${f1(midY - 6)}" width="${f1(cc * scale + 32)}" height="12" rx="6" fill="#f1f5f9" stroke="${ACC}" stroke-width="1.2"/>`);
+    p.push(`<circle cx="${f1(x0)}" cy="${f1(midY)}" r="2" fill="${ACC}"/><circle cx="${f1(x1)}" cy="${f1(midY)}" r="2" fill="${ACC}"/>`);
+    p.push(dimH(x0, x1, midY + 22, cc + " c/c"));
+    p.push(`<text x="${f1((x0 + x1) / 2)}" y="${f1(midY - 14)}" fill="${INK}" font-size="8" text-anchor="middle">${h.type}</text>`);
+    p.push(`<text x="60" y="200" fill="${MID}" font-size="7.5">c/c sizes: ${(h.ccMM || []).join(", ")} mm</text>`);
+  } else if (/knob/i.test(h.type)) {
+    p.push(`<circle cx="120" cy="${f1(midY)}" r="20" fill="#f1f5f9" stroke="${ACC}" stroke-width="1.2"/><text x="120" y="${f1(midY + 40)}" fill="${INK}" font-size="8" text-anchor="middle">Ø${h.lengthMM || 30} knob · single screw</text>`);
+  } else {                // profile / gola / flush — show a short section
+    p.push(`<rect x="60" y="${f1(midY - 8)}" width="160" height="16" rx="2" fill="#f1f5f9" stroke="${ACC}" stroke-width="1.2"/><text x="140" y="${f1(midY - 14)}" fill="${INK}" font-size="8" text-anchor="middle">${h.type}</text><text x="60" y="200" fill="${MID}" font-size="7.5">continuous / integrated — no c/c</text>`);
+  }
+  // SIDE: projection off the door face
+  p.push(`<text x="234" y="24" fill="${MID}" font-size="8.5" font-weight="700">SIDE — projection</text>`);
+  const dx = 250, projPx = Math.max(6, proj * 1.6);
+  p.push(`<rect x="${f1(dx)}" y="70" width="16" height="120" fill="#e2e8f0" stroke="${INK}" stroke-width="1"/><text x="${f1(dx + 8)}" y="60" fill="${MID}" font-size="7" text-anchor="middle">door</text>`);
+  if (proj > 0) { p.push(`<path d="M${f1(dx + 16)},110 q${f1(projPx)},0 ${f1(projPx)},20 l0,10 q0,20 ${f1(-projPx)},20" fill="none" stroke="${ACC}" stroke-width="2"/>`); p.push(dimH(dx + 16, dx + 16 + projPx, 200, proj + " out")); }
+  else p.push(`<rect x="${f1(dx + 2)}" y="110" width="12" height="40" fill="none" stroke="${ACC}" stroke-width="1.2" stroke-dasharray="3 2"/><text x="${f1(dx + 40)}" y="134" fill="${ACC}" font-size="7.5">flush (0 projection)</text>`);
+  p.push(`<text x="${f1(W / 2)}" y="${f1(H - 8)}" fill="${MID}" font-size="7.5" text-anchor="middle">${h.brand} · finishes: ${(h.finishes || []).join(", ")}</text>`);
+  p.push(`</svg>`); return p.join("");
+}
+function fabHingeGallery(): any[] {
+  return FAB_HINGES.map((h) => ({ id: h.id, brand: h.brand, model: h.model, category: h.category, angle: h.angle, softClose: h.softClose, pushOpen: h.pushOpen, cupDia: h.cupDia, cupCenterFromEdge: h.cupCenterFromEdge, boreDepth: h.boreDepth, overlays: h.overlays, doorThk: h.doorThk, price: h.price, availability: h.availability, use: h.use, svg: fabHingeCardSvg(h) }));
+}
+function fabHandleGallery(): any[] {
+  return FAB_HANDLES.map((h) => ({ id: h.id, brand: h.brand, model: h.model, type: h.type, ccMM: h.ccMM, lengthMM: h.lengthMM, projection: h.projection, finishes: h.finishes, price: h.price, availability: h.availability, use: h.use, svg: fabHandleCardSvg(h) }));
 }
 
 // ── Panel cutting list for ONE cabinet (bottom-between-sides carcass) ─────────
@@ -14512,7 +14597,7 @@ app.get("/api/fabrik/meta", (c) => c.json({ data: {
   drawerTypes: Object.entries(FAB_DRAWER_TYPES).map(([k, v]: any) => ({ key: k, label: v.label, weight: v.weight, defaultHw: v.defaultHw })),
 } }));
 // Drawer-runner hardware gallery — every system with a reference sizing + a dimensioned diagram.
-app.get("/api/fabrik/hardware-gallery", (c) => c.json({ data: fabHardwareGallery() }));
+app.get("/api/fabrik/hardware-gallery", (c) => { const t = c.req.query("type") || "drawer"; const data = t === "hinge" ? fabHingeGallery() : t === "handle" ? fabHandleGallery() : fabHardwareGallery(); return c.json({ data, type: t }); });
 
 // Interpret an uploaded drawing → a draft editable cabinet spec (uses the vision reader).
 app.post("/api/fabrik/interpret", async (c) => {
