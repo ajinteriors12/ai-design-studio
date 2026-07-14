@@ -12134,7 +12134,10 @@ const frontendHTML = `<!DOCTYPE html>
         if (prBusy) return;
         setPrBusy(true);
         try {
-          const res = await fetch("/api/wardrobe/photoreal-view", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option: opt, input: input || {}, view: "hero" }) });
+          // capture the live 3D render so Stability structure-control follows THIS exact wardrobe (its
+          // columns, compartments & size) instead of inventing a generic one
+          let image = null; try { const cnv = ref.current && ref.current.querySelector("canvas"); if (cnv) image = cnv.toDataURL("image/png"); } catch (e) {}
+          const res = await fetch("/api/wardrobe/photoreal-view", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option: opt, input: input || {}, view: "hero", image }) });
           const j = await res.json();
           if (j && j.data && j.data.image) setPhotoView(j.data.image);
           else alert("Photoreal render: " + ((j && j.message) || (j && j.error) || "failed"));
@@ -16092,9 +16095,29 @@ app.post("/api/wardrobe/photoreal-view", async (c) => {
     if (!opt || !Array.isArray(opt.sections)) return c.json({ error: "no wardrobe option supplied" }, 400);
     const input = body.input || {};
     const view = ["hero", "angle", "inside"].indexOf(String(body.view)) >= 0 ? String(body.view) : "hero";
-    const img = await stabilityGenerate(wardrobePhotoPrompt(opt, input, view), "3:2", key);
+    const prompt = wardrobePhotoPrompt(opt, input, view);
+    // If the live 3D screenshot is supplied → Stability STRUCTURE CONTROL so the photoreal follows THIS
+    // exact wardrobe (its columns, compartments & proportions), not a generic AI-invented one.
+    const m = String(body.image || "").match(/^data:image\/\w+;base64,(.+)$/);
+    if (m) {
+      const imgBuf = Buffer.from(m[1], "base64");
+      const strength = Math.min(0.92, Math.max(0.4, Number(body.controlStrength) || 0.68));
+      const neg = "cartoon, illustration, cgi look, low poly, flat shading, blurry, distorted geometry, warped panels, extra rooms, doorways, watermark, text, logo, people, oversaturated, fisheye";
+      const fd = new FormData();
+      fd.append("image", new Blob([imgBuf], { type: "image/png" }), "structure.png");
+      fd.append("prompt", prompt); fd.append("negative_prompt", neg); fd.append("control_strength", String(strength)); fd.append("output_format", "png");
+      const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 120000);
+      let res: any;
+      try { res = await fetch("https://api.stability.ai/v2beta/stable-image/control/structure", { method: "POST", headers: { Authorization: "Bearer " + key, Accept: "image/*" }, body: fd as any, signal: ac.signal }); }
+      finally { clearTimeout(t); }
+      if (!res.ok) { const e = await res.text().catch(() => ""); return c.json({ error: "stability-" + res.status, message: (e.slice(0, 220) || "Stability HTTP " + res.status) }, 502); }
+      const outBuf = Buffer.from(await res.arrayBuffer());
+      return c.json({ data: { image: "data:image/png;base64," + outBuf.toString("base64"), structured: true } });
+    }
+    // no 3D image → text-to-image fallback (generic, config-described)
+    const img = await stabilityGenerate(prompt, "3:2", key);
     if (!img) return c.json({ error: "render-failed", message: "Stability AI returned no image (check the key / quota)." }, 502);
-    return c.json({ data: { image: img } });
+    return c.json({ data: { image: img, structured: false } });
   } catch (err) { console.error(err); return c.json({ error: "Photoreal view failed", message: String(err) }, 500); }
 });
 // Direct SVG of the item-art symbol catalog (also available as the "Item Art" view tab in every wardrobe).
