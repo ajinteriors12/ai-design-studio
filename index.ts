@@ -12621,6 +12621,9 @@ const frontendHTML = `<!DOCTYPE html>
         const LBL = { convert: "Convert → " + arg, add: "Add " + arg, insert: "Insert " + arg, dup: "Duplicate compartment", pasteProps: "Paste properties", delete: "Delete compartment", inc: "Resize +50", dec: "Resize −50", equal: "Equal-divide column", split: "Split column", splitColN: "Split column into " + arg, splitV: "Split into " + arg, merge: "Merge column", unmerge: "Unmerge compartment", reassign: "Move column → " + arg, lock: "Lock", unlock: "Unlock" };
         commit(n, LBL[kind] || "Edit"); setMenu(null);
       };
+      // per-drawer hardware: right-click a drawer → 🔩 Change runner → gallery → set just this cell's runner
+      const [hwFor, setHwFor] = useState(null);
+      const setCellHardware = (tgt, id) => { if (!tgt) { setHwFor(null); return; } const n = JSON.parse(JSON.stringify(secs)); const cell = ((n[tgt.si] || {}).columns || [])[tgt.ci] && n[tgt.si].columns[tgt.ci].cells[tgt.k]; if (cell) { cell.hardware = id; commit(n, "Set drawer runner"); } setHwFor(null); };
       // Capture the EXACT clicked height (mm from the wardrobe floor) so an Insert lands where the user
       // right-clicked — not at a default position. The saved clickMM is used later, not the live cursor.
       const openMenu = (e, si, ci, k) => { e.preventDefault(); e.stopPropagation(); const sp = toSvg(e); const clickMM = Math.max(0, Math.round((floorY - sp.y) / scale / 5) * 5); setMmsg(""); setMenu({ x: e.clientX, y: e.clientY, si, ci, k, clickMM, heightMM: clickMM }); };
@@ -12732,6 +12735,7 @@ const frontendHTML = `<!DOCTYPE html>
               <div className="border-t border-slate-100 my-1" />
               <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
               {WARD_CONVERTS.map((c) => mi("• " + c.label, () => op("convert", c.kind)))}
+              {mCol && mCol.cells[menu.k] && (mCol.cells[menu.k].kind === "drawer" || mCol.cells[menu.k].kind === "laptop") && mi("🔩 Change drawer runner…", () => { setHwFor({ si: menu.si, ci: menu.ci, k: menu.k }); setMenu(null); })}
               <div className="border-t border-slate-100 my-1" />
               {mi("▲ Increase height (+50)", () => op("inc"))}
               {mi("▼ Decrease height (−50)", () => op("dec"))}
@@ -12749,6 +12753,7 @@ const frontendHTML = `<!DOCTYPE html>
             </React.Fragment>)}
           </div>
         </React.Fragment>)}
+        {hwFor && <HardwareGallery type="drawer" currentId={(((secs[hwFor.si] || {}).columns || [])[hwFor.ci] && secs[hwFor.si].columns[hwFor.ci].cells[hwFor.k] && secs[hwFor.si].columns[hwFor.ci].cells[hwFor.k].hardware) || (opt.hwSel && opt.hwSel.runner) || "hettich-softclose"} onUse={(id) => setCellHardware(hwFor, id)} onClose={() => setHwFor(null)} />}
         {loftMenu && (<React.Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setLoftMenu(null)} onContextMenu={(e) => { e.preventDefault(); setLoftMenu(null); }} />
           <div style={{ position: "fixed", left: Math.min(loftMenu.x, window.innerWidth - 190), top: Math.min(loftMenu.y, window.innerHeight - 320), zIndex: 50 }} className="bg-white border border-slate-200 rounded-lg shadow-xl text-[11px] py-1">
@@ -15119,6 +15124,7 @@ function wardReports(opt: any): any {
   const add = (part: string, w: number, h: number, qty: number) => { if (qty <= 0) return; cut.push({ part, size: Math.round(w) + " × " + Math.round(h) + " mm", qty }); boardMm2 += w * h * qty; };
   const totalCols = opt.sections.reduce((a: number, s: any) => a + s.columns.length, 0) || 1;
   let shutters = 0, drawerFronts = 0, shelfCount = 0, partitions = 0, hangRods = 0;
+  const drawerHwCount: Record<string, number> = {}, defRunner = (opt.hwSel && opt.hwSel.runner) || "hettich-softclose";
   for (const sec of opt.sections) {
     partitions += Math.max(0, sec.columns.length - 1);
     for (const col of sec.columns) {
@@ -15126,7 +15132,7 @@ function wardReports(opt: any): any {
       for (const cell of col.cells) {
         if (cell.covered) continue;
         if (cell.kind === "shelf" || cell.kind === "handbag" || cell.kind === "shoe" || cell.kind === "kidsShelf") shelfCount++;
-        else if (cell.kind === "drawer" || cell.kind === "jewellery" || cell.kind === "cosmetics") drawerFronts++;
+        else if (cell.kind === "drawer" || cell.kind === "jewellery" || cell.kind === "cosmetics") { drawerFronts++; const hwId = cell.hardware || defRunner; drawerHwCount[hwId] = (drawerHwCount[hwId] || 0) + 1; }
         else if (cell.kind.toLowerCase().indexOf("hang") >= 0 || cell.kind === "saree" || cell.kind === "dress" || cell.kind === "lehenga") hangRods++;
       }
     }
@@ -15141,10 +15147,11 @@ function wardReports(opt: any): any {
   if (loftDividers > 0) add("Loft divider shelf", W / totalCols - 20, opt.loftDepth - 20, loftDividers);
   add("Shutter", W / shutters, H, shutters);
   const backSqft = sqft(W * H), boardSqft = sqft(boardMm2);
-  const hs = opt.hwSel || {}, selHinge = FAB_HINGES.find((h) => h.id === hs.hinge), selRun = FAB_DRAWER_HARDWARE.find((h) => h.id === hs.runner), selHand = FAB_HANDLES.find((h) => h.id === hs.handle);
+  const hs = opt.hwSel || {}, selHinge = FAB_HINGES.find((h) => h.id === hs.hinge), selHand = FAB_HANDLES.find((h) => h.id === hs.handle);
+  const channelLines = Object.entries(drawerHwCount).map(([id, q]) => { const r = FAB_DRAWER_HARDWARE.find((h) => h.id === id); return { item: (r ? r.brand + " " + r.model : "Drawer channel") + " (pairs)", qty: q }; });
   const hardware = [
     { item: selHinge ? selHinge.brand + " " + selHinge.model + " hinges" : "Soft-close hinges (110°)", qty: shutters * 3 },
-    { item: (selRun ? selRun.brand + " " + selRun.model : "Tandem drawer channel") + " (pairs)", qty: drawerFronts },
+    ...channelLines,
     { item: selHand ? selHand.brand + " " + selHand.model : "Handles (profile / long)", qty: shutters + drawerFronts },
     { item: "Hanging rods", qty: hangRods },
     { item: "Safe locker with key", qty: opt.stats.accessories > 0 ? 1 : 0 },
@@ -16377,7 +16384,7 @@ app.post("/api/wardrobe/rerender", async (c) => {
     for (const sec of o.sections) for (const col of (sec.columns || [])) {
       const ub = beam && col.x < beam.pos + beam.width && col.x + col.w > beam.pos;
       const target = Math.max(300, (ub ? beam.soffit : o.height) - o.plinth - (ub ? 0 : o.loftH));
-      let cells = (col.cells || []).filter((cc: any) => cc && +cc.hMM > 0).map((cc: any) => { const oc: any = { kind: String(cc.kind || "shelf"), label: String(cc.label || ""), hMM: Math.max(40, Math.round(+cc.hMM)), color: WARD_COLORS[String(cc.kind)] || "#cbd5e1", locked: !!cc.locked }; if (+cc.span > 1) oc.span = Math.round(+cc.span); if (cc.covered) oc.covered = true; if (cc.mergeId != null) oc.mergeId = String(cc.mergeId); return oc; });
+      let cells = (col.cells || []).filter((cc: any) => cc && +cc.hMM > 0).map((cc: any) => { const oc: any = { kind: String(cc.kind || "shelf"), label: String(cc.label || ""), hMM: Math.max(40, Math.round(+cc.hMM)), color: WARD_COLORS[String(cc.kind)] || "#cbd5e1", locked: !!cc.locked }; if (+cc.span > 1) oc.span = Math.round(+cc.span); if (cc.covered) oc.covered = true; if (cc.mergeId != null) oc.mergeId = String(cc.mergeId); if (cc.hardware) oc.hardware = String(cc.hardware); return oc; });
       if (!cells.length) cells = [{ kind: "shelf", label: "Shelf", hMM: target, color: WARD_COLORS.shelf }];
       const sum = cells.reduce((a: number, cc: any) => a + cc.hMM, 0) || 1, f = target / sum;
       cells.forEach((cc: any) => cc.hMM = Math.round(cc.hMM * f));
