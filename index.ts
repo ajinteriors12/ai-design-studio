@@ -11833,6 +11833,7 @@ const frontendHTML = `<!DOCTYPE html>
       const [dims3d, setDims3d] = useState(false);     // dimension annotations overlay in 3D (W×H×D + per-cell)
       const [items3d, setItems3d] = useState(true);    // show garments / folded stacks / items inside compartments
       const [menu3d, setMenu3d] = useState(null);      // §13.3 3D right-click menu
+      const [hwFor3d, setHwFor3d] = useState(null);    // per-drawer runner change from the 3D menu
       const [photoView, setPhotoView] = useState("");  // AI photoreal still, overlaid over the live 3D
       const [prBusy, setPrBusy] = useState(false);      // photoreal render in-flight
       const modeRef = React.useRef("persp"), explRef = React.useRef(0), secRef = React.useRef(0), shadRef = React.useRef(false), qualRef = React.useRef("med"), lightRef = React.useRef("day"), flyRef = React.useRef(false), exportRef = React.useRef(null), opRef = React.useRef(null);
@@ -12095,6 +12096,7 @@ const frontendHTML = `<!DOCTYPE html>
             let xx = 0; cleaned.forEach((s) => { s.x = xx; s.width = s.columns.reduce((a, c) => a + c.w, 0); let cxx = xx; s.columns.forEach((c) => { c.x = cxx; cxx += c.w; }); xx += s.width; });
             work.length = 0; cleaned.forEach((s) => work.push(s)); selKey = null;
           }
+          else if (kind === "hardware") { cells[k].hardware = arg; }   // per-drawer runner from the 3D gallery
           dirty = true; if (onEdit) onEdit(JSON.parse(JSON.stringify(work)));
         };
         try { window.__adsWard3DInsert = (si, ci, k, mm, a) => { if (opRef.current) opRef.current("insert", a, si, ci, k, mm); }; window.__adsWard3DSecs = () => JSON.parse(JSON.stringify(work)); window.__adsWard3DDims = () => ({ n: dimObjs.length, vis: dimObjs.filter((o) => o.visible).length }); window.__adsWard3DItems = () => ({ n: itemObjs.length, vis: itemObjs.filter((o) => o.visible).length }); } catch (z) {}
@@ -12180,6 +12182,7 @@ const frontendHTML = `<!DOCTYPE html>
             <div className="border-t border-slate-100 my-1" />
             <div className="px-3 py-0.5 text-slate-400">Convert to…</div>
             {WARD_CONVERTS.map((c) => mi3("• " + c.label, () => { if (opRef.current) opRef.current("convert", c.kind, menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); }))}
+            {(() => { const cc = opt.sections[menu3d.si] && opt.sections[menu3d.si].columns[menu3d.ci] && opt.sections[menu3d.si].columns[menu3d.ci].cells[menu3d.k]; return cc && (cc.kind === "drawer" || cc.kind === "laptop") ? mi3("🔩 Change drawer runner…", () => { setHwFor3d({ si: menu3d.si, ci: menu3d.ci, k: menu3d.k }); setMenu3d(null); }) : null; })()}
             <div className="border-t border-slate-100 my-1" />
             <div className="px-3 py-0.5 text-slate-400">Move column to…</div>
             {[["male", "♂ Male"], ["female", "♀ Female"], ["kids", "🧒 Kids"]].map((t) => mi3("→ " + t[1] + " section", () => { if (opRef.current) opRef.current("reassign", t[0], menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); }))}
@@ -12187,6 +12190,7 @@ const frontendHTML = `<!DOCTYPE html>
             {mi3("🔒 Lock / Unlock", () => { if (opRef.current) opRef.current("lock", null, menu3d.si, menu3d.ci, menu3d.k); setMenu3d(null); })}
           </div>
         </React.Fragment>)}
+        {hwFor3d && <HardwareGallery type="drawer" currentId={(opt.sections[hwFor3d.si] && opt.sections[hwFor3d.si].columns[hwFor3d.ci] && opt.sections[hwFor3d.si].columns[hwFor3d.ci].cells[hwFor3d.k] && opt.sections[hwFor3d.si].columns[hwFor3d.ci].cells[hwFor3d.k].hardware) || (opt.hwSel && opt.hwSel.runner) || (input && input.drawerHardware) || "hettich-softclose"} onUse={(id) => { if (opRef.current) opRef.current("hardware", id, hwFor3d.si, hwFor3d.ci, hwFor3d.k); setHwFor3d(null); }} onClose={() => setHwFor3d(null)} />}
       </div>);
     }
 
@@ -12655,6 +12659,7 @@ const frontendHTML = `<!DOCTYPE html>
             if (ch > 12) els.push(<text key={"cl" + selK} x={cx + cw / 2} y={yt + ch / 2 + 2} fill="#334155" fontSize="7" textAnchor="middle" style={{ pointerEvents: "none" }}>{cell.label.length > 12 ? cell.label.slice(0, 11) + "…" : cell.label}</text>);
             if (ch > 22 || isSel) els.push(<text key={"cd" + selK} x={cx + cw / 2} y={yb - 3} fill={isSel ? "#4338ca" : "#94a3b8"} fontSize={isSel ? 7.5 : 5.5} fontWeight={isSel ? 700 : 400} textAnchor="middle" style={{ cursor: "text" }} onDoubleClick={(e) => { e.stopPropagation(); e.preventDefault(); if (cell.locked) { setMmsg("Unlock this compartment before resizing it."); return; } setEditH({ si, ci, k, x: Math.min(e.clientX, window.innerWidth - 96), y: Math.max(4, e.clientY - 12), val: String(cell.hMM) }); }}>{cell.hMM + " mm"}</text>);
             if (cell.locked && ch > 10) els.push(<text key={"lk" + selK} x={cx + cw - 7} y={yt + 9} fontSize="8" textAnchor="middle" style={{ pointerEvents: "none" }}>🔒</text>);
+            if (cell.hardware && ch > 10) els.push(<text key={"rb" + selK} x={cx + 6} y={yt + 9} fontSize="8" style={{ pointerEvents: "none" }}><title>{"Custom runner: " + cell.hardware}</title>🔩</text>);
             if (k < col.cells.length - 1 && !cell.locked && !nxt.locked && !mergeMode && !(cell.span > 1) && !nxt.covered && !(nxt.span > 1)) { els.push(<line key={"hl" + selK} x1={cx + 1} y1={yt} x2={cx + cw - 1} y2={yt} stroke="#0f172a" strokeWidth="1.3" style={{ pointerEvents: "none" }} />); els.push(<rect key={"hh" + selK} x={cx + 1} y={yt - 4} width={cw - 2} height={8} fill="rgba(59,130,246,0.001)" style={{ cursor: "ns-resize" }} onPointerDown={(e) => startCell(e, si, ci, k)} />); }
             yb = yt;
           });
