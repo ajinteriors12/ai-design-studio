@@ -14035,6 +14035,15 @@ const FAB_HANDLES: any[] = [
   { id: "gola-groove", brand: "Hafele", model: "Gola Profile (groove)", type: "Gola / integrated groove", ccMM: [], lengthMM: 0, projection: 0, finishes: ["Silver", "Matt black", "Anthracite"], price: "Premium", availability: "Dealer", use: ["Handleless kitchen", "Wardrobe"] },
   { id: "recess-flush", brand: "Generic", model: "Recessed Flush Pull", type: "Inset flush pull", ccMM: [0], lengthMM: 96, projection: 0, finishes: ["SS", "Matt black"], price: "Economy", availability: "In stock", use: ["Sliding wardrobe", "TV unit"] },
 ];
+// price-tier → ₹ rate so the quote reflects the actual hardware chosen (economy vs premium)
+const FAB_HW_RATE: Record<string, Record<string, number>> = {
+  hinge: { Economy: 35, Standard: 60, Premium: 130 },
+  runner: { Economy: 280, Standard: 480, Premium: 850 },   // per pair
+  handle: { Economy: 55, Standard: 120, Premium: 280 },
+};
+function fabHwRate(kind: string, priceTier: string): number { const t = FAB_HW_RATE[kind] || {}; return t[priceTier] || t.Standard || 0; }
+// hinges per shutter scale with door height (2 short · 3 medium · 4 tall · 5 full-height)
+function wardHingeCount(shutterH: number): number { return shutterH >= 2000 ? 5 : shutterH >= 1500 ? 4 : shutterH >= 900 ? 3 : 2; }
 function fabHardwareById(id: string): any { return FAB_DRAWER_HARDWARE.find((h) => h.id === id) || null; }
 function fabDefaultHardwareFor(dType: string): string { return (FAB_DRAWER_TYPES[dType] && FAB_DRAWER_TYPES[dType].defaultHw) || "hettich-softclose"; }
 function fabDrawerTypeFor(unitType: string): string {
@@ -15150,7 +15159,7 @@ function wardReports(opt: any): any {
   const hs = opt.hwSel || {}, selHinge = FAB_HINGES.find((h) => h.id === hs.hinge), selHand = FAB_HANDLES.find((h) => h.id === hs.handle);
   const channelLines = Object.entries(drawerHwCount).map(([id, q]) => { const r = FAB_DRAWER_HARDWARE.find((h) => h.id === id); return { item: (r ? r.brand + " " + r.model : "Drawer channel") + " (pairs)", qty: q }; });
   const hardware = [
-    { item: selHinge ? selHinge.brand + " " + selHinge.model + " hinges" : "Soft-close hinges (110°)", qty: shutters * 3 },
+    { item: selHinge ? selHinge.brand + " " + selHinge.model + " hinges" : "Soft-close hinges (110°)", qty: shutters * wardHingeCount(opt.usableH || (H - S.plinth)) },
     ...channelLines,
     { item: selHand ? selHand.brand + " " + selHand.model : "Handles (profile / long)", qty: shutters + drawerFronts },
     { item: "Hanging rods", qty: hangRods },
@@ -15233,10 +15242,13 @@ function wardBOQ(opt: any): any {
     if (rem > 0.5) mat += line("Laminate / finish (remaining)", rem, "sq.ft", R.laminate);
   } else mat += line("Laminate / finish", finishArea, "sq.ft", R.laminate);
   let hw = 0;
-  const bhs = opt.hwSel || {}, bHinge = FAB_HINGES.find((h) => h.id === bhs.hinge), bRun = FAB_DRAWER_HARDWARE.find((h) => h.id === bhs.runner), bHand = FAB_HANDLES.find((h) => h.id === bhs.handle);
-  hw += line(bHinge ? bHinge.brand + " " + bHinge.model + " hinges" : "Soft-close hinges (110°)", counts.shutters * 3, "no", R.hinge);
-  if (counts.drawerFronts) hw += line(bRun ? bRun.brand + " " + bRun.model : "Tandem drawer channels", counts.drawerFronts, "pair", R.slide);
-  hw += line(bHand ? bHand.brand + " " + bHand.model : "Handles", counts.shutters + counts.drawerFronts, "no", R.handle);
+  const bhs = opt.hwSel || {}, bHinge = FAB_HINGES.find((h) => h.id === bhs.hinge), bHand = FAB_HANDLES.find((h) => h.id === bhs.handle), defRun = bhs.runner || "hettich-softclose";
+  const drawerHwCount: Record<string, number> = {};
+  for (const s of opt.sections) for (const c of s.columns) for (const cell of (c.cells || [])) { if (cell.covered) continue; if (cell.kind === "drawer" || cell.kind === "jewellery" || cell.kind === "cosmetics") { const id = cell.hardware || defRun; drawerHwCount[id] = (drawerHwCount[id] || 0) + 1; } }
+  const hingesEa = wardHingeCount(opt.usableH || (opt.height - (opt.plinth || 100)));
+  hw += line(bHinge ? bHinge.brand + " " + bHinge.model + " hinges" : "Soft-close hinges (110°)", counts.shutters * hingesEa, "no", fabHwRate("hinge", bHinge ? bHinge.price : "Standard"));
+  for (const [id, q] of Object.entries(drawerHwCount)) { const r = FAB_DRAWER_HARDWARE.find((h) => h.id === id); hw += line(r ? r.brand + " " + r.model : "Drawer channels", q, "pair", fabHwRate("runner", r ? r.price : "Standard")); }
+  hw += line(bHand ? bHand.brand + " " + bHand.model : "Handles", counts.shutters + counts.drawerFronts, "no", fabHwRate("handle", bHand ? bHand.price : "Standard"));
   if (counts.hangRods) hw += line("Hanging rods", counts.hangRods, "no", R.rod);
   if (opt.stats.accessories > 0) hw += line("Safe locker + key", 1, "no", R.lock);
   hw += line("LED sensor strip", 2, "m", R.led);
